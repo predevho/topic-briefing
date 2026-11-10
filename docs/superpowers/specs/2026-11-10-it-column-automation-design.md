@@ -225,7 +225,7 @@ Max 플랜에 월 $100 API 크레딧이 포함되고(claude.ai → Settings → 
 
 **전송 계층 재시도는 SDK에 맡긴다.** anthropic SDK는 429·5xx·연결 오류를 자체적으로 지수 백오프 재시도한다(`max_retries`). 그 위에 자체 재시도를 겹치면 한 번의 논리적 호출이 여러 배로 늘어나 크레딧을 그만큼 쓴다. `lib/llm.py`는 **예외 분류와 "구조화된 출력 스키마 실패 1회 재시도"만** 담당한다.
 
-**Python 버전: 3.12.** 취향이 아니라 제약이다 — anthropic SDK 1.x가 3.10 이상을 요구하고, 개발 머신의 시스템 `python3`인 3.9는 2025-10-31에 수명이 끝났다. Python에는 LTS가 없고 각 버전이 총 5년을 받는다([PEP 602](https://peps.python.org/pep-0602/)).
+**Python 버전: 3.12.** 취향이 아니라 제약이다 — anthropic SDK(검증 시점 2.7.0)가 3.10 이상을 요구하고, 개발 머신의 시스템 `python3`인 3.9는 2025-10-31에 수명이 끝났다. Python에는 LTS가 없고 각 버전이 총 5년을 받는다([PEP 602](https://peps.python.org/pep-0602/)).
 
 ### 5.2 선별 (`rank.py`)
 

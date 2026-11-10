@@ -14,7 +14,7 @@
 
 ## Python 버전과 구문법 대조표
 
-**이 프로젝트는 Python 3.12를 쓴다.** 취향이 아니라 제약이다 — anthropic SDK 1.x가 3.10 이상을 요구하고, 이 맥의 시스템 `python3`인 3.9는 2025-10-31에 수명이 끝났다.
+**이 프로젝트는 Python 3.12를 쓴다.** 취향이 아니라 제약이다 — anthropic SDK(검증 시점 2.7.0)가 3.10 이상을 요구하고, 이 맥의 시스템 `python3`인 3.9는 2025-10-31에 수명이 끝났다.
 
 Python에는 **LTS가 없다.** [PEP 602](https://peps.python.org/pep-0602/)에 따라 매년 10월에 피처 릴리스가 나오고 각 버전은 총 5년(약 2년 전체 지원 + 약 3년 보안 패치만)을 받고 끝난다.
 
@@ -151,7 +151,7 @@ dependencies = [
     "feedparser>=6.0.11",      # RSS/Atom 파싱. 매체별 포맷 차이를 흡수한다
     "trafilatura>=2.0.0",      # HTML에서 본문만 추출 (광고·내비 제거)
     "httpx>=0.28.1",           # HTTP 클라이언트. 타임아웃 지정이 명확하다
-    "anthropic>=1.0.0",        # Claude API 공식 SDK
+    "anthropic>=2.7.0",        # Claude API 공식 SDK (2.x 기준으로 코드를 썼다)
     "supabase>=2.15.0",        # Supabase 클라이언트
     "PyYAML>=6.0.2",           # sources.yaml 읽기
     "pydantic>=2.11.0",        # LLM 구조화된 출력 검증
@@ -225,13 +225,41 @@ pytest
 
 > ⚠️ **`python3`가 아니라 `python3.12`다.** 이 맥의 `python3`는 3.9.6이고,
 > 3.9는 2025-10-31에 수명이 끝났다(보안 패치도 안 온다). 더 중요한 건
-> **anthropic SDK 1.x가 Python 3.10 이상을 요구**한다는 점이다 — 3.9에서는
-> `pip install`부터 실패한다. `python3.12`는 brew로 이미 설치돼 있고
-> PATH에 있다. 확인: `python3.12 --version` → `Python 3.12.16`
+> **anthropic SDK가 Python 3.10 이상을 요구**한다는 점이다 — 3.9에서는
+> `pip install`부터 실패한다.
+>
+> `python3.12`는 brew로 설치돼 있다(`/opt/homebrew/bin/python3.12`, 3.12.16).
+> 확인: `python3.12 --version`
+>
+> **시스템 `python3`를 3.12로 바꾸지 않는다.** brew의 caveats가 안내하는
+> `libexec/bin`을 PATH에 넣으면 `python3`가 가려지는데, 다른 도구가 시스템
+> `python3`를 기대할 수 있다. 이 프로젝트는 `python3.12`로 venv를 한 번
+>만들고 그 뒤에는 `source .venv/bin/activate` 안에서만 작업하므로
+> PATH를 건드릴 이유가 없다.
 
 Expected: `2 passed`
 
 > **설명** — `python -m venv .venv`는 이 프로젝트만의 격리된 패키지 디렉터리를 만든다. `pip install -e ".[dev]"`의 `-e`는 "editable 설치"로, 소스를 고치면 재설치 없이 반영된다. `[dev]`는 위에서 정의한 `optional-dependencies`의 dev 묶음을 함께 설치한다.
+
+### 검증된 버전 (2026-11-10, Python 3.12.16에서 실제 설치 확인)
+
+이 계획의 코드는 아래 버전에서 API 표면을 **실제로 확인하고** 작성했다. 추측이 아니다.
+
+| 패키지 | 설치된 버전 | 확인한 것 |
+|---|---|---|
+| `anthropic` | **2.7.0** | 예외 클래스 9개, `APIConnectionError`가 `APIStatusError`의 **형제**인 것, `Anthropic(max_retries=)`, `beta.messages.parse`의 `betas`·`fallbacks`·`output_config`·`output_format` 인자, `parsed_output`·`stop_reason`·`stop_details`·`usage.input_tokens` |
+| `httpx` | 0.28.1 | 예외 계층, **`InvalidURL`이 `HTTPError`의 하위가 아닌 것**, 테스트에서 `Response(status, request=, history=)` 직접 생성 |
+| `supabase` | 2.34.1 | `create_client`, `table().select().order(desc=).limit().in_().gte().execute()`, `upsert(on_conflict=)` |
+| `pydantic` | 2.14.3 | `frozen`, `extra="forbid"`, `Field(ge/le/max_length)` |
+| `feedparser` | 6.0.14 | |
+| `trafilatura` | 2.3.1 | |
+| `pytest` | 9.2.0 | |
+
+**두 가지 주의할 점이 설치 과정에서 드러났다.**
+
+**1. `httpx`와 `httpx2`가 함께 깔린다.** `anthropic` 2.x가 `httpx2`를 쓰기 때문이다. 설치 로그에 둘 다 보여도 정상이고, 우리 코드의 `import httpx`는 0.28.1을 가리킨다. 섞이지 않는다.
+
+**2. `parsed_output`은 pydantic 필드가 아니라 property다.** `model_fields`에는 없으므로 그걸로 존재를 확인하려 하면 없는 것처럼 보인다. 접근은 평범하게 `response.parsed_output`으로 한다. **구조화된 출력이 붙지 않은 응답에서는 `None`이 나오므로** `lib/llm.py`가 그 경우를 `SchemaError`로 처리한다 — 실제로 일어날 수 있는 경로다.
 
 - [ ] **Step 6: 커밋**
 
