@@ -12,7 +12,56 @@
 
 ---
 
-## 스펙에서 변경된 두 가지
+## Python 버전과 구문법 대조표
+
+**이 프로젝트는 Python 3.12를 쓴다.** 취향이 아니라 제약이다 — anthropic SDK 1.x가 3.10 이상을 요구하고, 이 맥의 시스템 `python3`인 3.9는 2025-10-31에 수명이 끝났다.
+
+Python에는 **LTS가 없다.** [PEP 602](https://peps.python.org/pep-0602/)에 따라 매년 10월에 피처 릴리스가 나오고 각 버전은 총 5년(약 2년 전체 지원 + 약 3년 보안 패치만)을 받고 끝난다.
+
+| 버전 | 상태 (2026-11 기준) |
+|---|---|
+| 3.9 | **수명 종료** (2025-10-31). 시스템 `python3`가 이 버전이다 |
+| 3.10 | **수명 종료** (2026-10-01) |
+| 3.11 | 보안 패치만, 2027-10 종료 |
+| 3.12 | 보안 패치만, 2028-10 종료 ← **이 프로젝트** |
+| 3.13 / 3.14 | 신규 프로젝트 권장 |
+
+### 구문법 대조
+
+레거시 코드베이스에는 아래 왼쪽 형태가 가득하다. **읽을 수 있어야 한다.** 다만 이 프로젝트에서는 오른쪽으로 쓴다.
+
+| 구형 (`typing` 별칭) | 현행 | 언제부터 |
+|---|---|---|
+| `Optional[str]` | `str \| None` | 3.10 |
+| `Union[int, str]` | `int \| str` | 3.10 |
+| `List[str]` | `list[str]` | 3.9 |
+| `Dict[str, int]` | `dict[str, int]` | 3.9 |
+| `Set[int]` | `set[int]` | 3.9 |
+| `Tuple[int, str]` | `tuple[int, str]` | 3.9 |
+| `Type[Foo]` | `type[Foo]` | 3.9 |
+| `Callable[[str], int]` | 그대로 (`typing`에서 가져온다) | — |
+| `Literal["a", "b"]` | 그대로 | — |
+
+대문자 별칭은 **없어지지 않았고 지금도 동작한다.** 다만 신규 코드에서는 쓰지 않는 쪽이 표준이 됐다.
+
+### `from __future__ import annotations` — 레거시 지원의 실제 기법
+
+구형 Python을 지원해야 하는 **라이브러리**는 `Optional[str]`을 손으로 쓰는 대신 이걸 쓴다.
+
+```python
+from __future__ import annotations   # 파일의 첫 import여야 한다
+
+def f(x: str | None) -> list[int]:   # 3.9에서도 문법 오류가 안 난다
+    ...
+```
+
+어노테이션을 **문자열로 미뤄 평가**하기 때문에, 그 자리에 3.10 문법을 적어도 인터프리터가 읽지 않는다. 다만 공짜는 아니다 — **런타임에 어노테이션을 실제로 읽는 라이브러리**(pydantic이 대표적이다. 타입을 보고 검증기를 만든다)와는 미묘하게 어긋날 수 있어서, 그런 경우엔 해석 가능한 이름이 모듈에 실제로 있어야 한다.
+
+이 프로젝트는 3.12를 쓰고 pydantic에 크게 의존하므로 **이 기법을 쓰지 않는다.** 알아두는 것이 목적이다.
+
+---
+
+## 스펙에서 변경된 세 가지
 
 구현하다 막히는 문제라 계획 단계에서 고친다.
 
@@ -32,6 +81,20 @@
 
 → 본문을 `article_bodies` 테이블로 분리하고 **anon에게 그 테이블 권한을 아예 주지 않는다.** 테이블 단위 권한이라 검증이 `anon으로 조회해보기` 한 번으로 끝난다. Phase 3의 임베딩도 같은 테이블에 들어가므로 구조가 맞다.
 
+**3. 에러를 Transient / Permanent로 분류 (`lib/retry.py`, `lib/http.py` 신설)**
+
+스펙 8.1의 실패 정책은 "소스 하나 실패 → 기록하고 계속" 수준이다. 그대로 구현하면 서로 다른 실패가 한 덩어리가 된다.
+
+- 피드가 **404**(주소가 죽음)인 것과 **503**(일시 장애)인 것이 같은 문자열로 기록된다. 전자는 `sources.yaml`을 고쳐야 하고 후자는 기다리면 되는데 로그만 보고는 구분이 안 된다.
+- **403**(봇 차단, 영구)에도 재시도를 걸면 10건이면 수십 초를 버린다.
+- **429**의 `Retry-After` 헤더를 무시하고 더 빨리 때리면 더 오래 막힌다.
+- 슬랙 **404**(웹훅 삭제)와 **429**(레이트 리밋)가 같은 예외로 올라오면, 전자는 재시도가 무의미한데 재시도한다.
+- **Anthropic SDK는 429·5xx·연결 오류를 이미 자체 재시도한다**(기본 `max_retries=2`). 그 위에 또 재시도를 걸면 최악의 경우 한 번의 논리적 호출이 6번이 된다.
+
+→ `Transient`(기다리면 됨) / `Permanent`(설정을 고쳐야 함) 두 갈래로만 나누고, 분류 규칙을 `lib/http.py` 한곳에 둔다. 갈래를 상태 코드만큼 늘리면 호출부마다 분기가 생기고 결국 아무도 유지하지 않는다.
+
+파급은 모델 두 필드다 — `SourceError.kind`(계획 3의 소스 경고가 "죽은 소스"와 "불안정한 소스"를 구분하게 된다)와 `Article.fallback_reason`(슬랙 경고가 "2건 발췌" 대신 "403 봇 차단 2건"이 된다).
+
 ---
 
 ## 파일 구조
@@ -46,6 +109,8 @@
 | `pipeline/models.py` | 단계 간 데이터 계약 (dataclass + pydantic) |
 | `pipeline/lib/urls.py` | URL 정규화 (중복 제거의 기반) |
 | `pipeline/lib/timeutil.py` | 시각 정규화, 수집 윈도우 계산 |
+| `pipeline/lib/retry.py` | 재시도 분류 (Transient/Permanent) + 지수 백오프 |
+| `pipeline/lib/http.py` | HTTP 수집과 상태 코드 분류 |
 | `pipeline/lib/secrets.py` | 환경변수 접근 단일 통로 |
 | `pipeline/lib/store.py` | `LocalStore`(JSON 파일) + `RemoteStore`(Supabase) |
 | `pipeline/lib/llm.py` | Claude API 래퍼 (주입 가능 → 테스트에서 교체) |
@@ -152,11 +217,17 @@ def test_pipeline_패키지를_import할_수_있다():
 - [ ] **Step 5: 가상환경 생성 후 설치, 테스트 실행**
 
 ```bash
-python3 -m venv .venv
+python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
 pytest
 ```
+
+> ⚠️ **`python3`가 아니라 `python3.12`다.** 이 맥의 `python3`는 3.9.6이고,
+> 3.9는 2025-10-31에 수명이 끝났다(보안 패치도 안 온다). 더 중요한 건
+> **anthropic SDK 1.x가 Python 3.10 이상을 요구**한다는 점이다 — 3.9에서는
+> `pip install`부터 실패한다. `python3.12`는 brew로 이미 설치돼 있고
+> PATH에 있다. 확인: `python3.12 --version` → `Python 3.12.16`
 
 Expected: `2 passed`
 
@@ -518,7 +589,607 @@ git commit -m "feat: 시각 정규화와 수집 윈도우 계산 (마지막 발�
 
 ---
 
-## Task 4: 데이터 계약
+## Task 4: 재시도 분류
+
+HTTP든 LLM이든, 호출자가 알아야 하는 것은 상태 코드가 아니라 **"다시 하면 되나, 설정을 고쳐야 하나"** 둘 중 하나다. 갈래를 둘로만 묶으면 호출부마다 분기가 늘어나지 않는다.
+
+**Files:**
+- Create: `pipeline/lib/retry.py`
+- Create: `tests/test_retry.py`
+
+- [ ] **Step 1: 실패하는 테스트 작성**
+
+`tests/test_retry.py`:
+
+```python
+import pytest
+
+from pipeline.lib.retry import (
+    MAX_DELAY,
+    Permanent,
+    Transient,
+    backoff_delay,
+    with_retry,
+)
+
+
+def test_한_번에_성공하면_한_번만_호출한다():
+    calls = []
+
+    def ok():
+        calls.append(1)
+        return "결과"
+
+    assert with_retry(ok, sleep=lambda _: None) == "결과"
+    assert len(calls) == 1
+
+
+def test_일시적_실패는_재시도한다():
+    calls = []
+
+    def flaky():
+        calls.append(1)
+        if len(calls) < 3:
+            raise Transient("일시 장애")
+        return "결과"
+
+    assert with_retry(flaky, attempts=3, sleep=lambda _: None) == "결과"
+    assert len(calls) == 3
+
+
+def test_재시도를_다_쓰면_마지막_예외를_올린다():
+    with pytest.raises(Transient, match="계속 실패"):
+        with_retry(lambda: (_ for _ in ()).throw(Transient("계속 실패")),
+                   attempts=3, sleep=lambda _: None)
+
+
+def test_영구_실패는_재시도하지_않는다():
+    """설정 문제에 재시도를 걸면 시간과 비용만 쓴다."""
+    calls = []
+
+    def broken():
+        calls.append(1)
+        raise Permanent("404 주소가 없다")
+
+    with pytest.raises(Permanent):
+        with_retry(broken, attempts=5, sleep=lambda _: None)
+    assert len(calls) == 1
+
+
+def test_분류되지_않은_예외는_삼키지_않는다():
+    """ZeroDivisionError 같은 코드 버그를 재시도로 가리면 안 된다."""
+    with pytest.raises(ZeroDivisionError):
+        with_retry(lambda: 1 / 0, sleep=lambda _: None)
+
+
+def test_지수_백오프로_간격이_늘어난다():
+    delays = []
+
+    def always_transient():
+        raise Transient("장애")
+
+    with pytest.raises(Transient):
+        with_retry(always_transient, attempts=4, sleep=delays.append, base_delay=1.0)
+
+    # 마지막 시도 뒤에는 쉬지 않으므로 3번
+    assert delays == [1.0, 2.0, 4.0]
+
+
+def test_retry_after가_있으면_백오프보다_그것을_따른다():
+    """429의 Retry-After 헤더를 무시하고 더 빨리 때리면 더 오래 막힌다."""
+    delays = []
+
+    def rate_limited():
+        raise Transient("429", retry_after=7.0)
+
+    with pytest.raises(Transient):
+        with_retry(rate_limited, attempts=2, sleep=delays.append)
+
+    assert delays == [7.0]
+
+
+def test_간격에_상한이_있다():
+    delays = []
+
+    def slow():
+        raise Transient("장애", retry_after=99999.0)
+
+    with pytest.raises(Transient):
+        with_retry(slow, attempts=2, sleep=delays.append)
+
+    assert delays == [MAX_DELAY]
+
+
+def test_백오프_계산이_상한을_넘지_않는다():
+    assert backoff_delay(0, base_delay=1.0) == 1.0
+    assert backoff_delay(1, base_delay=1.0) == 2.0
+    assert backoff_delay(2, base_delay=1.0) == 4.0
+    assert backoff_delay(20, base_delay=1.0) == MAX_DELAY
+
+
+def test_Transient의_retry_after는_없을_수도_있다():
+    assert Transient("장애").retry_after is None
+```
+
+- [ ] **Step 2: 실패를 확인**
+
+```bash
+pytest tests/test_retry.py
+```
+
+Expected: FAIL — `ModuleNotFoundError: No module named 'pipeline.lib.retry'`
+
+- [ ] **Step 3: 최소 구현 작성**
+
+`pipeline/lib/retry.py`:
+
+```python
+"""재시도 분류.
+
+이 모듈의 요점은 예외를 두 갈래로만 나누는 것이다.
+
+- Transient: 기다리면 된다. 429, 408, 5xx, 타임아웃, 연결 실패.
+- Permanent: 설정을 고쳐야 한다. 401, 403, 404, 410, 주소 오타.
+
+상태 코드별로 갈래를 늘리면 호출부마다 분기가 늘어나고, 결국 아무도
+그 분기를 유지하지 않는다. "호출자가 뭘 해야 하는가"가 유일한 기준이다.
+"""
+
+import time
+from typing import Callable, TypeVar
+
+T = TypeVar("T")
+
+DEFAULT_ATTEMPTS = 3
+DEFAULT_BASE_DELAY = 1.0
+
+# 한 번에 기다릴 수 있는 최대 시간. 서버가 Retry-After로 몇 시간을
+# 요구해도 파이프라인이 그만큼 멈춰 있을 수는 없다.
+MAX_DELAY = 30.0
+
+
+class Transient(RuntimeError):
+    """잠시 후 다시 하면 되는 실패.
+
+    retry_after가 있으면(429의 Retry-After 헤더 등) 백오프 대신 그 값을 따른다.
+    """
+
+    def __init__(self, message: str, *, retry_after: float | None = None) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+class Permanent(RuntimeError):
+    """설정을 고쳐야 하는 실패. 재시도는 시간과 비용만 쓴다."""
+
+
+def backoff_delay(attempt: int, *, base_delay: float = DEFAULT_BASE_DELAY) -> float:
+    """지수 백오프 간격. attempt는 0부터 센다."""
+    return min(MAX_DELAY, base_delay * (2**attempt))
+
+
+def with_retry(
+    call: Callable[[], T],
+    *,
+    attempts: int = DEFAULT_ATTEMPTS,
+    sleep: Callable[[float], None] = time.sleep,
+    base_delay: float = DEFAULT_BASE_DELAY,
+) -> T:
+    """Transient만 재시도한다.
+
+    Permanent는 즉시 올린다. 분류되지 않은 예외도 즉시 올린다 —
+    코드 버그(TypeError 등)를 재시도로 가리면 원인을 못 찾는다.
+    """
+    last: Transient | None = None
+
+    for attempt in range(attempts):
+        try:
+            return call()
+        except Permanent:
+            # 잡아서 아무것도 하지 않고 그대로 올린다. 아래 except Transient에
+            # 걸리지 않게 하려는 것이 아니라(둘은 형제다), 의도를 명시하기 위함이다.
+            raise
+        except Transient as error:
+            last = error
+            if attempt == attempts - 1:
+                break   # 마지막 시도였다. 쉬지 않고 바로 빠져나간다.
+            delay = (
+                error.retry_after
+                if error.retry_after is not None
+                else backoff_delay(attempt, base_delay=base_delay)
+            )
+            sleep(min(delay, MAX_DELAY))
+
+    assert last is not None   # attempts >= 1이면 반드시 설정된다
+    raise last
+```
+
+> **설명** — `2**attempt`는 2의 거듭제곱이다(`**`가 Python의 거듭제곱 연산자). `TypeVar("T")`와 `Callable[[], T]`를 쓰면 "넘긴 함수가 돌려주는 타입이 그대로 반환형이 된다"를 타입 검사기가 안다. 예외 클래스를 `RuntimeError`에서 상속한 이유는, 아무것도 안 잡는 코드에서도 표준 예외처럼 보이게 하려는 것이다.
+>
+> **구문법 대조** — `float | None`은 Python 3.10부터 쓸 수 있다. 그 전에는 `typing.Optional[float]`로 썼고, 레거시 코드베이스에서는 여전히 흔하다. 둘은 **같은 뜻**이다. 파일 맨 위에 `from __future__ import annotations`를 넣으면 3.9에서도 `float | None`이라고 **쓸 수는** 있는데, 이건 어노테이션을 문자열로 미뤄 평가하는 기법이라 런타임에 타입을 읽는 라이브러리(pydantic 등)와 미묘하게 어긋날 수 있다. 이 프로젝트는 3.12를 쓰므로 그 기법이 필요 없다.
+
+- [ ] **Step 4: 통과를 확인**
+
+```bash
+pytest tests/test_retry.py
+```
+
+Expected: `10 passed`
+
+- [ ] **Step 5: 커밋**
+
+```bash
+git add pipeline/lib/retry.py tests/test_retry.py
+git commit -m "feat: 재시도 분류 — Transient/Permanent 2갈래, 지수 백오프, Retry-After 존중"
+```
+
+---
+
+## Task 5: HTTP 수집과 상태 분류
+
+**Files:**
+- Create: `pipeline/lib/http.py`
+- Create: `tests/test_http.py`
+
+- [ ] **Step 1: 실패하는 테스트 작성**
+
+`tests/test_http.py`:
+
+```python
+import httpx
+import pytest
+
+from pipeline.lib.http import (
+    FetchResult,
+    classify_status,
+    fetch,
+    parse_retry_after,
+)
+from pipeline.lib.retry import Permanent, Transient
+
+URL = "https://example.com/rss"
+
+
+def _response(status: int, **kwargs) -> httpx.Response:
+    """테스트용 응답. httpx.Response를 직접 만들 수 있다."""
+    kwargs.setdefault("request", httpx.Request("GET", URL))
+    return httpx.Response(status, **kwargs)
+
+
+# --- Retry-After 파싱 ---
+
+def test_초_단위_숫자를_읽는다():
+    assert parse_retry_after("7") == 7.0
+
+
+def test_공백이_섞여도_읽는다():
+    assert parse_retry_after("  7  ") == 7.0
+
+
+def test_없으면_None이다():
+    assert parse_retry_after(None) is None
+    assert parse_retry_after("") is None
+
+
+def test_HTTP_날짜_형식은_None으로_둔다():
+    """드문 형식이다. 지수 백오프로 대체된다."""
+    assert parse_retry_after("Wed, 21 Oct 2026 07:28:00 GMT") is None
+
+
+def test_음수는_0으로_만든다():
+    assert parse_retry_after("-5") == 0.0
+
+
+# --- 상태 코드 분류 ---
+
+def test_2xx는_통과한다():
+    assert classify_status(200, url=URL) is None
+    assert classify_status(204, url=URL) is None
+
+
+def test_429는_일시적이고_retry_after를_전달한다():
+    with pytest.raises(Transient) as caught:
+        classify_status(429, url=URL, retry_after=7.0)
+    assert caught.value.retry_after == 7.0
+
+
+def test_408과_5xx는_일시적이다():
+    for status in (408, 425, 500, 502, 503, 504):
+        with pytest.raises(Transient):
+            classify_status(status, url=URL)
+
+
+def test_501과_505는_영구적이다():
+    """서버가 지원하지 않는 것이다. 기다려도 생기지 않는다."""
+    for status in (501, 505):
+        with pytest.raises(Permanent):
+            classify_status(status, url=URL)
+
+
+def test_403은_영구적이다():
+    """봇 차단. 100번 해도 같다. 이 구분이 enrich에서 중요하다."""
+    with pytest.raises(Permanent, match="403"):
+        classify_status(403, url=URL)
+
+
+def test_401_404_410도_영구적이다():
+    for status in (400, 401, 404, 410, 451):
+        with pytest.raises(Permanent):
+            classify_status(status, url=URL)
+
+
+def test_에러_메시지에_URL이_들어간다():
+    """로그만 보고 어느 소스인지 알아야 한다."""
+    with pytest.raises(Permanent, match="example.com"):
+        classify_status(404, url=URL)
+
+
+def test_상세_설명을_덧붙일_수_있다():
+    """슬랙은 본문에 channel_not_found 같은 이유를 담는다."""
+    with pytest.raises(Permanent, match="channel_not_found"):
+        classify_status(404, url=URL, detail="channel_not_found")
+
+
+# --- 수집 ---
+
+def test_성공하면_본문과_최종_주소를_돌려준다():
+    result = fetch(URL, get=lambda *a, **k: _response(200, content=b"<rss/>"))
+
+    assert isinstance(result, FetchResult)
+    assert result.content == b"<rss/>"
+    assert result.final_url == URL
+    assert result.moved_from is None
+
+
+def test_영구_리다이렉트를_거치면_원래_주소를_기록한다():
+    """자동으로 따라가지만 sources.yaml을 고치라고 알려줘야 한다."""
+    old = httpx.Request("GET", "https://old.example.com/rss")
+    hop = httpx.Response(301, request=old,
+                         headers={"location": URL})
+    final = _response(200, content=b"<rss/>", history=[hop])
+
+    result = fetch(URL, get=lambda *a, **k: final)
+
+    assert result.moved_from == "https://old.example.com/rss"
+
+
+def test_일시_리다이렉트는_기록하지_않는다():
+    """302는 임시 이전이다. 설정을 고칠 일이 아니다."""
+    old = httpx.Request("GET", "https://old.example.com/rss")
+    hop = httpx.Response(302, request=old, headers={"location": URL})
+    final = _response(200, content=b"<rss/>", history=[hop])
+
+    assert fetch(URL, get=lambda *a, **k: final).moved_from is None
+
+
+def test_429의_Retry_After를_예외에_담는다():
+    def get(*a, **k):
+        return _response(429, headers={"Retry-After": "12"})
+
+    with pytest.raises(Transient) as caught:
+        fetch(URL, get=get)
+    assert caught.value.retry_after == 12.0
+
+
+def test_타임아웃은_일시적이다():
+    def get(*a, **k):
+        raise httpx.ReadTimeout("시간 초과")
+
+    with pytest.raises(Transient, match="시간|Timeout|timeout"):
+        fetch(URL, get=get)
+
+
+def test_연결_실패는_일시적이다():
+    def get(*a, **k):
+        raise httpx.ConnectError("연결 거부")
+
+    with pytest.raises(Transient):
+        fetch(URL, get=get)
+
+
+def test_지원하지_않는_스킴은_영구적이다():
+    """sources.yaml에 주소를 잘못 적은 경우다."""
+    def get(*a, **k):
+        raise httpx.UnsupportedProtocol("스킴 오류")
+
+    with pytest.raises(Permanent):
+        fetch(URL, get=get)
+
+
+def test_리다이렉트_루프는_영구적이다():
+    def get(*a, **k):
+        raise httpx.TooManyRedirects("루프")
+
+    with pytest.raises(Permanent):
+        fetch(URL, get=get)
+
+
+def test_InvalidURL도_영구적이다():
+    """함정: httpx.InvalidURL은 httpx.HTTPError의 하위가 아니다.
+    except httpx.HTTPError로는 잡히지 않으므로 따로 잡아야 한다."""
+    assert not issubclass(httpx.InvalidURL, httpx.HTTPError)
+
+    def get(*a, **k):
+        raise httpx.InvalidURL("주소 형식 오류")
+
+    with pytest.raises(Permanent):
+        fetch(URL, get=get)
+```
+
+- [ ] **Step 2: 실패를 확인**
+
+```bash
+pytest tests/test_http.py
+```
+
+Expected: FAIL — `ModuleNotFoundError: No module named 'pipeline.lib.http'`
+
+- [ ] **Step 3: 최소 구현 작성**
+
+`pipeline/lib/http.py`:
+
+```python
+"""HTTP 수집과 상태 코드 분류.
+
+수집(collect)·본문 확보(enrich)·슬랙 전송이 모두 이 모듈을 거친다.
+분류 규칙이 한곳에만 있어야 "403을 어디선 재시도하고 어디선 안 하는" 일이
+생기지 않는다.
+"""
+
+from dataclasses import dataclass
+from typing import Callable
+
+import httpx
+
+from pipeline.lib.retry import Permanent, Transient
+
+DEFAULT_TIMEOUT = 20.0
+USER_AGENT = "briefing-bot/0.1"
+
+# 기다리면 되는 4xx. 429는 레이트 리밋, 408은 요청 타임아웃,
+# 425는 "너무 이르다(Too Early)".
+TRANSIENT_CLIENT_STATUSES = frozenset({408, 425, 429})
+
+# 5xx 중에서도 이 둘은 영구적이다 — 서버가 그 기능을 지원하지 않는다.
+PERMANENT_SERVER_STATUSES = frozenset({501, 505})
+
+# 영구 이전. 자동으로 따라가되 설정을 고치라고 알려야 한다.
+# 302/303/307은 임시 이전이므로 기록하지 않는다.
+PERMANENT_REDIRECTS = frozenset({301, 308})
+
+
+@dataclass(frozen=True)
+class FetchResult:
+    content: bytes
+    final_url: str
+    # 301/308을 거쳤으면 원래 주소. sources.yaml 갱신 신호다.
+    moved_from: str | None = None
+
+
+def parse_retry_after(value: str | None) -> float | None:
+    """Retry-After 헤더를 초로 바꾼다.
+
+    초 단위 숫자만 지원한다. HTTP-date 형식("Wed, 21 Oct ...")은 드물고,
+    None을 돌려주면 호출자가 지수 백오프로 대체하므로 문제가 없다.
+    """
+    if not value:
+        return None
+    try:
+        seconds = float(value.strip())
+    except ValueError:
+        return None
+    return max(0.0, seconds)
+
+
+def classify_status(
+    status: int,
+    *,
+    url: str,
+    retry_after: float | None = None,
+    detail: str = "",
+) -> None:
+    """2xx가 아니면 Transient 또는 Permanent로 분류해 던진다."""
+    if 200 <= status < 300:
+        return
+
+    # 메시지에 URL을 넣는다. 로그만 보고 어느 소스인지 알아야 한다.
+    suffix = f" — {detail}" if detail else ""
+    message = f"{url} HTTP {status}{suffix}"
+
+    if status in TRANSIENT_CLIENT_STATUSES:
+        raise Transient(message, retry_after=retry_after)
+    if status in PERMANENT_SERVER_STATUSES:
+        raise Permanent(message)
+    if 500 <= status < 600:
+        raise Transient(message, retry_after=retry_after)
+
+    # 나머지 4xx(400/401/403/404/410/451 등)는 전부 영구적이다.
+    # 403은 봇 차단이라 재시도해도 같고, 404는 주소를 고쳐야 한다.
+    raise Permanent(message)
+
+
+GetFn = Callable[..., httpx.Response]
+
+
+def _httpx_get(url: str, timeout: float, user_agent: str) -> httpx.Response:
+    return httpx.get(
+        url,
+        timeout=timeout,
+        follow_redirects=True,
+        headers={"User-Agent": user_agent},
+    )
+
+
+def fetch(
+    url: str,
+    *,
+    timeout: float = DEFAULT_TIMEOUT,
+    user_agent: str = USER_AGENT,
+    get: GetFn | None = None,
+) -> FetchResult:
+    """URL을 가져온다. 실패는 Transient/Permanent로 분류해 던진다."""
+    getter = get or _httpx_get
+
+    try:
+        response = getter(url, timeout, user_agent)
+    # --- 가장 구체적인 영구 실패부터 ---
+    # httpx.InvalidURL은 httpx.HTTPError의 하위가 아니다. 따로 잡지 않으면
+    # 주소 오타가 분류되지 않은 예외로 새어 나간다.
+    except httpx.InvalidURL as error:
+        raise Permanent(f"{url} 주소 형식 오류: {error}") from error
+    except httpx.UnsupportedProtocol as error:
+        raise Permanent(f"{url} 지원하지 않는 스킴: {error}") from error
+    except httpx.TooManyRedirects as error:
+        raise Permanent(f"{url} 리다이렉트 루프: {error}") from error
+    # --- 일시적 전송 실패 ---
+    except httpx.TimeoutException as error:
+        raise Transient(f"{url} 시간 초과: {error}") from error
+    except httpx.RequestError as error:
+        # NetworkError(ConnectError/ReadError), ProtocolError 등.
+        raise Transient(f"{url} 전송 실패: {type(error).__name__}: {error}") from error
+
+    # 301/308을 거쳤으면 원래 주소를 기록한다.
+    moved_from: str | None = None
+    for hop in response.history:
+        if hop.status_code in PERMANENT_REDIRECTS:
+            moved_from = str(hop.url)
+            break
+
+    classify_status(
+        response.status_code,
+        url=url,
+        retry_after=parse_retry_after(response.headers.get("retry-after")),
+    )
+
+    return FetchResult(
+        content=response.content,
+        final_url=str(response.url),
+        moved_from=moved_from,
+    )
+```
+
+> **설명** — `except` 절은 **구체적인 것부터** 쓴다. `UnsupportedProtocol`과 `TooManyRedirects`는 둘 다 `RequestError`의 하위라서, `except httpx.RequestError`를 먼저 쓰면 그 둘이 거기서 잡혀 Transient로 잘못 분류된다. `@dataclass(frozen=True)`는 생성 후 변경 불가한 데이터 묶음을 만든다(여기서는 pydantic이 필요 없어서 표준 라이브러리를 썼다 — 검증할 게 없고 LLM 출력도 아니다). `raise ... from error`는 원래 예외를 체인으로 보존해 트레이스백에 둘 다 남는다.
+>
+> **구문법 대조** — `frozenset({...})`은 변경 불가능한 집합이고, `in` 검사가 리스트보다 빠르다. 구형 코드에서는 `Dict[str, int]`, `List[str]`, `Set[int]`처럼 `typing` 모듈의 대문자 별칭을 썼다. Python 3.9부터 `dict[str, int]`, `list[str]`, `set[int]`처럼 **내장 타입을 그대로** 쓸 수 있고, 대문자 별칭은 유지만 되는 상태다. 레거시 코드를 읽을 때는 `List[str]`과 `list[str]`이 같은 뜻이라고 보면 된다.
+
+- [ ] **Step 4: 통과를 확인**
+
+```bash
+pytest tests/test_http.py
+```
+
+Expected: `21 passed`
+
+- [ ] **Step 5: 커밋**
+
+```bash
+git add pipeline/lib/http.py tests/test_http.py
+git commit -m "feat: HTTP 수집과 상태 분류 (403/404 영구, 429/5xx 일시, InvalidURL 함정 처리)"
+```
+
+---
+
+## Task 6: 데이터 계약
 
 단계 간 JSON이 암묵적 인터페이스가 되는 것을 막는다.
 
@@ -546,6 +1217,7 @@ from pipeline.models import (
     RawItem,
     ScoreItem,
     ScoreSheet,
+    SourceError,
     Summary,
 )
 
@@ -635,6 +1307,42 @@ def test_번들이_중첩_JSON_왕복을_견딘다():
     assert restored.items[0].title == "결제 서버 P99 40ms 달성기"
 
 
+def test_SourceError는_실패_성격을_요구한다():
+    """kind가 없으면 404와 503이 같은 기록이 된다."""
+    with pytest.raises(ValidationError):
+        SourceError(source="s", message="m")
+
+
+def test_SourceError의_kind는_정해진_값만_받는다():
+    with pytest.raises(ValidationError):
+        SourceError(source="s", kind="아무거나", message="m")
+
+
+def test_폴백_이유는_없어도_된다():
+    article = Article(ranked=_ranked(), body="본문", body_source="trafilatura")
+    assert article.fallback_reason is None
+
+
+def test_폴백_이유를_담을_수_있다():
+    article = Article(
+        ranked=_ranked(), body="발췌", body_source="rss_excerpt",
+        fallback_reason="HTTP 403 — 봇 차단",
+    )
+    assert article.fallback_reason == "HTTP 403 — 봇 차단"
+
+
+def test_에러가_담긴_번들도_왕복한다():
+    bundle = RawBundle(
+        window_start="2026-11-09T22:20:00+00:00",
+        window_end="2026-11-10T22:20:00+00:00",
+        items=[],
+        source_counts={"깨진소스": 0},
+        errors=[SourceError(source="깨진소스", kind="config", message="HTTP 404")],
+    )
+    restored = RawBundle.model_validate(bundle.model_dump())
+    assert restored.errors[0].kind == "config"
+
+
 def test_ScoreSheet가_LLM_출력_모양을_담는다():
     sheet = ScoreSheet(scores=[ScoreItem(index=0, score=80, reason="r", topic="AI")])
     assert sheet.scores[0].index == 0
@@ -717,8 +1425,17 @@ class RawItem(Contract):
     excerpt: str
 
 
+# 수집 실패의 성격. 계획 3의 소스 침묵 경고가 "주소가 죽은 소스"와
+# "일시적으로 불안정한 소스"를 구분하는 근거가 된다.
+#   config    — 설정을 고쳐야 한다 (404/403/주소 오타)
+#   transient — 기다리면 된다 (429/5xx/타임아웃). 재시도 후에도 실패한 경우
+#   moved     — 301/308로 이전됐다. 실패는 아니지만 sources.yaml을 고쳐야 한다
+ErrorKind = Literal["config", "transient", "moved"]
+
+
 class SourceError(Contract):
     source: str
+    kind: ErrorKind
     message: str
 
 
@@ -767,6 +1484,9 @@ class Article(Contract):
     ranked: RankedItem
     body: str
     body_source: BodySource
+    # 폴백이 일어난 이유. 슬랙 경고를 "2건 발췌"가 아니라
+    # "403 봇 차단 2건"으로 쓸 수 있게 한다. 폴백이 없으면 None.
+    fallback_reason: str | None = None
 
 
 class ArticlesBundle(Contract):
@@ -814,7 +1534,7 @@ class Briefing(Contract):
 pytest tests/test_models.py
 ```
 
-Expected: `11 passed`
+Expected: `16 passed`
 
 - [ ] **Step 5: sanity 테스트 삭제 후 전체 실행**
 
@@ -823,7 +1543,7 @@ rm tests/test_sanity.py
 pytest
 ```
 
-Expected: `31 passed` (urls 8 + timeutil 12 + models 11)
+Expected: 전부 통과, 실패 0. (태스크를 진행하며 개수가 늘어나므로 숫자가 아니라 **실패가 0인지**를 본다)
 
 - [ ] **Step 6: 커밋**
 
@@ -835,7 +1555,7 @@ git commit -m "feat: 단계 간 데이터 계약 (pydantic, 불변, 미정의 �
 
 ---
 
-## Task 5: 환경변수 접근
+## Task 7: 환경변수 접근
 
 **Files:**
 - Create: `pipeline/lib/secrets.py`
@@ -948,7 +1668,7 @@ git commit -m "feat: 환경변수 접근 단일 통로 (없으면 즉시 실패)
 
 ---
 
-## Task 6: 로컬 저장소 (중간 산출물)
+## Task 8: 로컬 저장소 (중간 산출물)
 
 **Files:**
 - Create: `pipeline/lib/store.py`
@@ -1032,7 +1752,7 @@ Expected: FAIL — `ImportError: cannot import name 'LocalStore'`
 """저장소.
 
 - LocalStore: 단계 간 중간 산출물 (날짜별 JSON 파일)
-- RemoteStore: 실행 이력·발행 이력·본문 (Supabase) — Task 8에서 추가
+- RemoteStore: 실행 이력·발행 이력·본문 (Supabase) — Task 10에서 추가
 """
 
 import json
@@ -1099,7 +1819,7 @@ git commit -m "feat: 로컬 저장소 — 날짜별 중간 산출물 JSON 읽기
 
 ---
 
-## Task 7: Supabase 스키마
+## Task 9: Supabase 스키마
 
 SQL이므로 단위 테스트가 아니라 **실제 적용 후 권한 검증**으로 확인한다.
 
@@ -1356,7 +2076,7 @@ git commit -m "feat: Supabase 스키마 — 본문 테이블 분리로 anon 차�
 
 ---
 
-## Task 8: Supabase 저장소
+## Task 10: Supabase 저장소
 
 파이프라인 단계들이 DB를 직접 알지 않도록 인터페이스를 둔다. 테스트는 가짜 구현을 넘긴다.
 
@@ -1726,7 +2446,7 @@ git commit -m "feat: Supabase 저장소 + 테스트용 가짜 구현"
 
 ---
 
-## Task 9: 소스 목록과 관심사 프로필
+## Task 11: 소스 목록과 관심사 프로필
 
 **이 태스크는 사용자 입력이 필요하다.** 파이프라인 품질을 가장 크게 좌우하는 두 파일이고, 다음 태스크의 시드 수집이 되돌릴 수 없으므로 여기서 확정한다.
 
@@ -1846,15 +2566,16 @@ import sys
 from pathlib import Path
 
 import feedparser
-import httpx
 import yaml
 
-TIMEOUT = 15.0
+from pipeline.lib.http import fetch
+from pipeline.lib.retry import Permanent, Transient
 
 
 def main() -> int:
     config = yaml.safe_load(Path("config/sources.yaml").read_text(encoding="utf-8"))
-    dead: list[str] = []
+    must_fix: list[str] = []    # 설정을 고쳐야 하는 소스
+    flaky: list[str] = []       # 일시 문제일 수 있는 소스
 
     for source in config["sources"]:
         if not source.get("enabled", True):
@@ -1862,46 +2583,55 @@ def main() -> int:
             continue
 
         name, url = source["name"], source["url"]
+
         try:
-            # follow_redirects=True: 매체가 주소를 옮기고 301을 주는 경우가 많다
-            response = httpx.get(
-                url,
-                timeout=TIMEOUT,
-                follow_redirects=True,
-                headers={"User-Agent": "briefing-bot/0.1"},
-            )
-            response.raise_for_status()
-            feed = feedparser.parse(response.content)
-            count = len(feed.entries)
+            result = fetch(url)
+        except Permanent as error:
+            # 404/403/주소 오타. 고쳐야 한다.
+            print(f"[설정] {name}  {error}")
+            must_fix.append(name)
+            continue
+        except Transient as error:
+            # 503/타임아웃. 지금만 그럴 수 있다.
+            print(f"[일시] {name}  {error}")
+            flaky.append(name)
+            continue
 
-            if count == 0:
-                print(f"[ 0건] {name}  ← 파싱은 되지만 항목이 없다. 주소 확인 필요")
-                dead.append(name)
-            else:
-                newest = feed.entries[0].get("title", "(제목 없음)")[:40]
-                print(f"[{count:3d}건] {name}  최신: {newest}")
-                if str(response.url) != url:
-                    print(f"         ↳ 리다이렉트됨. yaml을 이 주소로 바꾼다: {response.url}")
+        feed = feedparser.parse(result.content)
+        count = len(feed.entries)
 
-        except Exception as error:  # noqa: BLE001 — 확인 스크립트이므로 전부 잡는다
-            print(f"[실패] {name}  {type(error).__name__}: {error}")
-            dead.append(name)
+        if count == 0:
+            print(f"[ 0건] {name}  ← 파싱은 되지만 항목이 없다. 주소 확인 필요")
+            must_fix.append(name)
+        else:
+            newest = feed.entries[0].get("title", "(제목 없음)")[:40]
+            print(f"[{count:3d}건] {name}  최신: {newest}")
+
+        if result.moved_from is not None:
+            print(f"         ↳ 영구 이전됨. yaml을 이 주소로 바꾼다: {result.final_url}")
+            must_fix.append(name)
 
     print()
-    if dead:
-        print(f"확인 필요한 소스 {len(dead)}개: {', '.join(dead)}")
-        print("주소를 고치거나 enabled: false로 끈다.")
-        return 1
+    if must_fix:
+        print(f"고쳐야 할 소스 {len(must_fix)}개: {', '.join(must_fix)}")
+        print("주소를 바꾸거나 enabled: false로 끈다.")
+    if flaky:
+        print(f"일시 문제일 수 있는 소스 {len(flaky)}개: {', '.join(flaky)}")
+        print("잠시 후 다시 실행해본다. 계속 실패하면 주소를 확인한다.")
 
-    print("모든 피드 정상.")
-    return 0
+    if not must_fix and not flaky:
+        print("모든 피드 정상.")
+        return 0
+    return 1
 
 
 if __name__ == "__main__":
     sys.exit(main())
 ```
 
-> **설명** — `yaml.safe_load`는 YAML을 Python 딕셔너리로 바꾼다(`load`가 아니라 `safe_load`를 쓴다 — 전자는 임의 객체 생성이 가능해 신뢰할 수 없는 입력에 위험하다). `response.raise_for_status()`는 4xx·5xx 응답에서 예외를 던진다. `sys.exit(main())`은 함수의 반환값을 프로세스 종료 코드로 쓴다(0=성공).
+> **설명** — `yaml.safe_load`는 YAML을 Python 딕셔너리로 바꾼다(`load`가 아니라 `safe_load`를 쓴다 — 전자는 임의 객체 생성이 가능해 신뢰할 수 없는 입력에 위험하다). `sys.exit(main())`은 함수의 반환값을 프로세스 종료 코드로 쓴다(0=성공).
+>
+> 이 스크립트가 `lib/http.fetch`를 쓰는 덕분에 **"고쳐야 할 소스"와 "지금만 그럴 수 있는 소스"가 출력에서 분리된다.** 전부 `[실패]`로 뭉개 놓으면, 503 하나 때문에 멀쩡한 주소를 지우게 된다.
 
 - [ ] **Step 3: 피드를 실제로 확인하고 `sources.yaml`을 고친다**
 
@@ -1909,7 +2639,9 @@ if __name__ == "__main__":
 python scripts/check_feeds.py
 ```
 
-죽은 피드는 주소를 고치거나 `enabled: false`로 끈다. **`[실패]`나 `[ 0건]`이 하나도 없을 때까지 반복한다.**
+`[설정]`과 `[ 0건]`으로 나온 소스는 주소를 고치거나 `enabled: false`로 끈다. **`[설정]`·`[ 0건]`·`↳ 영구 이전됨`이 하나도 없을 때까지 반복한다.**
+
+`[일시]`는 잠시 후 다시 실행해본다. 두세 번 연속 나오면 설정 문제로 보고 주소를 확인한다.
 
 - [ ] **Step 4: 관심사 프로필 작성**
 
@@ -1951,7 +2683,7 @@ python scripts/check_feeds.py
 후속편(2편, 심화 편)은 중복이 아니다.
 ```
 
-> 이 파일은 **앞으로 계속 고치게 된다.** Task 13의 평가 도구로 선별 결과를 보면서 "이건 왜 뽑혔지" 싶은 항목의 패턴을 여기에 추가하는 것이 튜닝 작업이다.
+> 이 파일은 **앞으로 계속 고치게 된다.** Task 17의 평가 도구로 선별 결과를 보면서 "이건 왜 뽑혔지" 싶은 항목의 패턴을 여기에 추가하는 것이 튜닝 작업이다.
 
 - [ ] **Step 5: 커밋**
 
@@ -1962,7 +2694,7 @@ git commit -m "feat: 소스 목록과 관심사 프로필, 피드 생존 확인 
 
 ---
 
-## Task 10: 소스 설정 로더
+## Task 12: 소스 설정 로더
 
 **Files:**
 - Create: `pipeline/lib/config.py`
@@ -2143,7 +2875,7 @@ git commit -m "feat: 소스 설정 로더 (이름 중복·빈 목록 거부)"
 
 ---
 
-## Task 11: 수집
+## Task 13: 수집
 
 **Files:**
 - Create: `pipeline/collect.py`
@@ -2195,8 +2927,12 @@ git commit -m "feat: 소스 설정 로더 (이름 중복·빈 목록 거부)"
 from datetime import datetime, timezone
 from pathlib import Path
 
-from pipeline.collect import collect
+import pytest
+
+from pipeline.collect import SOURCE_ATTEMPTS, collect
 from pipeline.lib.config import Source
+from pipeline.lib.http import FetchResult
+from pipeline.lib.retry import Permanent, Transient
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -2209,12 +2945,12 @@ def _source(name: str = "토스_기술블로그", url: str = "https://toss.tech/
     return Source(name=name, url=url, kind="rss", weight=1.3, lang="ko")
 
 
-def _fetch_fixture(filename: str):
-    """URL과 무관하게 지정한 fixture를 돌려주는 fetch 함수를 만든다."""
+def _ok(filename: str = "feed_two_items.xml", *, moved_from: str | None = None):
+    """fixture 내용을 담은 FetchResult를 돌려주는 fetch 함수를 만든다."""
     data = (FIXTURES / filename).read_bytes()
 
-    def fetch(url: str) -> bytes:
-        return data
+    def fetch(url: str) -> FetchResult:
+        return FetchResult(content=data, final_url=url, moved_from=moved_from)
 
     return fetch
 
@@ -2224,12 +2960,15 @@ def _collect(**overrides):
         "sources": [_source()],
         "window_start": WINDOW_START,
         "window_end": WINDOW_END,
-        "fetch": _fetch_fixture("feed_two_items.xml"),
+        "fetch": _ok(),
         "known_urls": lambda urls: set(),
+        "sleep": lambda _: None,   # 테스트는 실제로 기다리지 않는다
     }
     kwargs.update(overrides)
     return collect(**kwargs)
 
+
+# --- 정상 경로 ---
 
 def test_윈도우_안의_항목만_수집한다():
     bundle = _collect()
@@ -2240,19 +2979,15 @@ def test_윈도우_안의_항목만_수집한다():
 
 def test_URL을_정규화해서_저장한다():
     """utm_source가 붙은 채로 저장되면 중복 제거가 깨진다."""
-    bundle = _collect()
-
-    assert bundle.items[0].url == "https://toss.tech/article/payment-latency"
+    assert _collect().items[0].url == "https://toss.tech/article/payment-latency"
 
 
 def test_소스_이름을_기록한다():
-    bundle = _collect()
-    assert bundle.items[0].source == "토스_기술블로그"
+    assert _collect().items[0].source == "토스_기술블로그"
 
 
 def test_발행_시각을_UTC로_정규화한다():
-    bundle = _collect()
-    assert bundle.items[0].published == "2026-11-10T05:30:00+00:00"
+    assert _collect().items[0].published == "2026-11-10T05:30:00+00:00"
 
 
 def test_이미_발행한_URL을_제외한다():
@@ -2271,58 +3006,21 @@ def test_같은_URL이_두_소스에_있으면_한_번만_담는다():
 
 def test_소스별_건수를_집계한다():
     """소스 침묵 감지의 입력이 된다."""
-    bundle = _collect()
-    assert bundle.source_counts == {"토스_기술블로그": 1}
+    assert _collect().source_counts == {"토스_기술블로그": 1}
 
 
 def test_항목이_없는_피드도_0건으로_집계한다():
-    bundle = _collect(fetch=_fetch_fixture("feed_empty.xml"))
+    bundle = _collect(fetch=_ok("feed_empty.xml"))
 
     assert bundle.items == []
     assert bundle.source_counts == {"토스_기술블로그": 0}
     assert bundle.errors == []
 
 
-def test_소스_하나가_죽어도_나머지는_수집한다():
-    """핵심 요구사항. 매체 하나의 장애로 그날이 날아가면 안 된다."""
-    good = (FIXTURES / "feed_two_items.xml").read_bytes()
-
-    def fetch(url: str) -> bytes:
-        if url == "https://broken.com/r":
-            raise RuntimeError("연결 실패")
-        return good
-
-    bundle = collect(
-        sources=[_source("깨진소스", "https://broken.com/r"),
-                 _source("정상소스", "https://ok.com/r")],
-        window_start=WINDOW_START,
-        window_end=WINDOW_END,
-        fetch=fetch,
-        known_urls=lambda urls: set(),
-    )
-
-    assert len(bundle.items) == 1
-    assert bundle.items[0].source == "정상소스"
-    assert len(bundle.errors) == 1
-    assert bundle.errors[0].source == "깨진소스"
-    assert "연결 실패" in bundle.errors[0].message
-    assert bundle.source_counts == {"깨진소스": 0, "정상소스": 1}
-
-
-def test_모든_소스가_죽으면_예외를_던진다():
-    """전부 실패는 중단 조건이다. 빈 브리핑을 보내서는 안 된다."""
-    def fetch(url: str) -> bytes:
-        raise RuntimeError("전부 실패")
-
-    import pytest
-    with pytest.raises(RuntimeError, match="모든 소스"):
-        collect(
-            sources=[_source("A", "https://a.com/r"), _source("B", "https://b.com/r")],
-            window_start=WINDOW_START,
-            window_end=WINDOW_END,
-            fetch=fetch,
-            known_urls=lambda urls: set(),
-        )
+def test_윈도우_경계를_번들에_기록한다():
+    bundle = _collect()
+    assert bundle.window_start == WINDOW_START.isoformat()
+    assert bundle.window_end == WINDOW_END.isoformat()
 
 
 def test_발행_시각을_읽을_수_없는_항목은_건너뛴다():
@@ -2332,20 +3030,145 @@ def test_발행_시각을_읽을_수_없는_항목은_건너뛴다():
       <pubDate>언젠가</pubDate><description>d</description></item>
     </channel></rss>"""
 
-    bundle = collect(
-        sources=[_source()],
-        window_start=WINDOW_START,
-        window_end=WINDOW_END,
-        fetch=lambda url: xml,
-        known_urls=lambda urls: set(),
+    bundle = _collect(
+        fetch=lambda url: FetchResult(content=xml, final_url=url, moved_from=None)
     )
     assert bundle.items == []
 
 
-def test_윈도우_경계를_번들에_기록한다():
-    bundle = _collect()
-    assert bundle.window_start == WINDOW_START.isoformat()
-    assert bundle.window_end == WINDOW_END.isoformat()
+# --- 에러 분류 ---
+
+def test_영구_실패는_config로_기록하고_재시도하지_않는다():
+    """404는 sources.yaml을 고쳐야 한다. 재시도는 낭비다."""
+    calls = []
+
+    def fetch(url: str) -> FetchResult:
+        calls.append(url)
+        raise Permanent(f"{url} HTTP 404")
+
+    bundle = _collect(fetch=fetch)
+
+    assert len(calls) == 1              # 재시도하지 않았다
+    assert bundle.items == []
+    assert bundle.errors[0].kind == "config"
+    assert "404" in bundle.errors[0].message
+    assert bundle.source_counts == {"토스_기술블로그": 0}
+
+
+def test_403도_config로_기록한다():
+    """봇 차단. 기다려도 안 풀린다."""
+    def fetch(url: str) -> FetchResult:
+        raise Permanent(f"{url} HTTP 403")
+
+    assert _collect(fetch=fetch).errors[0].kind == "config"
+
+
+def test_일시_실패는_재시도하고_transient로_기록한다():
+    calls = []
+
+    def fetch(url: str) -> FetchResult:
+        calls.append(url)
+        raise Transient(f"{url} HTTP 503")
+
+    bundle = _collect(fetch=fetch)
+
+    assert len(calls) == SOURCE_ATTEMPTS   # 재시도했다
+    assert bundle.errors[0].kind == "transient"
+
+
+def test_재시도_중_성공하면_수집된다():
+    calls = []
+    data = (FIXTURES / "feed_two_items.xml").read_bytes()
+
+    def fetch(url: str) -> FetchResult:
+        calls.append(url)
+        if len(calls) == 1:
+            raise Transient("일시 장애")
+        return FetchResult(content=data, final_url=url, moved_from=None)
+
+    bundle = _collect(fetch=fetch)
+
+    assert len(bundle.items) == 1
+    assert bundle.errors == []
+
+
+def test_재시도할_때_간격을_둔다():
+    delays = []
+
+    def fetch(url: str) -> FetchResult:
+        raise Transient("장애")
+
+    _collect(fetch=fetch, sleep=delays.append)
+
+    assert len(delays) == SOURCE_ATTEMPTS - 1
+
+
+def test_영구_이전은_실패가_아니지만_기록한다():
+    """자동으로 따라갔다. 다만 sources.yaml을 고쳐야 한다."""
+    bundle = _collect(fetch=_ok(moved_from="https://old.toss.tech/rss.xml"))
+
+    assert len(bundle.items) == 1                    # 수집은 성공
+    assert bundle.errors[0].kind == "moved"
+    assert "old.toss.tech" in bundle.errors[0].message
+    assert bundle.source_counts == {"토스_기술블로그": 1}
+
+
+def test_소스_하나가_죽어도_나머지는_수집한다():
+    """핵심 요구사항. 매체 하나의 장애로 그날이 날아가면 안 된다."""
+    data = (FIXTURES / "feed_two_items.xml").read_bytes()
+
+    def fetch(url: str) -> FetchResult:
+        if url == "https://broken.com/r":
+            raise Permanent("HTTP 404")
+        return FetchResult(content=data, final_url=url, moved_from=None)
+
+    bundle = _collect(sources=[_source("깨진소스", "https://broken.com/r"),
+                               _source("정상소스", "https://ok.com/r")],
+                      fetch=fetch)
+
+    assert len(bundle.items) == 1
+    assert bundle.items[0].source == "정상소스"
+    assert len(bundle.errors) == 1
+    assert bundle.errors[0].source == "깨진소스"
+    assert bundle.source_counts == {"깨진소스": 0, "정상소스": 1}
+
+
+def test_피드_파싱이_깨지면_config로_기록한다():
+    def fetch(url: str) -> FetchResult:
+        # feedparser는 웬만한 쓰레기도 파싱하므로 bytes가 아닌 것을 넘겨 예외를 유도한다
+        return FetchResult(content=None, final_url=url, moved_from=None)  # type: ignore[arg-type]
+
+    bundle = _collect(fetch=fetch)
+
+    assert bundle.errors[0].kind == "config"
+    assert "파싱" in bundle.errors[0].message
+
+
+# --- 전체 실패 ---
+
+def test_전부_영구_실패면_설정_확인을_안내한다():
+    """"네트워크 확인"이라고 하면 엉뚱한 곳을 보게 된다."""
+    def fetch(url: str) -> FetchResult:
+        raise Permanent("HTTP 404")
+
+    with pytest.raises(RuntimeError, match="sources.yaml"):
+        _collect(sources=[_source("A", "https://a.com/r"), _source("B", "https://b.com/r")],
+                 fetch=fetch)
+
+
+def test_전부_일시_실패면_네트워크_확인을_안내한다():
+    def fetch(url: str) -> FetchResult:
+        raise Transient("HTTP 503")
+
+    with pytest.raises(RuntimeError, match="네트워크"):
+        _collect(sources=[_source("A", "https://a.com/r"), _source("B", "https://b.com/r")],
+                 fetch=fetch)
+
+
+def test_이전_기록만_있으면_전체_실패가_아니다():
+    """moved는 실패가 아니다. 이걸 실패로 세면 정상 실행이 중단된다."""
+    bundle = _collect(fetch=_ok(moved_from="https://old.com/r"))
+    assert len(bundle.items) == 1
 ```
 
 - [ ] **Step 3: 실패를 확인**
@@ -2363,40 +3186,36 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'pipeline.collect'`
 ```python
 """01 수집: 윈도우 내에 발행된 글을 소스별로 긁어 raw.json을 만든다.
 
+소스 단위로 장애를 격리하고, 실패를 성격별로 분류해 기록한다.
+- config    주소를 고쳐야 한다 (404/403/파싱 불가). 재시도하지 않는다.
+- transient 기다리면 된다 (429/5xx/타임아웃). 재시도 후에도 실패한 경우.
+- moved     301/308로 이전됐다. 수집은 성공했지만 설정을 갱신해야 한다.
+
 실행: python -m pipeline.collect
 """
 
+import time
 from datetime import datetime, timezone
 from typing import Callable
 
 import feedparser
-import httpx
 
 from pipeline.lib.config import Source, load_sources
+from pipeline.lib.http import FetchResult
+from pipeline.lib.http import fetch as http_fetch
+from pipeline.lib.retry import Permanent, Transient, with_retry
 from pipeline.lib.secrets import require
 from pipeline.lib.store import LocalStore, SupabaseStore
 from pipeline.lib.timeutil import KST, compute_window, to_utc_iso
 from pipeline.lib.urls import normalize_url
 from pipeline.models import RawBundle, RawItem, SourceError
 
-HTTP_TIMEOUT = 20.0
-USER_AGENT = "briefing-bot/0.1"
+# 소스당 시도 횟수. 소스가 10여 개라 넉넉히 주면 전체 실행이 길어진다.
+SOURCE_ATTEMPTS = 2
 
-# 협력자의 타입. 테스트가 가짜를 넘길 수 있도록 함수로 받는다.
-FetchFn = Callable[[str], bytes]
+FetchFn = Callable[[str], FetchResult]
 KnownUrlsFn = Callable[[list[str]], set[str]]
-
-
-def http_fetch(url: str) -> bytes:
-    """실제 HTTP 수집. follow_redirects로 매체 주소 이전을 따라간다."""
-    response = httpx.get(
-        url,
-        timeout=HTTP_TIMEOUT,
-        follow_redirects=True,
-        headers={"User-Agent": USER_AGENT},
-    )
-    response.raise_for_status()
-    return response.content
+SleepFn = Callable[[float], None]
 
 
 def _parse_source(
@@ -2430,7 +3249,6 @@ def _parse_source(
             title=(entry.get("title") or "").strip(),
             url=normalize_url(link),
             published=published,
-            # summary가 없는 피드도 있다. 없으면 빈 문자열로 둔다.
             excerpt=(entry.get("summary") or "").strip(),
         ))
 
@@ -2442,8 +3260,9 @@ def collect(
     sources: list[Source],
     window_start: datetime,
     window_end: datetime,
-    fetch: FetchFn,
+    fetch: FetchFn = http_fetch,
     known_urls: KnownUrlsFn,
+    sleep: SleepFn = time.sleep,
 ) -> RawBundle:
     """윈도우 내 항목을 수집한다. 소스 단위로 장애를 격리한다."""
     collected: list[RawItem] = []
@@ -2451,25 +3270,67 @@ def collect(
     errors: list[SourceError] = []
 
     for source in sources:
+        counts[source.name] = 0
+
         try:
-            items = _parse_source(source, fetch(source.url), window_start, window_end)
-        except Exception as error:  # noqa: BLE001 — 소스 장애를 격리하는 것이 목적
-            # 어떤 예외든 해당 소스만 포기하고 계속한다.
-            counts[source.name] = 0
+            # url=source.url을 기본 인자로 묶는다. 루프 변수를 클로저로
+            # 잡으면(lambda: fetch(source.url)) 나중 호출에서 마지막 소스를
+            # 가리키는 고전적인 함정이 있다. 여기선 즉시 호출되므로 실제
+            # 문제는 없지만, 기본 인자로 고정하는 편이 안전하고 의도가 분명하다.
+            result = with_retry(
+                lambda url=source.url: fetch(url),
+                attempts=SOURCE_ATTEMPTS,
+                sleep=sleep,
+            )
+        except Permanent as error:
+            # 재시도하지 않는다. 주소를 고쳐야 한다.
+            errors.append(SourceError(
+                source=source.name, kind="config", message=str(error),
+            ))
+            continue
+        except Transient as error:
+            # with_retry가 이미 재시도했는데도 실패했다.
+            errors.append(SourceError(
+                source=source.name, kind="transient", message=str(error),
+            ))
+            continue
+
+        # 301/308로 이전됐으면 수집은 성공했지만 설정을 갱신해야 한다.
+        if result.moved_from is not None:
             errors.append(SourceError(
                 source=source.name,
-                message=f"{type(error).__name__}: {error}",
+                kind="moved",
+                message=(
+                    f"{result.moved_from} → {result.final_url} "
+                    f"(sources.yaml의 주소를 갱신한다)"
+                ),
+            ))
+
+        try:
+            items = _parse_source(source, result.content, window_start, window_end)
+        except Exception as error:  # noqa: BLE001 — 파싱 실패도 소스 단위로 격리한다
+            errors.append(SourceError(
+                source=source.name,
+                kind="config",
+                message=f"피드 파싱 실패: {type(error).__name__}: {error}",
             ))
             continue
 
         counts[source.name] = len(items)
         collected.extend(items)
 
-    # 전부 실패했으면 중단한다. 빈 브리핑을 보내면 "오늘 조용했다"로 오해된다.
-    if errors and len(errors) == len(sources):
+    # moved는 실패가 아니다. 전체 실패 판정에서 제외한다.
+    failures = [error for error in errors if error.kind != "moved"]
+    if failures and len(failures) == len(sources):
+        # 원인에 따라 안내가 달라야 한다. "네트워크 확인"이라고 하면
+        # 주소가 틀린 경우에 엉뚱한 곳을 보게 된다.
+        if all(error.kind == "config" for error in failures):
+            hint = "모든 실패가 설정 문제다. sources.yaml의 주소를 확인한다."
+        else:
+            hint = "네트워크 또는 소스 서버를 확인한다."
         raise RuntimeError(
-            f"모든 소스 수집에 실패했다 ({len(sources)}개). "
-            f"네트워크나 소스 주소를 확인한다. 첫 에러: {errors[0].message}"
+            f"모든 소스 수집에 실패했다 ({len(sources)}개). {hint} "
+            f"첫 에러: {failures[0].message}"
         )
 
     # 실행 내 중복 제거 — 같은 글이 여러 소스에 올라오는 경우.
@@ -2498,7 +3359,6 @@ def main() -> None:
         sources=load_sources(),
         window_start=window_start,
         window_end=window_end,
-        fetch=http_fetch,
         known_urls=remote.known_urls,
     )
 
@@ -2510,15 +3370,23 @@ def main() -> None:
     print(f"  윈도우: {window_start.isoformat()} ~ {window_end.isoformat()}")
     for name, count in sorted(bundle.source_counts.items()):
         print(f"  {count:4d}건  {name}")
+
+    # 성격별로 나눠 보여준다. config는 내가 고쳐야 하고 transient는 두고 보면 된다.
+    marks = {"config": "설정", "transient": "일시", "moved": "이전"}
     for error in bundle.errors:
-        print(f"  [실패] {error.source}: {error.message}")
+        print(f"  [{marks[error.kind]}] {error.source}: {error.message}")
+```
 
-
+```python
 if __name__ == "__main__":
     main()
 ```
 
-> **설명** — `Callable[[str], bytes]`는 "문자열 하나를 받아 bytes를 돌려주는 함수" 타입이다. 이렇게 함수를 인자로 받으면 테스트에서 HTTP 모킹 없이 가짜 함수를 넘길 수 있다. `{item.url: item for item in collected}`는 딕셔너리 컴프리헨션으로, 같은 키가 나오면 **나중 값이 덮어쓴다** — 여기서는 순서 유지만 필요해서 그대로 쓴다. `list.extend`는 리스트를 펼쳐 붙이고(`append`는 리스트 자체를 한 원소로 넣는다), `noqa: BLE001`은 린터의 "광범위 예외 잡기" 경고를 의도적으로 끈 표시다.
+> **설명** — `from pipeline.lib.http import fetch as http_fetch`에서 `as`로 이름을 바꾼 이유는, 이 모듈의 인자 이름이 `fetch`라서 가려지는 것을 막기 위함이다.
+>
+> 그리고 `pipeline/lib/http.py`라는 이름이 표준 라이브러리 `http` 모듈과 겹쳐 보이지만 **문제가 없다.** Python 3는 기본이 절대 임포트라서, 다른 곳에서 `import http.client`라고 쓰면 표준 라이브러리를 가져온다. 우리 모듈은 `pipeline.lib.http`라는 완전한 경로로만 참조된다.
+>
+> `lambda url=source.url: fetch(url)`에서 기본 인자를 쓴 것은 **늦은 바인딩(late binding)** 함정 때문이다. `lambda: fetch(source.url)`은 호출 시점에 `source`를 찾으므로, 반복문이 끝난 뒤에 호출하면 마지막 소스를 가리킨다. 기본 인자는 **정의 시점**에 값이 고정된다. Python을 쓰다 보면 반드시 한 번은 물리는 함정이다.
 
 - [ ] **Step 5: 통과를 확인**
 
@@ -2526,7 +3394,7 @@ if __name__ == "__main__":
 pytest tests/test_collect.py
 ```
 
-Expected: `12 passed`
+Expected: `21 passed`
 
 - [ ] **Step 6: 전체 테스트 확인**
 
@@ -2534,18 +3402,18 @@ Expected: `12 passed`
 pytest
 ```
 
-Expected: `59 passed` (urls 8 + timeutil 12 + models 11 + secrets 5 + local_store 5 + remote_store 5 + config 6 + collect 12 — 실제 수치는 다를 수 있으니 실패가 0인지만 본다)
+Expected: 전부 통과, 실패 0.
 
 - [ ] **Step 7: 커밋**
 
 ```bash
 git add pipeline/collect.py tests/test_collect.py tests/fixtures/
-git commit -m "feat: 수집 단계 — 윈도우 필터, URL 정규화, 소스 장애 격리"
+git commit -m "feat: 수집 단계 — 윈도우 필터, 소스 장애 격리, 실패 성격별 분류"
 ```
 
 ---
 
-## Task 12: 시드 수집
+## Task 14: 시드 수집
 
 **되돌릴 수 없는 작업이다.** 대부분의 RSS 피드는 최근 10~50건만 제공하므로, 지금 긁지 않으면 그 데이터는 영구히 얻을 수 없다. 이후 선별 프롬프트 튜닝의 재료가 된다.
 
@@ -2706,22 +3574,40 @@ git commit -m "feat: 시드 수집 — 피드 전체 항목 확보 (프롬프트
 
 ---
 
-## Task 13: LLM 래퍼
+## Task 15: LLM 래퍼
 
 **Files:**
 - Create: `pipeline/lib/llm.py`
 - Modify: `tests/fakes.py` (추가)
 - Create: `tests/test_llm.py`
+- Create: `scripts/smoke_llm.py`
+
+> **중요 — SDK가 이미 재시도한다.** anthropic SDK는 429·5xx·연결 오류를 자체적으로
+> 지수 백오프 재시도한다(기본 `max_retries=2`). 그 위에 내 재시도를 또 걸면 한 번의
+> 논리적 호출이 최악의 경우 6번이 되고, 크레딧과 시간을 그만큼 쓴다.
+>
+> 그래서 역할을 나눈다 — **전송 계층 재시도는 SDK에 맡기고(`max_retries`를 명시),
+> 내 래퍼는 분류와 "스키마 실패 1회 재시도"만 담당한다.**
 
 - [ ] **Step 1: 실패하는 테스트 작성**
 
 `tests/test_llm.py`:
 
 ```python
+import anthropic
+import httpx
 import pytest
 from pydantic import BaseModel
 
-from pipeline.lib.llm import LLM, LLMError, RefusedError, retrying
+from pipeline.lib.llm import (
+    LLM,
+    SCHEMA_ATTEMPTS,
+    RefusedError,
+    SchemaError,
+    classify_sdk_error,
+    retry_on_schema,
+)
+from pipeline.lib.retry import Permanent, Transient
 from tests.fakes import FakeLLM
 
 
@@ -2729,7 +3615,78 @@ class Answer(BaseModel):
     value: int
 
 
-# --- 재시도 헬퍼 ---
+def _request() -> httpx.Request:
+    return httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+
+
+def _status_error(cls, status: int, message: str = "실패"):
+    """SDK 상태 예외를 테스트에서 직접 만든다."""
+    return cls(message, response=httpx.Response(status, request=_request()), body=None)
+
+
+# --- SDK 예외 분류 ---
+
+def test_401은_영구_실패이고_키를_안내한다():
+    mapped = classify_sdk_error(
+        _status_error(anthropic.AuthenticationError, 401)
+    )
+    assert isinstance(mapped, Permanent)
+    assert "ANTHROPIC_API_KEY" in str(mapped)
+
+
+def test_403은_영구_실패다():
+    mapped = classify_sdk_error(_status_error(anthropic.PermissionDeniedError, 403))
+    assert isinstance(mapped, Permanent)
+
+
+def test_404는_모델_ID를_안내한다():
+    """가장 흔한 원인이 모델 ID 오타다."""
+    mapped = classify_sdk_error(_status_error(anthropic.NotFoundError, 404))
+    assert isinstance(mapped, Permanent)
+    assert "claude-opus-5-5" in str(mapped)
+
+
+def test_400은_영구_실패다():
+    mapped = classify_sdk_error(_status_error(anthropic.BadRequestError, 400))
+    assert isinstance(mapped, Permanent)
+
+
+def test_429는_일시_실패이고_크레딧을_언급한다():
+    """SDK가 이미 재시도했는데도 왔다면 크레딧 소진일 수 있다."""
+    mapped = classify_sdk_error(_status_error(anthropic.RateLimitError, 429))
+    assert isinstance(mapped, Transient)
+    assert "크레딧" in str(mapped)
+
+
+def test_500은_일시_실패다():
+    mapped = classify_sdk_error(_status_error(anthropic.InternalServerError, 500))
+    assert isinstance(mapped, Transient)
+
+
+def test_분류표에_없는_상태는_HTTP_규칙을_따른다():
+    """418은 4xx이므로 영구 실패가 된다."""
+    mapped = classify_sdk_error(_status_error(anthropic.APIStatusError, 418))
+    assert isinstance(mapped, Permanent)
+
+
+def test_연결_실패는_일시_실패다():
+    """APIConnectionError는 APIStatusError의 하위가 아니다(형제다).
+    위의 isinstance 사슬에서 안 걸리므로 따로 처리해야 한다."""
+    assert not issubclass(anthropic.APIConnectionError, anthropic.APIStatusError)
+
+    mapped = classify_sdk_error(
+        anthropic.APIConnectionError(message="연결 거부", request=_request())
+    )
+    assert isinstance(mapped, Transient)
+
+
+def test_SDK_예외가_아니면_그대로_돌려준다():
+    """코드 버그(TypeError 등)를 Transient로 만들면 재시도로 가려진다."""
+    original = TypeError("코드 버그")
+    assert classify_sdk_error(original) is original
+
+
+# --- 스키마 재시도 ---
 
 def test_한_번에_성공하면_한_번만_호출한다():
     calls = []
@@ -2738,43 +3695,67 @@ def test_한_번에_성공하면_한_번만_호출한다():
         calls.append(1)
         return "결과"
 
-    assert retrying(ok, attempts=2) == "결과"
+    assert retry_on_schema(ok) == "결과"
     assert len(calls) == 1
 
 
-def test_첫_시도가_실패하면_다시_호출한다():
-    """스펙의 '1회 재시도' 정책."""
+def test_스키마_실패는_다시_시도한다():
     calls = []
 
     def flaky():
         calls.append(1)
         if len(calls) == 1:
-            raise LLMError("일시적 오류")
+            raise SchemaError("출력이 비었다")
         return "결과"
 
-    assert retrying(flaky, attempts=2) == "결과"
+    assert retry_on_schema(flaky) == "결과"
     assert len(calls) == 2
 
 
-def test_전부_실패하면_마지막_예외를_올린다():
-    def always_fails():
-        raise LLMError("계속 실패")
-
-    with pytest.raises(LLMError, match="계속 실패"):
-        retrying(always_fails, attempts=2)
-
-
-def test_거부는_재시도하지_않는다():
-    """같은 입력을 다시 보내도 또 거부된다. 토큰만 쓴다."""
+def test_스키마_실패가_계속되면_올린다():
     calls = []
 
-    def refused():
+    def always():
         calls.append(1)
-        raise RefusedError("정책 거부")
+        raise SchemaError("계속 비었다")
 
-    with pytest.raises(RefusedError):
-        retrying(refused, attempts=3)
+    with pytest.raises(SchemaError):
+        retry_on_schema(always)
+    assert len(calls) == SCHEMA_ATTEMPTS
+
+
+def test_전송_계층_일시_실패는_재시도하지_않는다():
+    """SDK가 이미 재시도했다. 여기서 또 하면 이중 재시도가 된다."""
+    calls = []
+
+    def transient():
+        calls.append(1)
+        raise Transient("SDK 재시도 후에도 실패")
+
+    with pytest.raises(Transient):
+        retry_on_schema(transient)
     assert len(calls) == 1
+
+
+def test_영구_실패는_재시도하지_않는다():
+    calls = []
+
+    def permanent():
+        calls.append(1)
+        raise Permanent("키가 틀렸다")
+
+    with pytest.raises(Permanent):
+        retry_on_schema(permanent)
+    assert len(calls) == 1
+
+
+def test_거부는_영구_실패로_분류된다():
+    """같은 입력을 다시 보내도 또 거부된다."""
+    assert issubclass(RefusedError, Permanent)
+
+
+def test_스키마_실패는_일시_실패로_분류된다():
+    assert issubclass(SchemaError, Transient)
 
 
 # --- 가짜 구현 ---
@@ -2821,11 +3802,19 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'pipeline.lib.llm'`
 
 파이프라인 단계는 LLM 프로토콜만 알고 SDK를 모른다. 테스트는 FakeLLM을
 넘기므로 실제 호출이 일어나지 않는다.
+
+재시도 책임 분담:
+- 전송 계층(429/5xx/연결 오류) → **SDK가 담당한다**(max_retries).
+- 스키마 검증 실패 → 이 모듈이 1회 재시도한다.
+- 그 외 → 분류만 하고 올린다.
 """
 
 from typing import Callable, Literal, Protocol, TypeVar
 
 from pydantic import BaseModel
+
+from pipeline.lib.http import classify_status
+from pipeline.lib.retry import Permanent, Transient
 
 # 스펙 결정: 선별·요약 모두 Opus. Max 플랜 크레딧으로 비용 제약이 없으므로
 # 품질 기준으로만 고른다. 바꾸려면 이 한 줄만 고친다.
@@ -2834,16 +3823,24 @@ MODEL = "claude-opus-5-5"
 # 거부(refusal)가 났을 때 서버 측에서 다른 모델로 자동 재시도하게 한다.
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
+# SDK의 전송 계층 재시도 횟수. 기본값은 2이고, 명시해 두면 "여기가 전송
+# 재시도를 담당한다"가 코드에 드러난다.
+SDK_MAX_RETRIES = 3
+
+# 스키마 검증 실패에 대한 내 쪽 시도 횟수(최초 1회 + 재시도 1회).
+SCHEMA_ATTEMPTS = 2
+
 Effort = Literal["low", "medium", "high", "xhigh", "max"]
 TOut = TypeVar("TOut", bound=BaseModel)
+TResult = TypeVar("TResult")
 
 
-class LLMError(RuntimeError):
-    """재시도할 가치가 있는 실패 (타임아웃, 5xx, 스키마 검증 실패)."""
-
-
-class RefusedError(LLMError):
+class RefusedError(Permanent):
     """정책 거부. 같은 입력을 다시 보내도 또 거부되므로 재시도하지 않는다."""
+
+
+class SchemaError(Transient):
+    """구조화된 출력이 비었거나 스키마를 못 맞췄다. 한 번 더 시도할 가치가 있다."""
 
 
 class LLM(Protocol):
@@ -2859,42 +3856,101 @@ class LLM(Protocol):
         ...
 
 
-TResult = TypeVar("TResult")
+def classify_sdk_error(error: Exception) -> Exception:
+    """anthropic SDK 예외를 Transient/Permanent로 바꿔 **돌려준다**(던지지 않는다).
+
+    돌려주는 쪽으로 만든 이유는 호출부에서 `raise ... from error`로 원래
+    예외를 체인으로 보존하기 위함이다.
+    """
+    import anthropic
+
+    # 아래 다섯 클래스는 모두 APIStatusError의 하위다. 구체적인 것부터
+    # 검사해야 한다 — 순서를 바꾸면 전부 마지막 분기로 빨려 들어간다.
+    if isinstance(error, anthropic.AuthenticationError):
+        return Permanent(
+            f"API 키가 거부됐다(401). ANTHROPIC_API_KEY가 Max 크레딧이 연결된 "
+            f"Console 조직의 키인지 확인한다: {error}"
+        )
+    if isinstance(error, anthropic.PermissionDeniedError):
+        return Permanent(
+            f"권한이 없다(403). Console 조직·워크스페이스 설정을 확인한다: {error}"
+        )
+    if isinstance(error, anthropic.NotFoundError):
+        return Permanent(
+            f"찾을 수 없다(404). 가장 흔한 원인은 모델 ID 오타다. "
+            f"현재 설정: '{MODEL}'. 원문: {error}"
+        )
+    if isinstance(error, anthropic.BadRequestError):
+        return Permanent(
+            f"요청이 거부됐다(400). 프롬프트 길이, max_tokens, output_config를 "
+            f"확인한다: {error}"
+        )
+    if isinstance(error, anthropic.RateLimitError):
+        # SDK가 이미 재시도했는데도 왔다. 단순 혼잡이 아닐 수 있다.
+        return Transient(
+            f"레이트 리밋 또는 크레딧 소진(429). SDK 재시도 후에도 실패했다. "
+            f"Console의 크레딧 잔액을 확인한다: {error}"
+        )
+    if isinstance(error, anthropic.APIStatusError):
+        # 나머지 비 2xx는 HTTP 분류 규칙을 그대로 쓴다(규칙이 한곳에 있어야 한다).
+        try:
+            classify_status(
+                error.status_code, url="Claude API", detail=str(error)[:200]
+            )
+        except (Transient, Permanent) as classified:
+            return classified
+        # classify_status는 비 2xx면 반드시 던지므로 여기 오지 않는다.
+        return Transient(f"예상치 못한 응답: {error}")
+    if isinstance(error, anthropic.APIConnectionError):
+        # APIStatusError의 하위가 아니라 형제다. 위 분기에서 걸리지 않는다.
+        return Transient(
+            f"Claude API 연결 실패. SDK 재시도 후에도 실패했다: {error}"
+        )
+
+    # SDK 예외가 아니다 — 코드 버그일 수 있으므로 분류하지 않고 그대로 돌려준다.
+    # 여기서 Transient로 감싸면 TypeError가 재시도로 가려진다.
+    return error
 
 
-def retrying(
+def retry_on_schema(
     call: Callable[[], TResult],
     *,
-    attempts: int = 2,
+    attempts: int = SCHEMA_ATTEMPTS,
 ) -> TResult:
-    """LLMError에 대해 재시도한다. RefusedError는 즉시 포기한다."""
-    last: LLMError | None = None
+    """SchemaError만 재시도한다.
 
-    for _ in range(attempts):
+    lib.retry.with_retry를 쓰지 않는 이유: SchemaError와 전송 계층 Transient가
+    둘 다 Transient라서 with_retry는 구분하지 못한다. 전송 재시도는 SDK가 이미
+    하므로, 여기서는 스키마 실패만 다시 시도해야 한다.
+    """
+    for attempt in range(attempts):
         try:
             return call()
-        except RefusedError:
-            # 거부는 결정적이다. 다시 보내면 토큰만 쓰고 또 거부된다.
-            raise
-        except LLMError as error:
-            last = error
-
-    assert last is not None  # attempts >= 1이면 반드시 설정된다
-    raise last
+        except SchemaError:
+            if attempt == attempts - 1:
+                raise
+    raise AssertionError("도달할 수 없다")   # attempts >= 1
 
 
 class AnthropicLLM:
     """LLM 프로토콜의 Claude API 구현.
 
-    단위 테스트하지 않는다 — 대부분이 SDK 호출 통과이고, 모킹하면
-    '내가 쓴 모킹이 맞는가'만 검증하게 된다. 실제 동작은
-    scripts/smoke_llm.py로 1회 확인한다.
+    SDK 호출 자체는 단위 테스트하지 않는다 — 모킹하면 '내가 쓴 모킹이 맞는가'만
+    검증하게 된다. 분류와 재시도는 위의 순수 함수로 빼서 테스트했고, 실제
+    동작은 scripts/smoke_llm.py로 1회 확인한다.
     """
 
-    def __init__(self, api_key: str, model: str = MODEL) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        model: str = MODEL,
+        max_retries: int = SDK_MAX_RETRIES,
+    ) -> None:
         import anthropic
 
-        self._client = anthropic.Anthropic(api_key=api_key)
+        # max_retries를 명시한다. SDK가 429/5xx/연결 오류를 이 횟수만큼
+        # 지수 백오프로 재시도한다.
+        self._client = anthropic.Anthropic(api_key=api_key, max_retries=max_retries)
         self._model = model
 
     def parse(
@@ -2904,6 +3960,23 @@ class AnthropicLLM:
         output_format: type[TOut],
         effort: Effort,
         max_tokens: int = 16000,
+    ) -> tuple[TOut, int]:
+        return retry_on_schema(
+            lambda: self._parse_once(
+                prompt=prompt,
+                output_format=output_format,
+                effort=effort,
+                max_tokens=max_tokens,
+            )
+        )
+
+    def _parse_once(
+        self,
+        *,
+        prompt: str,
+        output_format: type[TOut],
+        effort: Effort,
+        max_tokens: int,
     ) -> tuple[TOut, int]:
         try:
             response = self._client.beta.messages.parse(
@@ -2922,23 +3995,30 @@ class AnthropicLLM:
                 output_format=output_format,
                 messages=[{"role": "user", "content": prompt}],
             )
-        except Exception as error:  # noqa: BLE001
-            raise LLMError(f"{type(error).__name__}: {error}") from error
+        except Exception as error:  # noqa: BLE001 — classify_sdk_error가 선별한다
+            raise classify_sdk_error(error) from error
 
         # 거부는 예외가 아니라 HTTP 200 + stop_reason으로 온다.
         # content를 읽기 전에 반드시 확인한다.
         if response.stop_reason == "refusal":
             category = getattr(response.stop_details, "category", None)
-            raise RefusedError(f"정책 거부 (category={category})")
+            raise RefusedError(
+                f"정책 거부 (category={category}). 서버 측 폴백도 실패했다. "
+                f"같은 입력은 다시 보내도 거부된다."
+            )
 
         parsed = response.parsed_output
         if parsed is None:
-            raise LLMError("구조화된 출력이 비어 있다")
+            raise SchemaError("구조화된 출력이 비어 있다")
 
         return parsed, response.usage.input_tokens
 ```
 
-> **설명** — `TypeVar("TOut", bound=BaseModel)`은 "pydantic 모델의 어떤 하위 타입"을 뜻하며, `output_format=ScoreSheet`를 넘기면 반환형이 `ScoreSheet`로 추론된다. `raise ... from error`는 원래 예외를 체인으로 보존해 트레이스백에 둘 다 나오게 한다. `except RefusedError: raise`는 잡아서 아무것도 하지 않고 그대로 다시 올린다 — 바로 아래 `except LLMError`에 걸리지 않게 하려는 의도다(`RefusedError`가 `LLMError`의 하위 클래스이므로 순서가 중요하다).
+> **설명** — `classify_sdk_error`가 예외를 **던지지 않고 돌려주는** 설계가 낯설 수 있다. 호출부에서 `raise classify_sdk_error(error) from error`라고 쓰면 원래 SDK 예외가 트레이스백에 함께 남는다. 함수 안에서 던지면 그 체인이 끊긴다.
+>
+> `isinstance` 사슬의 **순서가 정답을 바꾼다.** `AuthenticationError`·`NotFoundError`·`RateLimitError` 등은 모두 `APIStatusError`의 하위이므로, `APIStatusError` 검사를 위로 올리면 모든 에러가 거기서 잡혀 401과 500이 같은 분류가 된다.
+>
+> **구문법 대조** — `type[TOut]`은 "클래스 자체"를 받는 타입이다(인스턴스가 아니라 `ScoreSheet`라는 클래스를 넘긴다). 구형 코드에서는 `Type[TOut]`으로 썼다. `tuple[TOut, int]`도 구형에서는 `Tuple[TOut, int]`였다.
 
 - [ ] **Step 4: 가짜 LLM을 `tests/fakes.py`에 추가**
 
@@ -2968,7 +4048,7 @@ class FakeLLM:
 pytest tests/test_llm.py
 ```
 
-Expected: `8 passed`
+Expected: `18 passed`
 
 - [ ] **Step 6: 실제 API 연결 확인 스크립트 작성**
 
@@ -2983,7 +4063,8 @@ Expected: `8 passed`
 
 from pydantic import BaseModel
 
-from pipeline.lib.llm import MODEL, AnthropicLLM
+from pipeline.lib.llm import MODEL, SDK_MAX_RETRIES, AnthropicLLM
+from pipeline.lib.retry import Permanent, Transient
 from pipeline.lib.secrets import require
 
 
@@ -3001,11 +4082,20 @@ def main() -> None:
         "제목: 결제 서버 P99 지연을 400ms에서 40ms로 줄인 과정"
     )
 
-    verdict, input_tokens = llm.parse(
-        prompt=prompt, output_format=Verdict, effort="low", max_tokens=2000
-    )
+    try:
+        verdict, input_tokens = llm.parse(
+            prompt=prompt, output_format=Verdict, effort="low", max_tokens=2000
+        )
+    except Permanent as error:
+        # 분류가 제대로 작동하는지 여기서도 확인된다 — 설정 문제면
+        # 재시도 없이 안내가 붙은 메시지가 나온다.
+        print(f"[설정 문제] {error}")
+        raise SystemExit(1)
+    except Transient as error:
+        print(f"[일시 문제] {error}")
+        raise SystemExit(1)
 
-    print(f"모델: {MODEL}")
+    print(f"모델: {MODEL}  (SDK 재시도 {SDK_MAX_RETRIES}회)")
     print(f"입력 토큰: {input_tokens}")
     print(f"점수: {verdict.score}")
     print(f"이유: {verdict.reason}")
@@ -3025,18 +4115,18 @@ python scripts/smoke_llm.py
 
 Expected: 점수(아마 80 이상)와 이유가 출력되고 "성공".
 
-실패하면 `ANTHROPIC_API_KEY`가 **Max 크레딧이 연결된 Console 조직**의 키인지 확인한다. claude.ai → Settings → Billing에서 조직 연결 상태를 본다.
+`[설정 문제]`가 나오면 메시지가 원인을 알려준다 — 401이면 키, 404면 모델 ID다.
 
 - [ ] **Step 8: 커밋**
 
 ```bash
 git add pipeline/lib/llm.py tests/fakes.py tests/test_llm.py scripts/smoke_llm.py
-git commit -m "feat: Claude API 래퍼 — 구조화된 출력, 거부 처리, 1회 재시도"
+git commit -m "feat: Claude API 래퍼 — SDK에 전송 재시도 위임, 예외 분류, 스키마 1회 재시도"
 ```
 
 ---
 
-## Task 14: 선별
+## Task 16: 선별
 
 **Files:**
 - Create: `pipeline/rank.py`
@@ -3236,7 +4326,7 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'pipeline.rank'`
 from datetime import datetime, timezone
 
 from pipeline.lib.config import load_interests, load_sources
-from pipeline.lib.llm import LLM, AnthropicLLM, Effort, retrying
+from pipeline.lib.llm import LLM, AnthropicLLM, Effort
 from pipeline.lib.secrets import require
 from pipeline.lib.store import LocalStore, SupabaseStore
 from pipeline.lib.timeutil import KST
@@ -3336,8 +4426,10 @@ def rank(
         interests=interests, recent_headlines=recent_headlines, items=items
     )
 
-    sheet, _tokens = retrying(
-        lambda: llm.parse(prompt=prompt, output_format=ScoreSheet, effort=RANK_EFFORT)
+    # 재시도는 llm.parse 안에서 끝난다 — 전송 계층은 SDK가, 스키마 실패는
+    # 래퍼가 1회 담당한다. 여기서 또 감싸면 이중 재시도가 된다.
+    sheet, _tokens = llm.parse(
+        prompt=prompt, output_format=ScoreSheet, effort=RANK_EFFORT
     )
 
     ranked: list[RankedItem] = []
@@ -3401,7 +4493,7 @@ if __name__ == "__main__":
     main()
 ```
 
-> **설명** — `enumerate(items)`는 `(0, 첫항목), (1, 둘째항목), ...`을 돌려줘서 번호와 값을 함께 쓸 수 있다. `list.sort(key=..., reverse=True)`는 리스트를 제자리에서 정렬하며, `key`로 비교 기준을 지정한다(`lambda r: r.score`). `weights.get(name, 1.0)`은 소스가 가중치 표에 없으면 1.0을 쓴다 — 설정이 빠져도 죽지 않게 한다. `retrying(lambda: ...)`에서 `lambda`로 감싼 이유는, `retrying`이 함수 **객체**를 받아 여러 번 호출해야 하므로 호출 결과가 아니라 호출 가능한 것을 넘겨야 하기 때문이다.
+> **설명** — `enumerate(items)`는 `(0, 첫항목), (1, 둘째항목), ...`을 돌려줘서 번호와 값을 함께 쓸 수 있다. `list.sort(key=..., reverse=True)`는 리스트를 제자리에서 정렬하며, `key`로 비교 기준을 지정한다(`lambda r: r.score`). `weights.get(name, 1.0)`은 소스가 가중치 표에 없으면 1.0을 쓴다 — 설정이 빠져도 죽지 않게 한다. `llm.parse`를 `retrying`으로 감싸지 않는 것이 의도적이다. 전송 계층 재시도는 anthropic SDK가 하고(`max_retries`), 스키마 실패 재시도는 `llm.parse` 안에서 한다. 여기서 한 겹 더 두르면 한 번의 논리적 호출이 여러 배로 늘어난다.
 
 - [ ] **Step 4: 통과를 확인**
 
@@ -3420,7 +4512,7 @@ git commit -m "feat: 선별 단계 — 일괄 채점, 소스 가중치, 잘못�
 
 ---
 
-## Task 15: 선별 품질 평가 도구
+## Task 17: 선별 품질 평가 도구
 
 운영에 포함되지 않는다. 시드 데이터로 프롬프트를 고치며 결과를 비교하는 도구다.
 
@@ -3641,9 +4733,11 @@ git commit -m "feat: 선별 품질 평가 도구 + 관심사 프로필 튜닝"
 
 ---
 
-## Task 16: 본문 확보
+## Task 18: 본문 확보
 
 외부 크롤링은 구조적으로 가장 자주 깨지는 단계이면서, 폴백이 존재하는 유일한 단계다. **절대 중단하지 않는다.**
+
+분류가 여기서 실질적인 차이를 만든다 — **403(봇 차단)에 재시도를 걸면 10건이면 수십 초를 버린다.** 영구 실패는 즉시 발췌로 내려간다.
 
 **Files:**
 - Create: `pipeline/enrich.py`
@@ -3681,7 +4775,14 @@ git commit -m "feat: 선별 품질 평가 도구 + 관심사 프로필 튜닝"
 ```python
 from pathlib import Path
 
-from pipeline.enrich import BODY_MAX_CHARS, enrich, extract_body
+from pipeline.enrich import (
+    ARTICLE_ATTEMPTS,
+    BODY_MAX_CHARS,
+    enrich,
+    extract_body,
+)
+from pipeline.lib.http import FetchResult
+from pipeline.lib.retry import Permanent, Transient
 from pipeline.models import RankedBundle, RankedItem, RawItem
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -3710,19 +4811,36 @@ def _bundle(items) -> RankedBundle:
     )
 
 
+def _ok_fetch():
+    data = (FIXTURES / "article.html").read_bytes()
+
+    def fetch(url: str) -> FetchResult:
+        return FetchResult(content=data, final_url=url, moved_from=None)
+
+    return fetch
+
+
+def _enrich(items, fetch=None, sleeps=None):
+    recorded: list[float] = [] if sleeps is None else sleeps
+    bundle = enrich(
+        ranked=_bundle(items),
+        fetch=fetch or _ok_fetch(),
+        sleep=recorded.append,
+    )
+    return bundle, recorded
+
+
 # --- 본문 추출 ---
 
 def test_본문을_추출한다():
-    html = (FIXTURES / "article.html").read_bytes()
-    body = extract_body(html)
+    body = extract_body((FIXTURES / "article.html").read_bytes())
 
     assert body is not None
     assert "커넥션 풀 고갈이 병목" in body
 
 
 def test_내비게이션과_광고와_푸터를_걸러낸다():
-    html = (FIXTURES / "article.html").read_bytes()
-    body = extract_body(html)
+    body = extract_body((FIXTURES / "article.html").read_bytes())
 
     assert "채용" not in body
     assert "10만원 할인" not in body
@@ -3737,69 +4855,31 @@ def test_HTML이_아니면_None을_돌려준다():
     assert extract_body(b"\x00\x01\x02") is None
 
 
-# --- 확보 ---
-
-def _enrich(items, fetch=None, sleeps=None):
-    html = (FIXTURES / "article.html").read_bytes()
-    recorded: list[float] = [] if sleeps is None else sleeps
-    return enrich(
-        ranked=_bundle(items),
-        fetch=fetch or (lambda url: html),
-        sleep=recorded.append,
-    ), recorded
-
+# --- 정상 경로 ---
 
 def test_본문을_확보하고_출처를_기록한다():
     bundle, _ = _enrich([_ranked()])
 
     assert len(bundle.articles) == 1
     assert bundle.articles[0].body_source == "trafilatura"
+    assert bundle.articles[0].fallback_reason is None
     assert "트랜잭션" in bundle.articles[0].body
-
-
-def test_추출_실패시_RSS_발췌로_폴백한다():
-    """핵심 요구사항. 한 건 실패로 파이프라인이 죽지 않는다."""
-    bundle, _ = _enrich(
-        [_ranked(excerpt="발췌로 대체된다")],
-        fetch=lambda url: b"<html><body><nav>메뉴만</nav></body></html>",
-    )
-
-    assert bundle.articles[0].body == "발췌로 대체된다"
-    assert bundle.articles[0].body_source == "rss_excerpt"
-
-
-def test_HTTP_실패시에도_발췌로_폴백한다():
-    def fetch(url: str) -> bytes:
-        raise RuntimeError("403 Forbidden")
-
-    bundle, _ = _enrich([_ranked(excerpt="발췌")], fetch=fetch)
-
-    assert bundle.articles[0].body == "발췌"
-    assert bundle.articles[0].body_source == "rss_excerpt"
-
-
-def test_본문도_발췌도_없으면_그_건만_제외한다():
-    """요약할 재료가 전혀 없으면 보낼 수 없다. 중단은 하지 않는다."""
-    def fetch(url: str) -> bytes:
-        raise RuntimeError("실패")
-
-    bundle, _ = _enrich([_ranked(excerpt=""), _ranked(1, "발췌 있음")], fetch=fetch)
-
-    assert len(bundle.articles) == 1
-    assert bundle.articles[0].body == "발췌 있음"
 
 
 def test_본문을_상한에서_자른다():
     long_html = ("<html><body><article><p>" + "가" * 20000
                  + "</p></article></body></html>").encode("utf-8")
-    bundle, _ = _enrich([_ranked()], fetch=lambda url: long_html)
+    bundle, _ = _enrich(
+        [_ranked()],
+        fetch=lambda url: FetchResult(content=long_html, final_url=url, moved_from=None),
+    )
 
     assert len(bundle.articles[0].body) <= BODY_MAX_CHARS
 
 
 def test_요청_사이에_간격을_둔다():
     """상대 서버에 부담을 주지 않는다."""
-    bundle, sleeps = _enrich([_ranked(0), _ranked(1), _ranked(2)])
+    _, sleeps = _enrich([_ranked(0), _ranked(1), _ranked(2)])
 
     # 3건이면 2번 쉰다 (마지막 뒤에는 쉬지 않는다)
     assert len(sleeps) == 2
@@ -3809,9 +4889,9 @@ def test_요청_사이에_간격을_둔다():
 def test_선별_결과가_비면_요청하지_않는다():
     calls = []
 
-    def fetch(url: str) -> bytes:
+    def fetch(url: str) -> FetchResult:
         calls.append(url)
-        return b""
+        return FetchResult(content=b"", final_url=url, moved_from=None)
 
     bundle, _ = _enrich([], fetch=fetch)
 
@@ -3823,6 +4903,91 @@ def test_윈도우_경계를_이어받는다():
     bundle, _ = _enrich([_ranked()])
     assert bundle.window_start == WINDOW[0]
     assert bundle.window_end == WINDOW[1]
+
+
+# --- 폴백과 분류 ---
+
+def test_본문_추출_실패시_RSS_발췌로_폴백한다():
+    """핵심 요구사항. 한 건 실패로 파이프라인이 죽지 않는다."""
+    bundle, _ = _enrich(
+        [_ranked(excerpt="발췌로 대체된다")],
+        fetch=lambda url: FetchResult(
+            content=b"<html><body><nav>메뉴만</nav></body></html>",
+            final_url=url, moved_from=None,
+        ),
+    )
+
+    assert bundle.articles[0].body == "발췌로 대체된다"
+    assert bundle.articles[0].body_source == "rss_excerpt"
+    assert "추출 실패" in bundle.articles[0].fallback_reason
+
+
+def test_영구_실패는_재시도하지_않고_즉시_폴백한다():
+    """403 봇 차단에 재시도를 걸면 10건이면 수십 초를 버린다."""
+    calls = []
+
+    def fetch(url: str) -> FetchResult:
+        calls.append(url)
+        raise Permanent(f"{url} HTTP 403")
+
+    bundle, sleeps = _enrich([_ranked(excerpt="발췌")], fetch=fetch)
+
+    assert len(calls) == 1                      # 재시도하지 않았다
+    assert sleeps == []                          # 백오프도 없었다
+    assert bundle.articles[0].body_source == "rss_excerpt"
+    assert "403" in bundle.articles[0].fallback_reason
+
+
+def test_일시_실패는_재시도한_뒤_폴백한다():
+    calls = []
+
+    def fetch(url: str) -> FetchResult:
+        calls.append(url)
+        raise Transient(f"{url} HTTP 503")
+
+    bundle, _ = _enrich([_ranked(excerpt="발췌")], fetch=fetch)
+
+    assert len(calls) == ARTICLE_ATTEMPTS
+    assert bundle.articles[0].body_source == "rss_excerpt"
+    assert "503" in bundle.articles[0].fallback_reason
+
+
+def test_재시도_중_성공하면_본문을_쓴다():
+    calls = []
+    data = (FIXTURES / "article.html").read_bytes()
+
+    def fetch(url: str) -> FetchResult:
+        calls.append(url)
+        if len(calls) == 1:
+            raise Transient("일시 장애")
+        return FetchResult(content=data, final_url=url, moved_from=None)
+
+    bundle, _ = _enrich([_ranked()], fetch=fetch)
+
+    assert bundle.articles[0].body_source == "trafilatura"
+    assert bundle.articles[0].fallback_reason is None
+
+
+def test_본문도_발췌도_없으면_그_건만_제외한다():
+    """요약할 재료가 전혀 없으면 보낼 수 없다. 중단은 하지 않는다."""
+    def fetch(url: str) -> FetchResult:
+        raise Permanent("HTTP 404")
+
+    bundle, _ = _enrich([_ranked(0, excerpt=""), _ranked(1, "발췌 있음")], fetch=fetch)
+
+    assert len(bundle.articles) == 1
+    assert bundle.articles[0].body == "발췌 있음"
+
+
+def test_분류되지_않은_예외는_삼키지_않는다():
+    """fetch 구현의 코드 버그를 발췌 폴백으로 가리면 원인을 못 찾는다."""
+    import pytest
+
+    def fetch(url: str) -> FetchResult:
+        raise TypeError("코드 버그")
+
+    with pytest.raises(TypeError):
+        _enrich([_ranked()], fetch=fetch)
 ```
 
 - [ ] **Step 3: 실패를 확인**
@@ -3844,6 +5009,9 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'pipeline.enrich'`
 깨지는 반면, 폴백(RSS 발췌)이 존재하는 유일한 단계이기도 하다.
 품질 저하가 전송 실패보다 낫다.
 
+분류의 실익이 여기서 가장 크다 — 403(봇 차단)은 재시도해도 같으므로
+즉시 발췌로 내려가고, 503은 재시도한 뒤 내려간다.
+
 실행: python -m pipeline.enrich
 """
 
@@ -3851,9 +5019,11 @@ import time
 from datetime import datetime, timezone
 from typing import Callable
 
-import httpx
 import trafilatura
 
+from pipeline.lib.http import FetchResult
+from pipeline.lib.http import fetch as http_fetch
+from pipeline.lib.retry import Permanent, Transient, with_retry
 from pipeline.lib.store import LocalStore
 from pipeline.lib.timeutil import KST
 from pipeline.models import Article, ArticlesBundle, RankedBundle
@@ -3864,22 +5034,11 @@ BODY_MAX_CHARS = 8000
 # 상대 서버 부담을 줄이는 요청 간격(초).
 REQUEST_DELAY = 1.5
 
-HTTP_TIMEOUT = 20.0
-USER_AGENT = "briefing-bot/0.1"
+# 글당 시도 횟수 (일시 실패에만 적용된다. 영구 실패는 1회로 끝난다.)
+ARTICLE_ATTEMPTS = 2
 
-FetchFn = Callable[[str], bytes]
+FetchFn = Callable[[str], FetchResult]
 SleepFn = Callable[[float], None]
-
-
-def http_fetch(url: str) -> bytes:
-    response = httpx.get(
-        url,
-        timeout=HTTP_TIMEOUT,
-        follow_redirects=True,
-        headers={"User-Agent": USER_AGENT},
-    )
-    response.raise_for_status()
-    return response.content
 
 
 def extract_body(payload: bytes) -> str | None:
@@ -3902,6 +5061,36 @@ def extract_body(payload: bytes) -> str | None:
     return text.strip()
 
 
+def _fetch_body(
+    url: str,
+    *,
+    fetch: FetchFn,
+    sleep: SleepFn,
+) -> tuple[str | None, str | None]:
+    """(본문, 폴백 이유)를 돌려준다. 본문이 있으면 이유는 None이다.
+
+    분류되지 않은 예외는 그대로 올린다 — fetch 구현의 코드 버그를
+    발췌 폴백으로 가리면 원인을 찾을 수 없다.
+    """
+    try:
+        result = with_retry(
+            lambda: fetch(url),
+            attempts=ARTICLE_ATTEMPTS,
+            sleep=sleep,
+        )
+    except Permanent as error:
+        # 403 봇 차단, 404 삭제, 410 등. 재시도해도 같다.
+        return None, f"접근 불가 — {error}"
+    except Transient as error:
+        # with_retry가 이미 재시도했는데도 실패했다.
+        return None, f"일시 실패(재시도 후) — {error}"
+
+    body = extract_body(result.content)
+    if body is None:
+        return None, "본문 추출 실패 — 광고·내비게이션만 있는 페이지일 수 있다"
+    return body, None
+
+
 def enrich(
     *,
     ranked: RankedBundle,
@@ -3913,19 +5102,16 @@ def enrich(
     total = len(ranked.selected)
 
     for position, item in enumerate(ranked.selected):
-        body: str | None = None
-
-        try:
-            body = extract_body(fetch(item.item.url))
-        except Exception:  # noqa: BLE001 — HTTP 실패도 폴백 대상이다
-            body = None
+        body, reason = _fetch_body(item.item.url, fetch=fetch, sleep=sleep)
 
         if body is not None:
-            source = "trafilatura"
+            body_source: str = "trafilatura"
+            fallback_reason: str | None = None
         else:
             # 폴백: RSS 발췌. 얕지만 요약은 된다.
             body = item.item.excerpt.strip()
-            source = "rss_excerpt"
+            body_source = "rss_excerpt"
+            fallback_reason = reason
 
         if not body:
             # 본문도 발췌도 없으면 요약할 재료가 없다. 이 건만 제외한다.
@@ -3934,7 +5120,8 @@ def enrich(
         articles.append(Article(
             ranked=item,
             body=body[:BODY_MAX_CHARS],
-            body_source=source,
+            body_source=body_source,   # type: ignore[arg-type]
+            fallback_reason=fallback_reason,
         ))
 
         # 마지막 요청 뒤에는 쉬지 않는다.
@@ -3955,20 +5142,30 @@ def main() -> None:
     bundle = enrich(ranked=store.read("ranked", RankedBundle))
     path = store.write("articles", bundle)
 
-    fallbacks = sum(1 for a in bundle.articles if a.body_source == "rss_excerpt")
+    fallbacks = [a for a in bundle.articles if a.body_source == "rss_excerpt"]
     print(f"본문 확보 {len(bundle.articles)}건 → {path}")
-    if fallbacks:
-        print(f"  경고: {fallbacks}건은 RSS 발췌로 폴백됨 (요약 품질 저하)")
     for article in bundle.articles:
         mark = "발췌" if article.body_source == "rss_excerpt" else "본문"
         print(f"  [{mark}] {len(article.body):5d}자  {article.ranked.item.title[:45]}")
 
+    if fallbacks:
+        print()
+        print(f"  경고: {len(fallbacks)}건이 발췌로 폴백됐다 (요약 품질 저하)")
+        for article in fallbacks:
+            print(f"    {article.ranked.item.source}: {article.fallback_reason}")
+        print("  '접근 불가'가 반복되는 소스는 봇 차단일 가능성이 높다.")
+```
 
+```python
 if __name__ == "__main__":
     main()
 ```
 
-> **설명** — `trafilatura.extract`는 HTML에서 본문을 추출한다. `favor_precision=True`는 "확실한 본문만" 뽑으므로 광고가 섞일 위험이 줄어든다. `time.sleep`을 인자로 받는 이유는 테스트에서 실제로 기다리지 않게 하려는 것이다 — 테스트는 `list.append`를 넘겨 "몇 번, 얼마나 쉬려 했는지"만 기록한다. `sum(1 for x in xs if 조건)`은 조건을 만족하는 개수를 세는 관용구다.
+> **설명** — `_fetch_body`가 예외를 던지지 않고 `(본문, 이유)` 튜플을 돌려주는 이유는, 호출부에서 "실패했지만 계속한다"가 **정상 흐름**이기 때문이다. 예외로 처리하면 호출부가 try/except로 감싸야 하고, 그러면 "이건 정상 폴백인지 진짜 버그인지"가 흐려진다.
+>
+> `body_source: str = "trafilatura"`에 타입을 명시한 이유는, 아래 `else` 분기에서 다른 값을 넣기 때문이다. 명시하지 않으면 타입 검사기가 첫 대입에서 `Literal["trafilatura"]`로 좁혀버려 재대입을 에러로 본다. `# type: ignore[arg-type]`은 `str`을 `BodySource`(Literal) 자리에 넘기는 것을 검사기에게 허용하는 표시다.
+>
+> **구문법 대조** — `tuple[str | None, str | None]`은 구형으로 `Tuple[Optional[str], Optional[str]]`이다.
 
 - [ ] **Step 5: 통과를 확인**
 
@@ -3976,18 +5173,18 @@ if __name__ == "__main__":
 pytest tests/test_enrich.py
 ```
 
-Expected: `12 passed`
+Expected: `15 passed`
 
 - [ ] **Step 6: 커밋**
 
 ```bash
 git add pipeline/enrich.py tests/test_enrich.py tests/fixtures/article.html
-git commit -m "feat: 본문 확보 단계 — 발췌 폴백, 중단 없음, 요청 간격"
+git commit -m "feat: 본문 확보 — 영구 실패 즉시 폴백, 일시 실패만 재시도, 이유 기록"
 ```
 
 ---
 
-## Task 17: 요약과 최종 선정
+## Task 19: 요약과 최종 선정
 
 **Files:**
 - Create: `pipeline/summarize.py`
@@ -4191,7 +5388,7 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'pipeline.summarize'`
 
 from datetime import datetime, timezone
 
-from pipeline.lib.llm import LLM, AnthropicLLM, Effort, retrying
+from pipeline.lib.llm import LLM, AnthropicLLM, Effort
 from pipeline.lib.secrets import require
 from pipeline.lib.store import LocalStore
 from pipeline.lib.timeutil import KST
@@ -4263,10 +5460,9 @@ def summarize(*, articles: ArticlesBundle, llm: LLM) -> Briefing:
         )
 
     prompt = build_prompt(articles=candidates)
-    sheet, _tokens = retrying(
-        lambda: llm.parse(
-            prompt=prompt, output_format=SummarySheet, effort=SUMMARIZE_EFFORT
-        )
+    # 재시도는 llm.parse 안에서 끝난다 (rank.py와 같은 이유).
+    sheet, _tokens = llm.parse(
+        prompt=prompt, output_format=SummarySheet, effort=SUMMARIZE_EFFORT
     )
 
     summaries: list[Summary] = []
@@ -4341,7 +5537,7 @@ git commit -m "feat: 요약 단계 — 임계값 기반 건수, 한국어 출력
 
 ---
 
-## Task 18: 슬랙 메시지 조립
+## Task 20: 슬랙 메시지 조립
 
 **Files:**
 - Create: `pipeline/lib/slack.py`
@@ -4356,7 +5552,8 @@ import json
 
 import pytest
 
-from pipeline.lib.slack import SlackError, build_blocks, send
+from pipeline.lib.retry import Permanent, Transient
+from pipeline.lib.slack import SEND_ATTEMPTS, build_blocks, send
 from pipeline.models import (
     Article,
     Briefing,
@@ -4383,6 +5580,7 @@ def _summary(index: int = 0, fallback: bool = False) -> Summary:
             ),
             body="본문",
             body_source="rss_excerpt" if fallback else "trafilatura",
+            fallback_reason="접근 불가 — HTTP 403" if fallback else None,
         ),
         headline=f"헤드라인 {index}",
         bullets=["첫 요점", "둘째 요점"],
@@ -4454,6 +5652,14 @@ def test_발췌_폴백이_있으면_하단에_경고한다():
     assert "발췌" in text
 
 
+def test_폴백_경고에_이유가_들어간다():
+    """'접근 불가'가 반복되면 봇 차단이므로 그 소스를 손봐야 한다."""
+    blocks = build_blocks(_briefing([_summary(0, fallback=True)]))
+    text = _text(blocks)
+
+    assert "403" in text
+
+
 def test_폴백이_없으면_경고하지_않는다():
     text = _text(build_blocks(_briefing([_summary(0), _summary(1)])))
     assert "발췌로" not in text
@@ -4467,17 +5673,28 @@ def test_블록이_슬랙_상한을_넘지_않는다():
 
 # --- 전송 ---
 
+def _send(post, **overrides):
+    kwargs = {
+        "webhook_url": "https://hooks.slack.com/services/XXX/YYY/ZZZ",
+        "blocks": [{"type": "divider"}],
+        "post": post,
+        "sleep": lambda _: None,
+    }
+    kwargs.update(overrides)
+    return send(**kwargs)
+
+
 def test_웹훅으로_블록을_보낸다():
     sent = {}
 
-    def post(url: str, payload: dict) -> int:
+    def post(url: str, payload: dict) -> tuple[int, str]:
         sent["url"] = url
         sent["payload"] = payload
-        return 200
+        return 200, "ok"
 
-    send(webhook_url="https://hooks.slack.com/x", blocks=[{"type": "divider"}], post=post)
+    _send(post)
 
-    assert sent["url"] == "https://hooks.slack.com/x"
+    assert sent["url"] == "https://hooks.slack.com/services/XXX/YYY/ZZZ"
     assert sent["payload"]["blocks"] == [{"type": "divider"}]
 
 
@@ -4485,21 +5702,90 @@ def test_알림용_text가_함께_간다():
     """text가 없으면 폰 알림에 내용이 안 뜬다."""
     sent = {}
 
-    def post(url: str, payload: dict) -> int:
+    def post(url: str, payload: dict) -> tuple[int, str]:
         sent["payload"] = payload
-        return 200
+        return 200, "ok"
 
-    send(webhook_url="https://h/x", blocks=[], post=post, notification_text="IT 브리핑")
+    _send(post, notification_text="IT 브리핑")
 
     assert sent["payload"]["text"] == "IT 브리핑"
 
 
-def test_실패_응답이면_예외를_던진다():
-    def post(url: str, payload: dict) -> int:
-        return 403
+def test_404는_재시도하지_않고_영구_실패다():
+    """웹훅이 삭제된 것이다. 재시도해도 같다."""
+    calls = []
 
-    with pytest.raises(SlackError, match="403"):
-        send(webhook_url="https://h/x", blocks=[], post=post)
+    def post(url: str, payload: dict) -> tuple[int, str]:
+        calls.append(1)
+        return 404, "no_service"
+
+    with pytest.raises(Permanent, match="no_service"):
+        _send(post)
+    assert len(calls) == 1
+
+
+def test_403도_영구_실패다():
+    def post(url: str, payload: dict) -> tuple[int, str]:
+        return 403, "action_prohibited"
+
+    with pytest.raises(Permanent):
+        _send(post)
+
+
+def test_429는_재시도한다():
+    calls = []
+
+    def post(url: str, payload: dict) -> tuple[int, str]:
+        calls.append(1)
+        return 429, "rate_limited"
+
+    with pytest.raises(Transient):
+        _send(post)
+    assert len(calls) == SEND_ATTEMPTS
+
+
+def test_5xx도_재시도한다():
+    calls = []
+
+    def post(url: str, payload: dict) -> tuple[int, str]:
+        calls.append(1)
+        return 500, "rollup_error"
+
+    with pytest.raises(Transient):
+        _send(post)
+    assert len(calls) == SEND_ATTEMPTS
+
+
+def test_재시도_중_성공하면_예외가_없다():
+    calls = []
+
+    def post(url: str, payload: dict) -> tuple[int, str]:
+        calls.append(1)
+        return (500, "rollup_error") if len(calls) == 1 else (200, "ok")
+
+    _send(post)   # 예외가 나지 않아야 한다
+    assert len(calls) == 2
+
+
+def test_응답_본문의_이유가_에러에_들어간다():
+    """'HTTP 404'만으로는 원인을 모른다. channel_not_found를 봐야 한다."""
+    def post(url: str, payload: dict) -> tuple[int, str]:
+        return 404, "channel_not_found"
+
+    with pytest.raises(Permanent, match="channel_not_found"):
+        _send(post)
+
+
+def test_에러_메시지에_웹훅_URL이_들어가지_않는다():
+    """웹훅 URL은 비밀값이다. 에러 메시지는 로그와 Actions 출력에 남는다."""
+    def post(url: str, payload: dict) -> tuple[int, str]:
+        return 404, "no_service"
+
+    with pytest.raises(Permanent) as caught:
+        _send(post)
+
+    assert "XXX" not in str(caught.value)
+    assert "hooks.slack.com" not in str(caught.value)
 ```
 
 - [ ] **Step 2: 실패를 확인**
@@ -4521,11 +5807,14 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'pipeline.lib.slack'`
 (카카오톡은 200자 제약 때문에 상위 5건 목록만 싣는다. 계획 3에서 다룬다.)
 """
 
+import time
 from datetime import datetime
 from typing import Callable
 
 import httpx
 
+from pipeline.lib.http import classify_status
+from pipeline.lib.retry import with_retry
 from pipeline.lib.timeutil import KST
 from pipeline.models import Briefing
 
@@ -4534,11 +5823,11 @@ MAX_BLOCKS = 50
 
 HTTP_TIMEOUT = 15.0
 
-PostFn = Callable[[str, dict], int]
+# 전송 시도 횟수. 429/5xx에만 적용된다 (404/403은 1회로 끝난다).
+SEND_ATTEMPTS = 3
 
-
-class SlackError(RuntimeError):
-    """슬랙 전송 실패."""
+# (상태 코드, 응답 본문). 슬랙은 실패 이유를 본문에 담으므로 둘 다 필요하다.
+PostFn = Callable[[str, dict], tuple[int, str]]
 
 
 def _topic_emoji(topic: str) -> str:
@@ -4610,15 +5899,24 @@ def build_blocks(briefing: Briefing) -> list[dict]:
         })
 
     # 폴백이 섞였으면 하단에 알린다. 품질 저하를 모르고 넘어가면 안 된다.
-    fallbacks = sum(
-        1 for s in briefing.summaries if s.article.body_source == "rss_excerpt"
-    )
+    fallbacks = [
+        s for s in briefing.summaries if s.article.body_source == "rss_excerpt"
+    ]
     if fallbacks:
+        # 이유를 함께 보여준다. "접근 불가"가 반복되면 봇 차단이므로
+        # 그 소스를 손봐야 한다는 걸 알 수 있다.
+        reasons = "\n".join(
+            f"• {s.article.ranked.item.source}: {s.article.fallback_reason}"
+            for s in fallbacks
+        )
         blocks.append({
             "type": "context",
             "elements": [{
                 "type": "mrkdwn",
-                "text": f"⚠️ {fallbacks}건은 본문 추출 실패로 RSS 발췌만 요약했습니다.",
+                "text": (
+                    f"⚠️ {len(fallbacks)}건은 본문 추출 실패로 RSS 발췌만 "
+                    f"요약했습니다.\n{reasons}"
+                ),
             }],
         })
 
@@ -4627,9 +5925,11 @@ def build_blocks(briefing: Briefing) -> list[dict]:
     return blocks[:MAX_BLOCKS]
 
 
-def http_post(url: str, payload: dict) -> int:
+def http_post(url: str, payload: dict) -> tuple[int, str]:
     response = httpx.post(url, json=payload, timeout=HTTP_TIMEOUT)
-    return response.status_code
+    # 슬랙은 실패 이유를 본문에 평문으로 담는다
+    # (invalid_payload, channel_not_found, no_service 등).
+    return response.status_code, response.text[:200]
 
 
 def send(
@@ -4638,15 +5938,24 @@ def send(
     blocks: list[dict],
     post: PostFn = http_post,
     notification_text: str = "IT 브리핑",
+    sleep: Callable[[float], None] = time.sleep,
 ) -> None:
-    """Incoming Webhook으로 보낸다."""
+    """Incoming Webhook으로 보낸다.
+
+    404(웹훅 삭제)·403은 재시도하지 않고 즉시 Permanent로 올린다.
+    429·5xx는 백오프 재시도한다.
+    """
     # text는 폰 알림과 블록 미지원 클라이언트의 폴백으로 쓰인다.
     # 없으면 알림에 "새 메시지"만 뜬다.
     payload = {"text": notification_text, "blocks": blocks}
 
-    status = post(webhook_url, payload)
-    if status != 200:
-        raise SlackError(f"슬랙 전송 실패: HTTP {status}")
+    def attempt() -> None:
+        status, body = post(webhook_url, payload)
+        # url에 webhook_url을 넣지 않는다 — 비밀값이고, 에러 메시지는
+        # 슬랙·로그·Actions 출력에 그대로 남는다.
+        classify_status(status, url="슬랙 웹훅", detail=body)
+
+    with_retry(attempt, attempts=SEND_ATTEMPTS, sleep=sleep)
 ```
 
 > **설명** — `dict.get(key, default)`로 이모지를 고르는 패턴은 if/elif 사슬보다 짧고 읽기 쉽다. `strftime("%m/%d (%a)")`는 시각을 "11/10 (Tue)" 형태의 문자열로 만든다. Block Kit에서 `mrkdwn`은 슬랙 전용 마크다운으로, 링크가 `<URL|텍스트>` 문법이고 기울임은 `_텍스트_`다(일반 마크다운과 다르다).
@@ -4657,7 +5966,7 @@ def send(
 pytest tests/test_slack.py
 ```
 
-Expected: `12 passed`
+Expected: `19 passed`
 
 - [ ] **Step 5: 슬랙 Webhook을 만든다**
 
@@ -4676,7 +5985,7 @@ git commit -m "feat: 슬랙 Block Kit 메시지 조립 (0건 알림, 폴백 경�
 
 ---
 
-## Task 19: 전송과 실행 이력
+## Task 21: 전송과 실행 이력
 
 **Files:**
 - Create: `pipeline/notify.py`
@@ -4741,7 +6050,8 @@ def _raw() -> RawBundle:
         window_end=WINDOW_END.isoformat(),
         items=[],
         source_counts={"토스_기술블로그": 3, "조용한소스": 0},
-        errors=[SourceError(source="깨진소스", message="RuntimeError: 403")],
+        errors=[SourceError(source="깨진소스", kind="config",
+                            message="https://broken.com/r HTTP 404")],
     )
 
 
@@ -4794,6 +6104,13 @@ def test_수집_에러를_이력에_남긴다():
     assert remote.runs[0]["errors"][0]["source"] == "깨진소스"
 
 
+def test_에러의_성격까지_이력에_남긴다():
+    """계획 3의 소스 경고가 "죽은 소스"와 "불안정한 소스"를 구분하는 근거다."""
+    remote, _ = _notify(_briefing([_summary()]))
+
+    assert remote.runs[0]["errors"][0]["kind"] == "config"
+
+
 def test_0건이어도_보내고_이력을_남긴다():
     """이력을 남기지 않으면 다음 윈도우가 계속 늘어난다."""
     remote, sent = _notify(_briefing([]))
@@ -4839,7 +6156,7 @@ def test_이전_윈도우의_이력은_막지_않는다():
     assert len(sent) == 1
 
 
-def test_슬랙_전송이_실패하면_이력을_남기지_않는다():
+def test_일시_전송_실패면_이력을_남기지_않는다():
     """이력을 먼저 남기면, 전송 실패 후 재실행이 '이미 보냄'으로 막힌다."""
     remote = FakeRemoteStore()
 
@@ -4857,6 +6174,29 @@ def test_슬랙_전송이_실패하면_이력을_남기지_않는다():
         )
 
     assert remote.runs == []
+
+
+def test_영구_전송_실패도_이력을_남기지_않는다():
+    """웹훅이 삭제된 경우. 이력을 남기면 웹훅을 고친 뒤 재실행이 막힌다."""
+    from pipeline.lib.retry import Permanent
+
+    remote = FakeRemoteStore()
+
+    def refusing_send(blocks, text):
+        raise Permanent("슬랙 웹훅 HTTP 404 — no_service")
+
+    with pytest.raises(Permanent):
+        notify(
+            briefing=_briefing([_summary()]),
+            raw=_raw(),
+            remote=remote,
+            briefing_date="2026-11-10",
+            send_slack=refusing_send,
+            force=False,
+        )
+
+    assert remote.runs == []
+    assert remote.saved == []
 
 
 def test_알림_텍스트에_건수가_들어간다():
@@ -4963,9 +6303,11 @@ def main() -> None:
     store = LocalStore(date=date)
     webhook = require("SLACK_WEBHOOK_URL")
 
+    raw = store.read("raw", RawBundle)
+
     notify(
         briefing=store.read("briefing", Briefing),
-        raw=store.read("raw", RawBundle),
+        raw=raw,
         remote=SupabaseStore(require("SUPABASE_URL"), require("SUPABASE_SERVICE_KEY")),
         briefing_date=date,
         send_slack=lambda blocks, text: send(
@@ -4975,6 +6317,20 @@ def main() -> None:
     )
 
     print(f"전송 완료 ({date})")
+
+    # 설정 문제는 내가 고쳐야 하므로 전송 후에도 한 번 더 짚어준다.
+    config_errors = [error for error in raw.errors if error.kind == "config"]
+    moved = [error for error in raw.errors if error.kind == "moved"]
+    if config_errors:
+        print()
+        print(f"  고쳐야 할 소스 {len(config_errors)}개:")
+        for error in config_errors:
+            print(f"    {error.source}: {error.message}")
+    if moved:
+        print()
+        print(f"  주소가 이전된 소스 {len(moved)}개 (sources.yaml 갱신):")
+        for error in moved:
+            print(f"    {error.source}: {error.message}")
 
 
 if __name__ == "__main__":
@@ -4989,7 +6345,7 @@ if __name__ == "__main__":
 pytest tests/test_notify.py
 ```
 
-Expected: `13 passed`
+Expected: `15 passed`
 
 - [ ] **Step 5: 커밋**
 
@@ -5000,7 +6356,7 @@ git commit -m "feat: 전송 단계 — 멱등성, 0건 전송, 전송 성공 후
 
 ---
 
-## Task 20: 중간 산출물 정리
+## Task 22: 중간 산출물 정리
 
 스펙 7.5의 "`data/` 90일 경과분 삭제" 항목이다. 날짜 디렉터리가 무한 증식하는 것을 막는다.
 
@@ -5157,7 +6513,7 @@ git commit -m "feat: 중간 산출물 90일 정리 (시드는 보호)"
 
 ---
 
-## Task 21: 엔드투엔드 검증과 사용 문서
+## Task 23: 엔드투엔드 검증과 사용 문서
 
 **Files:**
 - Create: `README.md`
@@ -5252,7 +6608,51 @@ python -m pipeline.collect
 
 Expected: 윈도우가 "마지막 발송 이후"로 좁아져 수집 건수가 크게 줄어든다. 앞서 발행한 글은 `known_urls`로 걸러진다.
 
-- [ ] **Step 7: `README.md` 작성**
+- [ ] **Step 7: 에러 분류가 실제로 작동하는지 확인**
+
+분류는 **일부러 깨뜨려봐야** 검증된다. 둘 다 원복이 쉽다.
+
+**7-1. 죽은 소스가 `[설정]`으로 나오는지**
+
+`config/sources.yaml`에 일부러 없는 주소를 하나 추가한다.
+
+```yaml
+  - name: 테스트_죽은소스
+    url: https://example.com/this-feed-does-not-exist.xml
+    kind: rss
+    weight: 1.0
+    lang: ko
+    enabled: true
+```
+
+```bash
+python scripts/check_feeds.py
+```
+
+Expected: `[설정] 테스트_죽은소스  https://example.com/... HTTP 404`
+
+**`[일시]`로 나오면 분류가 틀렸다.** 404는 영구 실패여야 한다.
+
+```bash
+python -m pipeline.collect
+```
+
+Expected: 출력 마지막에 `[설정] 테스트_죽은소스: ... HTTP 404`, 그리고 **나머지 소스는 정상 수집**된다.
+
+확인 후 `sources.yaml`에서 그 블록을 지운다.
+
+**7-2. 잘못된 웹훅이 즉시 실패하는지**
+
+```bash
+SLACK_WEBHOOK_URL=https://hooks.slack.com/services/XXX/YYY/ZZZ \
+  python -m pipeline.notify --force
+```
+
+Expected: **재시도 없이 즉시** `Permanent` 예외. 메시지에 `no_service` 같은 슬랙의 이유가 포함되고, **웹훅 URL은 들어 있지 않다.**
+
+몇 초간 멈췄다가 실패하면 재시도가 걸린 것이므로 분류가 틀렸다 — 404는 `Permanent`여야 한다.
+
+- [ ] **Step 8: `README.md` 작성**
 
 ````markdown
 # 토픽 컬럼 자동화
@@ -5320,7 +6720,7 @@ python -m pipeline.prune --dry-run  # 정리 대상 확인
   다시 만들 수 없다. `~/briefing-seed-backup/`에 백업이 있다.
 ````
 
-- [ ] **Step 8: 커밋**
+- [ ] **Step 9: 커밋**
 
 ```bash
 git add README.md
@@ -5339,6 +6739,9 @@ git commit -m "docs: README — 실행 방법과 튜닝 절차"
 - [ ] anon 키로 `article_bodies`를 읽으면 권한 거부가 난다
 - [ ] 두 번째 수집에서 윈도우가 좁아지고 기존 글이 걸러진다
 - [ ] `python -m pipeline.evaluate`의 상위 10건 중 8건 이상이 "읽고 싶다"
+- [ ] `check_feeds.py` 출력에서 `[설정]`과 `[일시]`가 구분되어 나온다
+- [ ] 잘못된 `SLACK_WEBHOOK_URL`로 `notify`를 돌리면 **재시도 없이** 즉시 실패하고, 에러 메시지에 웹훅 URL이 들어 있지 않다
+- [ ] `runs` 테이블의 `errors`에 `kind`가 들어 있다
 
 ---
 

@@ -33,8 +33,8 @@
 
 ```
 ┌─ GitHub Actions (월~금 07:20 KST) ──────────┐
-│ 01_collect → 02_rank → 03_enrich            │
-│ → 04_summarize → 05_render → 06_notify      │
+│ collect → rank → enrich                     │
+│ → summarize → render → notify               │
 └──────┬──────────────┬───────────────┬───────┘
        │              │               │
   Supabase       docs/data/*.json   카카오톡 + 슬랙
@@ -49,15 +49,17 @@
 각 단계가 `data/YYYY-MM-DD/` 안에 자기 결과를 JSON으로 떨어뜨리고, 다음 단계는 그 파일을 입력으로 읽는다.
 
 ```
-01_collect.py   → raw.json        (수집 원본, 수십~수백 건)
-02_rank.py      → ranked.json     (전체 점수 + 상위 10건)
-03_enrich.py    → articles.json   (본문 확보한 10건)
-04_summarize.py → briefing.json   (임계값 통과분, 최대 7건)
-05_render.py    → docs/data/YYYY-MM-DD.json
-06_notify.py    → 카카오톡 + 슬랙 전송
+collect.py    → raw.json        (수집 원본, 수십~수백 건)
+rank.py       → ranked.json     (전체 점수 + 상위 10건)
+enrich.py     → articles.json   (본문 확보한 10건)
+summarize.py  → briefing.json   (임계값 통과분, 최대 7건)
+render.py     → docs/data/YYYY-MM-DD.json
+notify.py     → 카카오톡 + 슬랙 전송
 ```
 
-**이 구조를 택한 이유:** 이 시스템의 품질은 선별·요약 프롬프트를 수십 번 고치는 데서 나온다. 단일 스크립트라면 프롬프트 한 번 수정에 "크롤링 수십 건 + LLM 2종 호출" 전체 재실행이 걸리고, 매 실행마다 RSS 내용이 달라져서 프롬프트 변경 효과만 분리해 비교할 수 없다. 단계별 구조에서는 `04_summarize.py`만 재실행하면 되고, 입력이 고정된 파일이라 비교가 깨끗하다.
+각 단계는 `python -m pipeline.collect`처럼 모듈로 실행한다. **숫자 접두 파일명(`01_collect.py`)을 쓰지 않는 이유는 Python에서 import가 불가능해 테스트를 쓸 수 없기 때문이다** (`import 01_collect`는 문법 오류). 실행 순서는 Actions 워크플로 YAML에 명시된다.
+
+**이 구조를 택한 이유:** 이 시스템의 품질은 선별·요약 프롬프트를 수십 번 고치는 데서 나온다. 단일 스크립트라면 프롬프트 한 번 수정에 "크롤링 수십 건 + LLM 2종 호출" 전체 재실행이 걸리고, 매 실행마다 RSS 내용이 달라져서 프롬프트 변경 효과만 분리해 비교할 수 없다. 단계별 구조에서는 `summarize.py`만 재실행하면 되고, 입력이 고정된 파일이라 비교가 깨끗하다.
 
 부수 효과로 디버깅이 "파일 열어보기"로 끝나고, 전송만 실패했을 때 재실행 비용이 0이며, 파일당 100~150줄이라 읽기 쉽다.
 
@@ -65,7 +67,7 @@
 
 ```python
 @dataclass(frozen=True)
-class RawItem:          # 01_collect 출력
+class RawItem:          # collect 출력
     source: str
     title: str
     url: str
@@ -73,20 +75,20 @@ class RawItem:          # 01_collect 출력
     excerpt: str
 
 @dataclass(frozen=True)
-class RankedItem:       # 02_rank 출력
+class RankedItem:       # rank 출력
     item: RawItem
     score: int          # 0~100
     reason: str         # LLM이 쓴 판단 근거
     topic: str
 
 @dataclass(frozen=True)
-class Article:          # 03_enrich 출력
+class Article:          # enrich 출력
     ranked: RankedItem
     body: str
     body_source: str    # "trafilatura" | "rss_excerpt"
 
 @dataclass(frozen=True)
-class Summary:          # 04_summarize 출력
+class Summary:          # summarize 출력
     article: Article
     headline: str       # 30자 이내 (카톡 200자 제약 때문)
     bullets: list[str]  # 2~3개
@@ -121,16 +123,19 @@ Cloudflare Workers는 검토 후 제외했다. 무료 플랜 subrequest 50개 �
 │   └── interests.md        # 관심사 프로필 (큐레이션 기준)
 ├── pipeline/
 │   ├── models.py           # 단계 간 데이터 계약
-│   ├── 00_seed.py          # 초기 시드 수집 (1회성)
-│   ├── 01_collect.py
-│   ├── 02_rank.py
-│   ├── 03_enrich.py
-│   ├── 04_summarize.py
-│   ├── 05_render.py
-│   ├── 06_notify.py
+│   ├── seed.py             # 초기 시드 수집 (1회성)
+│   ├── collect.py
+│   ├── rank.py
+│   ├── enrich.py
+│   ├── summarize.py
+│   ├── render.py
+│   ├── notify.py
+│   ├── prune.py            # 중간 산출물 90일 정리
 │   ├── report_failure.py
-│   ├── eval_rank.py        # 선별 품질 평가 (운영 비포함)
+│   ├── evaluate.py         # 선별 품질 평가 (운영 비포함)
 │   └── lib/
+│       ├── retry.py        # 재시도 분류 (Transient/Permanent)
+│       ├── http.py         # HTTP 수집과 상태 코드 분류
 │       ├── store.py
 │       ├── secrets.py
 │       ├── llm.py
@@ -202,7 +207,7 @@ window_start = max(window_start, now - timedelta(hours=96))   # 상한
 ### 4.4 중복 제거
 
 - **URL 중복:** 정규화(쿼리스트링·`utm_*` 제거) 후 Supabase의 발행 이력과 비교. 영구 적용.
-- **같은 사건 중복:** 최근 14일간 발행한 글의 제목 목록을 `02_rank` 프롬프트에 함께 넣고 LLM이 판단한다. 14일 x 최대 7건 = 약 100개 제목으로 토큰 부담이 작다.
+- **같은 사건 중복:** 최근 14일간 발행한 글의 제목 목록을 `rank` 프롬프트에 함께 넣고 LLM이 판단한다. 14일 x 최대 7건 = 약 100개 제목으로 토큰 부담이 작다.
 
 ### 4.5 장애 격리
 
@@ -218,7 +223,11 @@ Max 플랜에 월 $100 API 크레딧이 포함되고(claude.ai → Settings → 
 
 `lib/llm.py`에서 모델 문자열 한 줄로 교체 가능하게 둔다.
 
-### 5.2 선별 (`02_rank.py`)
+**전송 계층 재시도는 SDK에 맡긴다.** anthropic SDK는 429·5xx·연결 오류를 자체적으로 지수 백오프 재시도한다(`max_retries`). 그 위에 자체 재시도를 겹치면 한 번의 논리적 호출이 여러 배로 늘어나 크레딧을 그만큼 쓴다. `lib/llm.py`는 **예외 분류와 "구조화된 출력 스키마 실패 1회 재시도"만** 담당한다.
+
+**Python 버전: 3.12.** 취향이 아니라 제약이다 — anthropic SDK 1.x가 3.10 이상을 요구하고, 개발 머신의 시스템 `python3`인 3.9는 2025-10-31에 수명이 끝났다. Python에는 LTS가 없고 각 버전이 총 5년을 받는다([PEP 602](https://peps.python.org/pep-0602/)).
+
+### 5.2 선별 (`rank.py`)
 
 `interests.md` 전문과 수집분의 제목·발췌를 **한 번의 호출로** 채점한다. 건당 호출하지 않는 이유는 한 번에 넣어야 LLM이 "이 둘은 같은 사건이니 하나만" 같은 교차 판단을 할 수 있기 때문이다.
 
@@ -238,7 +247,7 @@ response = client.messages.create(
 
 출력: 점수 내림차순 상위 10건과 **전체 항목의 점수·이유**를 함께 저장한다. 탈락 이유를 나중에 조회하려면 필요하다.
 
-### 5.3 본문 확보 (`03_enrich.py`)
+### 5.3 본문 확보 (`enrich.py`)
 
 `trafilatura`로 광고·내비게이션·푸터를 걷어내고 본문만 추출한다.
 
@@ -246,9 +255,9 @@ response = client.messages.create(
 - 추출 실패 시 **RSS 발췌로 폴백**하고 `body_source`에 기록한다. **이 단계는 절대 중단하지 않는다.**
 - 본문은 8,000자에서 자른다. 그 이상은 요약 품질에 기여하지 않으면서 토큰만 소비한다.
 
-### 5.4 요약과 최종 선정 (`04_summarize.py`)
+### 5.4 요약과 최종 선정 (`summarize.py`)
 
-본문 10건을 읽고 최종 선정 및 요약을 한다. `02_rank`에서 이미 좁혔는데 또 거르는 이유는, **제목만으로는 알 수 없는 "본문을 읽어보니 내용이 없음"을 여기서 걸러내기 위해서다.** 보도자료 재가공 기사가 대표적이다.
+본문 10건을 읽고 최종 선정 및 요약을 한다. `rank`에서 이미 좁혔는데 또 거르는 이유는, **제목만으로는 알 수 없는 "본문을 읽어보니 내용이 없음"을 여기서 걸러내기 위해서다.** 보도자료 재가공 기사가 대표적이다.
 
 **건수는 점수 임계값으로 결정하고 상한만 7건이다.** 좋은 글이 2건이면 2건만 보낸다.
 
@@ -266,9 +275,9 @@ response = client.messages.create(
 
 `interests.md`를 처음부터 잘 쓸 수는 없고, 매일 결과를 보며 고치면 튜닝 한 사이클이 하루다. 두 개의 도구로 이를 단축한다.
 
-**`00_seed.py` (1회성, 소스 확정 직후 실행):** 윈도우 제한을 풀고 각 소스가 제공하는 전체 항목을 긁어 저장한다. **대부분의 RSS 피드는 최근 10~50건만 제공하므로, 지금 수집하지 않으면 영구히 얻을 수 없는 데이터다.** 되돌릴 수 없는 작업이므로 우선순위가 높다.
+**`seed.py` (1회성, 소스 확정 직후 실행):** 윈도우 제한을 풀고 각 소스가 제공하는 전체 항목을 긁어 저장한다. **대부분의 RSS 피드는 최근 10~50건만 제공하므로, 지금 수집하지 않으면 영구히 얻을 수 없는 데이터다.** 되돌릴 수 없는 작업이므로 우선순위가 높다.
 
-**`eval_rank.py` (운영 비포함):** 여러 날 데이터를 합쳐 선별을 돌리고 점수·이유를 표로 출력한다. 하루치로만 튜닝하면 그 하루에 과적합된다.
+**`evaluate.py` (운영 비포함):** 여러 날 데이터를 합쳐 선별을 돌리고 점수·이유를 표로 출력한다. 하루치로만 튜닝하면 그 하루에 과적합된다.
 
 ## 6. 출력
 
@@ -369,6 +378,8 @@ notes      -- 짧은 메모 + 태그. article_id, text, tags[]
 kakao_auth -- refresh_token, refresh_token_expires_in, updated_at
 runs       -- 실행 이력. id, window_start, window_end, sent_at,
            -- published_count, source_counts(jsonb), input_tokens, errors(jsonb)
+           -- errors의 각 항목: {source, kind, message}
+           --   kind = config | transient | moved (8.1 참조)
 ```
 
 `runs`는 세 곳에서 쓰인다. **4.2의 윈도우 계산**(`last_sent_at` = 마지막 `sent_at`), **8.2의 멱등성 판정**, **8.3의 소스 침묵 감지**(`source_counts`를 최근 3회분 조회). 별도 테이블 없이 이 하나로 처리한다.
@@ -425,28 +436,54 @@ runs       -- 실행 이력. id, window_start, window_end, sent_at,
 
 ## 8. 에러 처리와 운영
 
-### 8.1 단계별 실패 정책
+### 8.1 에러 분류 — Transient와 Permanent
+
+실패를 한 덩어리로 다루면 서로 다른 문제가 같은 기록이 된다. 피드가 404(주소가 죽음)인 것과 503(일시 장애)인 것이 같은 문자열로 남으면, 전자는 `sources.yaml`을 고쳐야 하고 후자는 기다리면 되는데 로그만 보고는 구분할 수 없다.
+
+그래서 **"호출자가 무엇을 해야 하는가"**를 유일한 기준으로 두 갈래만 만든다. 상태 코드만큼 갈래를 늘리면 호출부마다 분기가 생기고 결국 아무도 유지하지 않는다.
+
+| 갈래 | 뜻 | 해당 상황 |
+|---|---|---|
+| **Transient** | 기다리면 된다. 지수 백오프로 재시도하고, `Retry-After` 헤더가 있으면 그 값을 따른다 | 408, 425, 429, 5xx(501·505 제외), 타임아웃, 연결 실패 |
+| **Permanent** | 설정을 고쳐야 한다. **재시도하지 않는다** | 400, 401, **403**, 404, 410, 451, 501, 505, 주소 오타, 리다이렉트 루프 |
+
+판단이 갈리는 지점을 명시한다.
+
+- **403은 Permanent다.** 봇 차단이므로 재시도해도 결과가 같다. 본문 확보 단계에서 10건에 재시도를 걸면 수십 초를 버린다.
+- **501·505는 Permanent다.** 5xx지만 "서버가 그 기능을 지원하지 않음"이므로 기다려도 생기지 않는다.
+- **301·308은 실패가 아니다.** 자동으로 따라가되 원래 주소를 기록해 `sources.yaml` 갱신을 알린다. 302·303·307은 임시 이전이므로 기록하지 않는다.
+- **분류되지 않은 예외는 삼키지 않는다.** `TypeError` 같은 코드 버그를 Transient로 감싸면 재시도로 가려져 원인을 찾을 수 없다.
+
+분류 규칙은 `lib/http.py` 한곳에 둔다. 두 곳에 두면 "403을 어디선 재시도하고 어디선 안 하는" 상태가 된다.
+
+수집 실패는 이 분류를 `SourceError.kind`로 기록한다 — `config`(고쳐야 함) / `transient`(기다리면 됨) / `moved`(이전됨). 8.4의 소스 침묵 경고가 **"죽은 소스"와 "불안정한 소스"를 구분**하는 근거가 된다.
+
+**비밀값은 에러 메시지에 넣지 않는다.** 슬랙 웹훅 URL이 대표적이다 — 에러 메시지는 슬랙, 로그, Actions 출력에 그대로 남는다.
+
+### 8.2 단계별 실패 정책
 
 원칙: **일부가 깨져도 오늘 브리핑은 나간다.** 완벽한 브리핑보다 오는 브리핑이 낫다.
 
-| 단계 | 실패 시 | 이유 |
-|---|---|---|
-| `01_collect` | 소스 하나 실패 → 기록하고 계속 / 전부 실패 → 중단 | 매체 하나의 RSS 장애로 그날이 날아가면 안 된다 |
-| `02_rank` | 1회 재시도 → 실패 시 중단 | 점수가 없으면 선별이 불가능하고 폴백할 것이 없다 |
-| `03_enrich` | RSS 발췌로 폴백, **절대 중단 없음** | 외부 크롤링은 구조적으로 가장 자주 깨지면서 유일하게 폴백이 존재하는 단계다 |
-| `04_summarize` | 1회 재시도 → 실패 시 중단 | 요약이 결과물 자체다 |
-| `05_render` | 중단 | JSON이 없으면 카톡 버튼이 죽은 링크가 된다 |
-| `06_notify` | **카톡과 슬랙 독립 처리** | 카톡 토큰 만료로 슬랙까지 못 받는 것은 불합리하다 |
+| 단계 | Permanent일 때 | Transient일 때 | 이유 |
+|---|---|---|---|
+| `collect` | 재시도 없이 `kind=config`로 기록하고 계속 | 2회 시도 후 `kind=transient`로 기록하고 계속 | 매체 하나의 장애로 그날이 날아가면 안 된다. 전부 실패하면 중단하는데, **전부 config면 안내가 "네트워크 확인"이 아니라 "sources.yaml 확인"이 된다** |
+| `rank` | 중단 | SDK가 재시도, 스키마 실패만 1회 추가 재시도 | 점수가 없으면 선별이 불가능하고 폴백할 것이 없다 |
+| `enrich` | **즉시** RSS 발췌로 폴백 | 2회 시도 후 발췌로 폴백 | 외부 크롤링은 가장 자주 깨지면서 유일하게 폴백이 있는 단계다. **절대 중단하지 않는다.** 폴백 이유를 `Article.fallback_reason`에 남긴다 |
+| `summarize` | 중단 | SDK가 재시도, 스키마 실패만 1회 추가 재시도 | 요약이 결과물 자체다 |
+| `render` | 중단 | 중단 | JSON이 없으면 카톡 버튼이 죽은 링크가 된다 |
+| `notify` | **즉시** 실패 (웹훅·토큰을 고쳐야 한다) | 3회 시도 | 카톡과 슬랙은 독립 처리한다 — 카톡 토큰 만료로 슬랙까지 못 받는 것은 불합리하다 |
 
-### 8.2 멱등성
+전송이 실패하면 **실행 이력을 남기지 않는다.** 먼저 남기면 전송 실패 후 재실행이 "이미 보냄"으로 막혀 그날 브리핑이 사라진다.
 
-`06_notify.py`는 저장된 발송 이력을 확인한다. 같은 윈도우에 대해 이미 보냈으면 건너뛰고, `--force` 플래그로만 우회한다. Actions cron 중복 실행이나 수동 재실행 시 카톡이 두 번 가는 것을 막는다.
+### 8.3 멱등성
+
+`notify.py`는 저장된 발송 이력을 확인한다. 같은 윈도우에 대해 이미 보냈으면 건너뛰고, `--force` 플래그로만 우회한다. Actions cron 중복 실행이나 수동 재실행 시 카톡이 두 번 가는 것을 막는다.
 
 명령행 인자는 `argparse`로 처리한다.
 
 **어제 분을 나중에 복구하는 것은 불가능하다.** RSS는 과거 항목을 충분히 제공하지 않으므로, 하루를 놓치면 그 하루는 회복되지 않는다. 이를 받아들인다.
 
-### 8.3 경고 장치 (`lib/guard.py`)
+### 8.4 경고 장치 (`lib/guard.py`)
 
 조용히 실패하는 것이 최악이다. 브리핑이 오지 않으면 "오늘 뉴스가 없었나보다"로 착각하게 되고, 그것이 2주 지속되면 시스템이 죽은 것을 모른다.
 
@@ -462,13 +499,13 @@ runs       -- 실행 이력. id, window_start, window_end, sent_at,
 
 **크레딧 가드의 의미:** 요금 폭주 방지가 아니라 조기 소진 방지다. Max 크레딧은 이월되지 않고, 월 중반에 바닥나면 그 달의 나머지 기간 동안 API 요청이 중단되어 브리핑이 오지 않는다.
 
-### 8.4 실패 알림
+### 8.5 실패 알림
 
 1. GitHub Actions 실패 시 자동 메일 (기본 제공)
 2. 슬랙에 실패 리포트 — 어느 단계에서 왜 죽었는지. 슬랙은 토큰 만료가 없어 알림 채널로 가장 안정적이다
 3. 부분 실패도 리포트 — "7건 중 2건은 RSS 발췌로 폴백" 같은 경고를 브리핑 하단에 작게 표시
 
-### 8.5 GitHub Actions 워크플로
+### 8.6 GitHub Actions 워크플로
 
 ```yaml
 on:
@@ -479,14 +516,14 @@ on:
 jobs:
   briefing:
     steps:
-      - run: python pipeline/01_collect.py
-      - run: python pipeline/02_rank.py
-      - run: python pipeline/03_enrich.py
-      - run: python pipeline/04_summarize.py
-      - run: python pipeline/05_render.py
-      - run: python pipeline/06_notify.py
+      - run: python -m pipeline.collect
+      - run: python -m pipeline.rank
+      - run: python -m pipeline.enrich
+      - run: python -m pipeline.summarize
+      - run: python -m pipeline.render
+      - run: python -m pipeline.notify
       - if: failure()
-        run: python pipeline/report_failure.py
+        run: python -m pipeline.report_failure
       # 마지막: docs/ 커밋·푸시
 ```
 
@@ -494,7 +531,7 @@ jobs:
 
 Node 셋업 step은 불필요하다 (6.4의 SPA 분리 결정 덕분).
 
-### 8.6 비밀값
+### 8.7 비밀값
 
 로컬은 `.env`, Actions는 Secrets에 같은 이름으로 둔다.
 
@@ -514,7 +551,7 @@ VITE_SUPABASE_ANON_KEY     # 브라우저용 (RLS로 보호)
 
 **테스트하지 않을 것을 먼저 정한다.**
 
-**LLM 출력 품질은 테스트하지 않는다.** "요약이 좋은가"는 단위 테스트로 검증 불가능하고, 시도하면 깨지기만 하는 테스트가 된다. 품질은 `interests.md`와 프롬프트를 고치면서 `eval_rank.py`로 비교하는 영역이다.
+**LLM 출력 품질은 테스트하지 않는다.** "요약이 좋은가"는 단위 테스트로 검증 불가능하고, 시도하면 깨지기만 하는 테스트가 된다. 품질은 `interests.md`와 프롬프트를 고치면서 `evaluate.py`로 비교하는 영역이다.
 
 **테스트할 것:**
 
@@ -530,6 +567,11 @@ def test_마지막_발송_이후로_윈도우가_계산된다()
 def test_윈도우가_96시간을_넘지_않는다()
 def test_같은_윈도우에_두_번_전송하지_않는다()
 def test_published_타임존이_UTC로_정규화된다()
+def test_403은_재시도하지_않는다()
+def test_429의_Retry_After를_존중한다()
+def test_전부_설정_문제면_안내가_sources_yaml을_가리킨다()
+def test_에러_메시지에_웹훅_URL이_들어가지_않는다()
+def test_분류되지_않은_예외는_삼키지_않는다()
 ```
 
 `tests/fixtures/`에 실제 RSS XML 샘플을 저장해 네트워크 없이 파싱을 테스트한다. LLM 호출은 **저장된 응답을 재생**해 실제 API를 호출하지 않는다 — 테스트가 빠르고 비용이 없고 결정적이다.
@@ -540,12 +582,16 @@ def test_published_타임존이_UTC로_정규화된다()
 
 시드 수집이 되돌릴 수 없는 작업이므로 소스·관심사 확정을 앞에 둔다.
 
-1. **환경 세팅** — git 리포(**퍼블릭**), Supabase 프로젝트, 카카오 앱 등록, 슬랙 Webhook, Console 조직 크레딧 연결
-2. **`config/sources.yaml` + `config/interests.md` 확정**
-3. **`00_seed.py` 실행** — 각 소스의 전체 제공분 확보 (지금 하지 않으면 영구 손실)
-4. **`02_rank.py` + `eval_rank.py`** — 시드 데이터로 선별 프롬프트 튜닝
-5. **`01_collect.py` / `03_enrich.py` / `04_summarize.py`**
-6. **`05_render.py` + React 앱** (좋아요·클릭 저장 포함)
-7. **`06_notify.py`** (카톡 토큰 최초 인증 포함)
-8. **`lib/guard.py`** + 실패 리포트
-9. **Actions 워크플로** + 테스트
+1. **환경 세팅** — Python 3.12, git 리포(**퍼블릭**), Supabase 프로젝트, 카카오 앱 등록, 슬랙 Webhook, Console 조직 크레딧 연결
+2. **기반 모듈** — `lib/urls.py`, `lib/timeutil.py`, `lib/retry.py`, `lib/http.py`, `models.py`, `lib/secrets.py`, `lib/store.py`. 뒤의 모든 단계가 여기에 의존하므로 먼저 세운다
+3. **`config/sources.yaml` + `config/interests.md` 확정**
+4. **`seed.py` 실행** — 각 소스의 전체 제공분 확보 (지금 하지 않으면 영구 손실)
+5. **`rank.py` + `evaluate.py`** — 시드 데이터로 선별 프롬프트 튜닝
+6. **`collect.py` / `enrich.py` / `summarize.py`**
+7. **`notify.py`의 슬랙 경로** — 여기까지면 로컬에서 브리핑이 슬랙으로 온다
+8. **`render.py` + React 앱** (좋아요·클릭 저장 포함)
+9. **`notify.py`의 카톡 경로** (토큰 최초 인증 포함) — 페이지가 있어야 "전체 보기" 버튼이 성립한다
+10. **`lib/guard.py`** + 실패 리포트
+11. **Actions 워크플로** + `prune.py`
+
+구현은 세 계획으로 나눈다 — 2~7이 계획 1(파이프라인+슬랙), 8이 계획 2(웹페이지), 9~11이 계획 3(카톡+자동화)이다. 상세 계획은 `docs/superpowers/plans/`에 있다.
