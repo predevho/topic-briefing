@@ -1,8 +1,10 @@
-# 브리핑 파이프라인 + 슬랙 전송 구현 계획 (Phase 1 / 계획 1)
+# 브리핑 파이프라인 구현 계획 (Phase 1 / 계획 1)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 로컬에서 명령 몇 개를 순서대로 실행하면 IT 토픽이 수집·선별·요약되어 슬랙으로 도착한다.
+**Goal:** 로컬에서 명령 5개를 순서대로 실행하면 IT 토픽이 수집·선별·요약되어 터미널에 브리핑으로 출력되고, 발행 이력이 쌓인다. **큐레이션 품질 튜닝을 여기서 끝낸다.**
+
+전달 채널(카카오톡·슬랙)은 계획 3으로 미룬다. 계획 1의 목적은 "뭘 보낼지"를 정하는 것이고, 그건 터미널과 `evaluate.py`로 하는 작업이다. 다만 보낼 곳이 여러 곳이 될 것이 정해져 있으므로 `Sender` 프로토콜로 이음새를 만들어 둔다.
 
 **Architecture:** 단계별 독립 실행 파이프라인. 각 단계가 `data/YYYY-MM-DD/`에 JSON을 떨어뜨리고 다음 단계가 그것을 입력으로 읽는다. 어느 단계든 단독 재실행이 가능하므로 프롬프트 튜닝 비용이 낮다. 상태(실행 이력·발행 이력·본문)는 Supabase, 중간 산출물은 로컬 파일.
 
@@ -114,14 +116,14 @@ def f(x: str | None) -> list[int]:   # 3.9에서도 문법 오류가 안 난다
 | `pipeline/lib/secrets.py` | 환경변수 접근 단일 통로 |
 | `pipeline/lib/store.py` | `LocalStore`(JSON 파일) + `RemoteStore`(Supabase) |
 | `pipeline/lib/llm.py` | Claude API 래퍼 (주입 가능 → 테스트에서 교체) |
-| `pipeline/lib/slack.py` | 슬랙 Block Kit 메시지 조립 + 전송 |
+| `pipeline/lib/sender.py` | `Sender` 프로토콜 + `ConsoleSender` + 경고 수집 |
 | `pipeline/collect.py` | 윈도우 내 수집 → `raw.json` |
 | `pipeline/seed.py` | 1회성 시드 수집 (윈도우 무제한) |
 | `pipeline/rank.py` | 선별 채점 → `ranked.json` |
 | `pipeline/evaluate.py` | 선별 품질 비교 (운영 비포함) |
 | `pipeline/enrich.py` | 본문 확보 → `articles.json` |
 | `pipeline/summarize.py` | 임계값 + 요약 → `briefing.json` |
-| `pipeline/notify.py` | 슬랙 전송 + 실행 이력 기록 |
+| `pipeline/notify.py` | 센더로 내보내고 실행 이력 기록 (윈도우 전진의 핵심) |
 | `tests/` | 위 각 모듈의 테스트 + fixtures |
 
 **경계 원칙:** `lib/`의 모듈은 파이프라인 단계를 모른다(순수 함수와 어댑터만). 단계 모듈은 `lib/`를 조립할 뿐 자체 로직을 최소화한다. 그래서 단계 모듈은 각 80~150줄에 머문다.
@@ -181,9 +183,9 @@ ANTHROPIC_API_KEY=sk-ant-...
 SUPABASE_URL=https://xxxxx.supabase.co
 SUPABASE_SERVICE_KEY=eyJ...
 
-# 슬랙 Incoming Webhook
-SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...
 ```
+
+> 슬랙 Webhook과 카카오 키는 **계획 3**에서 추가한다. 계획 1은 위 셋으로 돈다.
 
 - [ ] **Step 3: 패키지 초기화 파일 생성**
 
@@ -953,7 +955,8 @@ def test_에러_메시지에_URL이_들어간다():
 
 
 def test_상세_설명을_덧붙일_수_있다():
-    """슬랙은 본문에 channel_not_found 같은 이유를 담는다."""
+    """Claude API는 본문에 원인을 담는다. 계획 3의 슬랙도 마찬가지로
+    channel_not_found 같은 이유를 본문에 담는다."""
     with pytest.raises(Permanent, match="channel_not_found"):
         classify_status(404, url=URL, detail="channel_not_found")
 
@@ -1059,7 +1062,8 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'pipeline.lib.http'`
 ```python
 """HTTP 수집과 상태 코드 분류.
 
-수집(collect)·본문 확보(enrich)·슬랙 전송이 모두 이 모듈을 거친다.
+수집(collect)·본문 확보(enrich)·LLM 예외 분류(llm)가 모두 이 모듈을 거친다.
+계획 3의 카카오톡·슬랙 전송도 같은 규칙을 쓴다.
 분류 규칙이 한곳에만 있어야 "403을 어디선 재시도하고 어디선 안 하는" 일이
 생기지 않는다.
 """
@@ -1512,7 +1516,7 @@ class Article(Contract):
     ranked: RankedItem
     body: str
     body_source: BodySource
-    # 폴백이 일어난 이유. 슬랙 경고를 "2건 발췌"가 아니라
+    # 폴백이 일어난 이유. 경고를 "2건 발췌"가 아니라
     # "403 봇 차단 2건"으로 쓸 수 있게 한다. 폴백이 없으면 None.
     fallback_reason: str | None = None
 
@@ -5565,28 +5569,31 @@ git commit -m "feat: 요약 단계 — 임계값 기반 건수, 한국어 출력
 
 ---
 
-## Task 20: 슬랙 메시지 조립
+## Task 20: 전송과 실행 이력
+
+보낼 곳이 여러 곳이 될 것이 **이미 정해져 있으므로**(계획 3에서 카카오톡과 슬랙) 전송 대상을 프로토콜로 추상화한다. 계획 1은 터미널 출력 하나만 구현한다.
+
+`notify.py`를 계획 1에 남기는 이유는 **여기에 `runs` 기록이 들어 있기 때문이다.** 그게 없으면 윈도우가 전진하지 않아 매번 같은 구간을 다시 수집한다 — 파이프라인의 핵심 루프가 돌지 않는다.
 
 **Files:**
-- Create: `pipeline/lib/slack.py`
-- Create: `tests/test_slack.py`
+- Create: `pipeline/lib/sender.py`
+- Create: `pipeline/notify.py`
+- Create: `tests/test_sender.py`
+- Create: `tests/test_notify.py`
 
-- [ ] **Step 1: 실패하는 테스트 작성**
+- [ ] **Step 1: 전송 대상의 테스트 작성**
 
-`tests/test_slack.py`:
+`tests/test_sender.py`:
 
 ```python
-import json
-
-import pytest
-
-from pipeline.lib.retry import Permanent, Transient
-from pipeline.lib.slack import SEND_ATTEMPTS, build_blocks, send
+from pipeline.lib.sender import ConsoleSender, Sender, collect_warnings
 from pipeline.models import (
     Article,
     Briefing,
     RankedItem,
+    RawBundle,
     RawItem,
+    SourceError,
     Summary,
 )
 
@@ -5598,13 +5605,11 @@ def _summary(index: int = 0, fallback: bool = False) -> Summary:
         article=Article(
             ranked=RankedItem(
                 item=RawItem(
-                    source="토스_기술블로그",
-                    title=f"원제 {index}",
+                    source="토스_기술블로그", title=f"원제 {index}",
                     url=f"https://toss.tech/a/{index}",
-                    published="2026-11-10T05:30:00+00:00",
-                    excerpt="발췌",
+                    published="2026-11-10T05:30:00+00:00", excerpt="발췌",
                 ),
-                score=85, reason="이유", topic="backend",
+                score=92, reason="이유", topic="backend",
             ),
             body="본문",
             body_source="rss_excerpt" if fallback else "trafilatura",
@@ -5623,403 +5628,257 @@ def _briefing(summaries, considered: int = 10) -> Briefing:
     )
 
 
-def _text(blocks) -> str:
-    """블록 전체를 문자열로 만들어 포함 여부를 검사한다."""
-    return json.dumps(blocks, ensure_ascii=False)
+def _raw(errors=None) -> RawBundle:
+    return RawBundle(
+        window_start=WINDOW[0], window_end=WINDOW[1], items=[],
+        source_counts={"토스_기술블로그": 3},
+        errors=errors or [],
+    )
 
 
-def test_헤드라인과_링크가_들어간다():
-    blocks = build_blocks(_briefing([_summary()]))
-    text = _text(blocks)
+# --- 경고 수집 ---
 
-    assert "헤드라인 0" in text
-    assert "https://toss.tech/a/0" in text
+def test_경고가_없으면_빈_목록이다():
+    assert collect_warnings(briefing=_briefing([_summary()]), raw=_raw()) == []
 
 
-def test_요점과_중요한_이유가_들어간다():
-    text = _text(build_blocks(_briefing([_summary()])))
+def test_발췌_폴백을_경고로_모은다():
+    warnings = collect_warnings(
+        briefing=_briefing([_summary(0, fallback=True), _summary(1)]),
+        raw=_raw(),
+    )
+    joined = "\n".join(warnings)
 
-    assert "첫 요점" in text
-    assert "둘째 요점" in text
-    assert "중요한 이유" in text
+    assert "발췌" in joined
+    assert "403" in joined
 
 
-def test_출처가_들어간다():
-    text = _text(build_blocks(_briefing([_summary()])))
-    assert "토스_기술블로그" in text
+def test_설정_문제_소스를_경고로_모은다():
+    """내가 sources.yaml을 고쳐야 하는 것."""
+    warnings = collect_warnings(
+        briefing=_briefing([_summary()]),
+        raw=_raw([SourceError(source="죽은소스", kind="config",
+                              message="https://x.com/r HTTP 404")]),
+    )
+    joined = "\n".join(warnings)
 
+    assert "죽은소스" in joined
+    assert "404" in joined
 
-def test_건수를_헤더에_표시한다():
-    blocks = build_blocks(_briefing([_summary(0), _summary(1)]))
-    assert "2건" in _text(blocks)
 
+def test_주소_이전을_경고로_모은다():
+    warnings = collect_warnings(
+        briefing=_briefing([_summary()]),
+        raw=_raw([SourceError(source="이전된소스", kind="moved",
+                              message="old → new (sources.yaml 갱신)")]),
+    )
+    assert "이전된소스" in "\n".join(warnings)
 
-def test_전체_건수를_다_담는다():
-    """슬랙은 읽기용이므로 카톡과 달리 전부 넣는다."""
-    blocks = build_blocks(_briefing([_summary(i) for i in range(7)]))
-    text = _text(blocks)
 
-    for index in range(7):
-        assert f"헤드라인 {index}" in text
+def test_일시_실패는_경고로_모으지_않는다():
+    """내가 할 일이 없다. 매번 알리면 알림 피로가 생긴다."""
+    warnings = collect_warnings(
+        briefing=_briefing([_summary()]),
+        raw=_raw([SourceError(source="불안정소스", kind="transient",
+                              message="HTTP 503")]),
+    )
+    assert warnings == []
 
 
-def test_0건이면_그렇게_알린다():
-    """조용히 넘어가면 시스템이 죽은 것과 구분되지 않는다."""
-    blocks = build_blocks(_briefing([], considered=8))
-    text = _text(blocks)
+# --- 터미널 출력 ---
 
-    assert len(blocks) > 0
-    assert "없" in text
+def test_ConsoleSender가_인터페이스를_만족한다():
+    sender: Sender = ConsoleSender()
+    assert sender.name == "console"
 
 
-def test_발췌_폴백이_있으면_하단에_경고한다():
-    """품질 저하를 알 수 있어야 한다."""
-    blocks = build_blocks(_briefing([_summary(0, fallback=True), _summary(1)]))
-    text = _text(blocks)
+def test_헤드라인과_요점과_링크를_출력한다(capsys):
+    ConsoleSender().send(briefing=_briefing([_summary()]), raw=_raw())
+    out = capsys.readouterr().out
 
-    assert "발췌" in text
+    assert "헤드라인 0" in out
+    assert "첫 요점" in out
+    assert "중요한 이유" in out
+    assert "https://toss.tech/a/0" in out
 
 
-def test_폴백_경고에_이유가_들어간다():
-    """'접근 불가'가 반복되면 봇 차단이므로 그 소스를 손봐야 한다."""
-    blocks = build_blocks(_briefing([_summary(0, fallback=True)]))
-    text = _text(blocks)
+def test_점수와_출처를_출력한다(capsys):
+    """튜닝 중에 '왜 이게 뽑혔나'를 보려면 둘 다 필요하다."""
+    ConsoleSender().send(briefing=_briefing([_summary()]), raw=_raw())
+    out = capsys.readouterr().out
 
-    assert "403" in text
+    assert "92" in out
+    assert "토스_기술블로그" in out
 
 
-def test_폴백이_없으면_경고하지_않는다():
-    text = _text(build_blocks(_briefing([_summary(0), _summary(1)])))
-    assert "발췌로" not in text
+def test_건수와_후보_수를_출력한다(capsys):
+    ConsoleSender().send(briefing=_briefing([_summary(0), _summary(1)]), raw=_raw())
+    out = capsys.readouterr().out
 
+    assert "2건" in out
+    assert "10" in out
 
-def test_블록이_슬랙_상한을_넘지_않는다():
-    """슬랙 메시지의 블록 수 상한은 50이다."""
-    blocks = build_blocks(_briefing([_summary(i) for i in range(7)]))
-    assert len(blocks) <= 50
 
+def test_0건이면_그렇게_출력한다(capsys):
+    """조용히 끝나면 시스템이 죽은 것과 구분되지 않는다."""
+    ConsoleSender().send(briefing=_briefing([], considered=8), raw=_raw())
+    out = capsys.readouterr().out
 
-# --- 전송 ---
+    assert "없" in out
+    assert "8" in out
 
-def _send(post, **overrides):
-    kwargs = {
-        "webhook_url": "https://hooks.slack.com/services/XXX/YYY/ZZZ",
-        "blocks": [{"type": "divider"}],
-        "post": post,
-        "sleep": lambda _: None,
-    }
-    kwargs.update(overrides)
-    return send(**kwargs)
 
-
-def test_웹훅으로_블록을_보낸다():
-    sent = {}
-
-    def post(url: str, payload: dict) -> tuple[int, str]:
-        sent["url"] = url
-        sent["payload"] = payload
-        return 200, "ok"
-
-    _send(post)
-
-    assert sent["url"] == "https://hooks.slack.com/services/XXX/YYY/ZZZ"
-    assert sent["payload"]["blocks"] == [{"type": "divider"}]
-
-
-def test_알림용_text가_함께_간다():
-    """text가 없으면 폰 알림에 내용이 안 뜬다."""
-    sent = {}
-
-    def post(url: str, payload: dict) -> tuple[int, str]:
-        sent["payload"] = payload
-        return 200, "ok"
-
-    _send(post, notification_text="IT 브리핑")
-
-    assert sent["payload"]["text"] == "IT 브리핑"
-
-
-def test_404는_재시도하지_않고_영구_실패다():
-    """웹훅이 삭제된 것이다. 재시도해도 같다."""
-    calls = []
-
-    def post(url: str, payload: dict) -> tuple[int, str]:
-        calls.append(1)
-        return 404, "no_service"
-
-    with pytest.raises(Permanent, match="no_service"):
-        _send(post)
-    assert len(calls) == 1
-
-
-def test_403도_영구_실패다():
-    def post(url: str, payload: dict) -> tuple[int, str]:
-        return 403, "action_prohibited"
-
-    with pytest.raises(Permanent):
-        _send(post)
-
-
-def test_429는_재시도한다():
-    calls = []
-
-    def post(url: str, payload: dict) -> tuple[int, str]:
-        calls.append(1)
-        return 429, "rate_limited"
-
-    with pytest.raises(Transient):
-        _send(post)
-    assert len(calls) == SEND_ATTEMPTS
-
-
-def test_5xx도_재시도한다():
-    calls = []
-
-    def post(url: str, payload: dict) -> tuple[int, str]:
-        calls.append(1)
-        return 500, "rollup_error"
-
-    with pytest.raises(Transient):
-        _send(post)
-    assert len(calls) == SEND_ATTEMPTS
-
-
-def test_재시도_중_성공하면_예외가_없다():
-    calls = []
-
-    def post(url: str, payload: dict) -> tuple[int, str]:
-        calls.append(1)
-        return (500, "rollup_error") if len(calls) == 1 else (200, "ok")
-
-    _send(post)   # 예외가 나지 않아야 한다
-    assert len(calls) == 2
-
-
-def test_응답_본문의_이유가_에러에_들어간다():
-    """'HTTP 404'만으로는 원인을 모른다. channel_not_found를 봐야 한다."""
-    def post(url: str, payload: dict) -> tuple[int, str]:
-        return 404, "channel_not_found"
-
-    with pytest.raises(Permanent, match="channel_not_found"):
-        _send(post)
-
-
-def test_에러_메시지에_웹훅_URL이_들어가지_않는다():
-    """웹훅 URL은 비밀값이다. 에러 메시지는 로그와 Actions 출력에 남는다."""
-    def post(url: str, payload: dict) -> tuple[int, str]:
-        return 404, "no_service"
-
-    with pytest.raises(Permanent) as caught:
-        _send(post)
-
-    assert "XXX" not in str(caught.value)
-    assert "hooks.slack.com" not in str(caught.value)
+def test_경고를_하단에_출력한다(capsys):
+    ConsoleSender().send(
+        briefing=_briefing([_summary(0, fallback=True)]),
+        raw=_raw([SourceError(source="죽은소스", kind="config", message="HTTP 404")]),
+    )
+    out = capsys.readouterr().out
+
+    assert "죽은소스" in out
+    assert "403" in out
 ```
 
 - [ ] **Step 2: 실패를 확인**
 
 ```bash
-pytest tests/test_slack.py
+pytest tests/test_sender.py
 ```
 
-Expected: FAIL — `ModuleNotFoundError: No module named 'pipeline.lib.slack'`
+Expected: FAIL — `ModuleNotFoundError: No module named 'pipeline.lib.sender'`
 
 - [ ] **Step 3: 최소 구현 작성**
 
-`pipeline/lib/slack.py`:
+`pipeline/lib/sender.py`:
 
 ```python
-"""슬랙 Block Kit 메시지 조립과 전송.
+"""전송 대상.
 
-슬랙은 길이 제약이 넉넉하므로 전체 건수를 다 담는다 — 실제로 읽는 채널이다.
-(카카오톡은 200자 제약 때문에 상위 5건 목록만 싣는다. 계획 3에서 다룬다.)
+보낼 곳이 여러 곳이 될 것이 정해져 있으므로(계획 3에서 카카오톡과 슬랙)
+프로토콜로 추상화한다. 계획 1은 ConsoleSender만 구현한다.
+
+계획 3에서 추가될 것:
+- KakaoSender  — 텍스트 템플릿 200자, 상위 5건 + "외 N건" + 페이지 버튼
+- SlackSender  — 경고 전용. 카카오 토큰이 만료되면 카톡으로는 그 사실을
+                 알릴 수 없으므로, 만료가 없는 채널이 하나 필요하다.
 """
 
-import time
 from datetime import datetime
-from typing import Callable
+from typing import Protocol
 
-import httpx
-
-from pipeline.lib.http import classify_status
-from pipeline.lib.retry import with_retry
 from pipeline.lib.timeutil import KST
-from pipeline.models import Briefing
+from pipeline.models import Briefing, RawBundle
 
-# 슬랙 메시지 하나의 블록 수 상한.
-MAX_BLOCKS = 50
-
-HTTP_TIMEOUT = 15.0
-
-# 전송 시도 횟수. 429/5xx에만 적용된다 (404/403은 1회로 끝난다).
-SEND_ATTEMPTS = 3
-
-# (상태 코드, 응답 본문). 슬랙은 실패 이유를 본문에 담으므로 둘 다 필요하다.
-PostFn = Callable[[str, dict], tuple[int, str]]
+TOPIC_MARKS = {
+    "AI": "🤖",
+    "backend": "⚙️",
+    "infra": "🏗️",
+    "tooling": "🔧",
+}
 
 
-def _topic_emoji(topic: str) -> str:
-    return {
-        "AI": "🤖",
-        "backend": "⚙️",
-        "infra": "🏗️",
-        "tooling": "🔧",
-    }.get(topic, "📄")
+class Sender(Protocol):
+    """브리핑을 어딘가로 내보내는 것."""
+
+    name: str
+
+    def send(self, *, briefing: Briefing, raw: RawBundle) -> None:
+        ...
 
 
-def build_blocks(briefing: Briefing) -> list[dict]:
-    """브리핑을 Block Kit 블록 목록으로 바꾼다."""
-    date_label = datetime.fromisoformat(briefing.window_end).astimezone(KST).strftime(
-        "%m/%d (%a)"
-    )
-    count = len(briefing.summaries)
+def collect_warnings(*, briefing: Briefing, raw: RawBundle) -> list[str]:
+    """사람이 조치해야 하는 것만 모은다.
 
-    if count == 0:
-        # 0건도 반드시 보낸다. 안 보내면 "시스템이 죽은 것"과 구분되지 않는다.
-        return [
-            {
-                "type": "header",
-                "text": {"type": "plain_text", "text": f"📡 {date_label} IT 브리핑"},
-            },
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": (
-                        f"후보 {briefing.considered}건을 봤지만 "
-                        f"*기준을 넘는 글이 없습니다.*\n"
-                        f"조용한 날입니다 — 시스템은 정상입니다."
-                    ),
-                },
-            },
-        ]
+    일시 실패(transient)는 넣지 않는다 — 내가 할 일이 없고, 매번 알리면
+    알림 피로가 생겨서 정작 중요한 경고를 무시하게 된다.
+    """
+    warnings: list[str] = []
 
-    blocks: list[dict] = [
-        {
-            "type": "header",
-            "text": {"type": "plain_text", "text": f"📡 {date_label} IT 브리핑 · {count}건"},
-        }
-    ]
-
-    for summary in briefing.summaries:
-        item = summary.article.ranked.item
-        bullets = "\n".join(f"• {bullet}" for bullet in summary.bullets)
-
-        blocks.append({
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                # <URL|텍스트>가 슬랙의 링크 문법이다.
-                "text": (
-                    f"{_topic_emoji(summary.article.ranked.topic)} "
-                    f"*<{item.url}|{summary.headline}>*\n"
-                    f"{bullets}\n"
-                    f"_{summary.why_it_matters}_"
-                ),
-            },
-        })
-        blocks.append({
-            "type": "context",
-            "elements": [{
-                "type": "mrkdwn",
-                "text": f"{item.source}  ·  {summary.article.ranked.score}점",
-            }],
-        })
-
-    # 폴백이 섞였으면 하단에 알린다. 품질 저하를 모르고 넘어가면 안 된다.
     fallbacks = [
-        s for s in briefing.summaries if s.article.body_source == "rss_excerpt"
+        summary for summary in briefing.summaries
+        if summary.article.body_source == "rss_excerpt"
     ]
     if fallbacks:
-        # 이유를 함께 보여준다. "접근 불가"가 반복되면 봇 차단이므로
-        # 그 소스를 손봐야 한다는 걸 알 수 있다.
-        reasons = "\n".join(
-            f"• {s.article.ranked.item.source}: {s.article.fallback_reason}"
-            for s in fallbacks
-        )
-        blocks.append({
-            "type": "context",
-            "elements": [{
-                "type": "mrkdwn",
-                "text": (
-                    f"⚠️ {len(fallbacks)}건은 본문 추출 실패로 RSS 발췌만 "
-                    f"요약했습니다.\n{reasons}"
-                ),
-            }],
-        })
+        lines = [f"발췌 폴백 {len(fallbacks)}건 (요약 품질 저하):"]
+        lines += [
+            f"  {summary.article.ranked.item.source}: "
+            f"{summary.article.fallback_reason}"
+            for summary in fallbacks
+        ]
+        warnings.append("\n".join(lines))
 
-    # 상한을 넘으면 뒤에서 자른다. 건당 2블록 + 헤더 1이라 7건이면 15블록이므로
-    # 실제로는 걸리지 않지만, 상한을 코드로 보장해 둔다.
-    return blocks[:MAX_BLOCKS]
+    config_errors = [error for error in raw.errors if error.kind == "config"]
+    if config_errors:
+        lines = [f"고쳐야 할 소스 {len(config_errors)}개:"]
+        lines += [f"  {error.source}: {error.message}" for error in config_errors]
+        warnings.append("\n".join(lines))
 
+    moved = [error for error in raw.errors if error.kind == "moved"]
+    if moved:
+        lines = [f"주소가 이전된 소스 {len(moved)}개 (sources.yaml 갱신):"]
+        lines += [f"  {error.source}: {error.message}" for error in moved]
+        warnings.append("\n".join(lines))
 
-def http_post(url: str, payload: dict) -> tuple[int, str]:
-    response = httpx.post(url, json=payload, timeout=HTTP_TIMEOUT)
-    # 슬랙은 실패 이유를 본문에 평문으로 담는다
-    # (invalid_payload, channel_not_found, no_service 등).
-    return response.status_code, response.text[:200]
+    return warnings
 
 
-def send(
-    *,
-    webhook_url: str,
-    blocks: list[dict],
-    post: PostFn = http_post,
-    notification_text: str = "IT 브리핑",
-    sleep: Callable[[float], None] = time.sleep,
-) -> None:
-    """Incoming Webhook으로 보낸다.
+class ConsoleSender:
+    """터미널에 브리핑을 출력한다.
 
-    404(웹훅 삭제)·403은 재시도하지 않고 즉시 Permanent로 올린다.
-    429·5xx는 백오프 재시도한다.
+    계획 1의 유일한 전송 대상이다. 초기 튜닝은 결과를 보면서 프롬프트를
+    고치는 일이고, 그건 터미널에서 하는 작업이다.
     """
-    # text는 폰 알림과 블록 미지원 클라이언트의 폴백으로 쓰인다.
-    # 없으면 알림에 "새 메시지"만 뜬다.
-    payload = {"text": notification_text, "blocks": blocks}
 
-    def attempt() -> None:
-        status, body = post(webhook_url, payload)
-        # url에 webhook_url을 넣지 않는다 — 비밀값이고, 에러 메시지는
-        # 슬랙·로그·Actions 출력에 그대로 남는다.
-        classify_status(status, url="슬랙 웹훅", detail=body)
+    name = "console"
 
-    with_retry(attempt, attempts=SEND_ATTEMPTS, sleep=sleep)
+    def send(self, *, briefing: Briefing, raw: RawBundle) -> None:
+        when = datetime.fromisoformat(briefing.window_end).astimezone(KST)
+        count = len(briefing.summaries)
+
+        print()
+        print(f"📡 {when.strftime('%m/%d (%a)')} IT 브리핑 · "
+              f"{count}건  (후보 {briefing.considered}건)")
+        print("=" * 78)
+
+        if count == 0:
+            print()
+            print(f"  후보 {briefing.considered}건을 봤지만 기준을 넘는 글이 없습니다.")
+            print("  조용한 날입니다 — 시스템은 정상입니다.")
+        else:
+            for position, summary in enumerate(briefing.summaries, start=1):
+                item = summary.article.ranked.item
+                mark = TOPIC_MARKS.get(summary.article.ranked.topic, "📄")
+
+                print()
+                print(f"  [{position}] {summary.article.ranked.score:3d}  "
+                      f"{mark}  {summary.headline}")
+                for bullet in summary.bullets:
+                    print(f"           • {bullet}")
+                print(f"           왜: {summary.why_it_matters}")
+                print(f"           {item.source}  {item.url}")
+
+        for warning in collect_warnings(briefing=briefing, raw=raw):
+            print()
+            print("⚠️  " + warning.replace("\n", "\n    "))
+
+        print()
 ```
 
-> **설명** — `dict.get(key, default)`로 이모지를 고르는 패턴은 if/elif 사슬보다 짧고 읽기 쉽다. `strftime("%m/%d (%a)")`는 시각을 "11/10 (Tue)" 형태의 문자열로 만든다. Block Kit에서 `mrkdwn`은 슬랙 전용 마크다운으로, 링크가 `<URL|텍스트>` 문법이고 기울임은 `_텍스트_`다(일반 마크다운과 다르다).
+> **설명** — `enumerate(..., start=1)`은 0이 아니라 1부터 번호를 센다. `datetime.strftime("%m/%d (%a)")`는 "11/10 (Tue)" 형태의 문자열을 만든다. `"=" * 78`은 문자열 반복으로 구분선을 만드는 Python 관용구다.
+>
+> `Sender`를 `Protocol`로 둔 덕분에 `ConsoleSender`가 아무것도 상속하지 않는다. 계획 3의 `KakaoSender`도 그렇다. **상속이 없으므로 센더끼리 공통 기반 클래스를 통해 엉키지 않는다** — 카톡의 200자 제약이 슬랙 코드에 영향을 주는 일이 구조적으로 불가능해진다.
+>
+> pytest의 `capsys` fixture는 `print` 출력을 가로채 `capsys.readouterr().out`으로 돌려준다. 출력 함수를 테스트하려고 별도 추상화를 만들 필요가 없다.
 
 - [ ] **Step 4: 통과를 확인**
 
 ```bash
-pytest tests/test_slack.py
+pytest tests/test_sender.py
 ```
 
-Expected: `19 passed`
+Expected: `12 passed`
 
-- [ ] **Step 5: 슬랙 Webhook을 만든다**
-
-1. https://api.slack.com/apps → Create New App → From scratch
-2. 앱 이름 `IT 브리핑`, 워크스페이스 선택
-3. Incoming Webhooks → Activate 켜기 → Add New Webhook to Workspace
-4. 브리핑을 받을 채널 선택 (전용 채널 권장: `#it-briefing`)
-5. Webhook URL을 복사해 `.env`의 `SLACK_WEBHOOK_URL`에 넣는다
-
-- [ ] **Step 6: 커밋**
-
-```bash
-git add pipeline/lib/slack.py tests/test_slack.py
-git commit -m "feat: 슬랙 Block Kit 메시지 조립 (0건 알림, 폴백 경고 포함)"
-```
-
----
-
-## Task 21: 전송과 실행 이력
-
-**Files:**
-- Create: `pipeline/notify.py`
-- Create: `tests/test_notify.py`
-
-- [ ] **Step 1: 실패하는 테스트 작성**
+- [ ] **Step 5: 전송과 이력의 테스트 작성**
 
 `tests/test_notify.py`:
 
@@ -6028,6 +5887,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from pipeline.lib.retry import Permanent
 from pipeline.models import (
     Article,
     Briefing,
@@ -6037,8 +5897,8 @@ from pipeline.models import (
     SourceError,
     Summary,
 )
-from pipeline.notify import AlreadySentError, notify
-from tests.fakes import FakeRemoteStore
+from pipeline.notify import AlreadySentError, AllSendersFailedError, notify
+from tests.fakes import FakeRemoteStore, FakeSender
 
 WINDOW_START = datetime(2026, 11, 9, 22, 20, tzinfo=timezone.utc)
 WINDOW_END = datetime(2026, 11, 10, 22, 20, tzinfo=timezone.utc)
@@ -6083,24 +5943,26 @@ def _raw() -> RawBundle:
     )
 
 
-def _notify(briefing, raw=None, store=None, force=False, sent=None):
-    sent_payloads = [] if sent is None else sent
+def _notify(briefing, senders=None, store=None, force=False):
     remote = store or FakeRemoteStore()
+    sent = senders if senders is not None else [FakeSender()]
 
     notify(
         briefing=briefing,
-        raw=raw or _raw(),
+        raw=_raw(),
         remote=remote,
         briefing_date="2026-11-10",
-        send_slack=lambda blocks, text: sent_payloads.append((blocks, text)),
+        senders=sent,
         force=force,
     )
-    return remote, sent_payloads
+    return remote, sent
 
 
-def test_슬랙으로_보낸다():
-    _, sent = _notify(_briefing([_summary()]))
-    assert len(sent) == 1
+# --- 정상 경로 ---
+
+def test_센더로_내보낸다():
+    _, senders = _notify(_briefing([_summary()]))
+    assert senders[0].calls == 1
 
 
 def test_실행_이력을_남긴다():
@@ -6121,29 +5983,22 @@ def test_발행_글을_저장한다():
 def test_소스별_건수를_이력에_남긴다():
     """소스 침묵 감지의 입력이다."""
     remote, _ = _notify(_briefing([_summary()]))
-
     assert remote.runs[0]["source_counts"] == {"토스_기술블로그": 3, "조용한소스": 0}
-
-
-def test_수집_에러를_이력에_남긴다():
-    remote, _ = _notify(_briefing([_summary()]))
-
-    assert len(remote.runs[0]["errors"]) == 1
-    assert remote.runs[0]["errors"][0]["source"] == "깨진소스"
 
 
 def test_에러의_성격까지_이력에_남긴다():
     """계획 3의 소스 경고가 "죽은 소스"와 "불안정한 소스"를 구분하는 근거다."""
     remote, _ = _notify(_briefing([_summary()]))
-
     assert remote.runs[0]["errors"][0]["kind"] == "config"
 
 
-def test_0건이어도_보내고_이력을_남긴다():
-    """이력을 남기지 않으면 다음 윈도우가 계속 늘어난다."""
-    remote, sent = _notify(_briefing([]))
+# --- 0건 ---
 
-    assert len(sent) == 1
+def test_0건이어도_내보내고_이력을_남긴다():
+    """이력을 남기지 않으면 다음 윈도우가 계속 늘어난다."""
+    remote, senders = _notify(_briefing([]))
+
+    assert senders[0].calls == 1
     assert len(remote.runs) == 1
     assert remote.runs[0]["published_count"] == 0
 
@@ -6152,6 +6007,8 @@ def test_0건이면_글을_저장하지_않는다():
     remote, _ = _notify(_briefing([]))
     assert remote.saved == []
 
+
+# --- 멱등성 ---
 
 def test_이미_보낸_윈도우는_다시_보내지_않는다():
     """cron 중복 실행이나 수동 재실행으로 두 번 오는 것을 막는다."""
@@ -6162,79 +6019,89 @@ def test_이미_보낸_윈도우는_다시_보내지_않는다():
 
 
 def test_더_늦은_발송_이력이_있으면_거부한다():
-    later = datetime(2026, 11, 11, 0, 0, tzinfo=timezone.utc)
-    store = FakeRemoteStore(last_sent=later)
-
+    later = datetime(2026, 11, 11, tzinfo=timezone.utc)
     with pytest.raises(AlreadySentError):
-        _notify(_briefing([_summary()]), store=store)
+        _notify(_briefing([_summary()]), store=FakeRemoteStore(last_sent=later))
 
 
 def test_force면_이미_보냈어도_다시_보낸다():
     store = FakeRemoteStore(last_sent=WINDOW_END)
-    _, sent = _notify(_briefing([_summary()]), store=store, force=True)
+    _, senders = _notify(_briefing([_summary()]), store=store, force=True)
 
-    assert len(sent) == 1
+    assert senders[0].calls == 1
 
 
 def test_이전_윈도우의_이력은_막지_않는다():
     earlier = datetime(2026, 11, 9, 22, 20, tzinfo=timezone.utc)
-    store = FakeRemoteStore(last_sent=earlier)
-    _, sent = _notify(_briefing([_summary()]), store=store)
+    _, senders = _notify(_briefing([_summary()]),
+                         store=FakeRemoteStore(last_sent=earlier))
+    assert senders[0].calls == 1
 
-    assert len(sent) == 1
+
+# --- 센더 실패 ---
+
+def test_센더가_여럿이면_하나가_죽어도_나머지는_보낸다():
+    """계획 3에서 카톡 토큰이 만료돼도 슬랙은 가야 한다."""
+    broken = FakeSender(name="broken", error=Permanent("HTTP 404"))
+    working = FakeSender(name="working")
+
+    remote, _ = _notify(_briefing([_summary()]), senders=[broken, working])
+
+    assert working.calls == 1
+    assert len(remote.runs) == 1          # 하나라도 갔으면 기록한다
 
 
-def test_일시_전송_실패면_이력을_남기지_않는다():
-    """이력을 먼저 남기면, 전송 실패 후 재실행이 '이미 보냄'으로 막힌다."""
+def test_하나라도_갔으면_실패한_센더를_이력에_남긴다():
+    broken = FakeSender(name="broken", error=Permanent("HTTP 404"))
+    remote, _ = _notify(_briefing([_summary()]),
+                        senders=[broken, FakeSender(name="working")])
+
+    errors = remote.runs[0]["errors"]
+    assert any(error.get("source") == "sender:broken" for error in errors)
+
+
+def test_전부_실패하면_이력을_남기지_않는다():
+    """이력을 남기면 원인을 고친 뒤 재실행이 '이미 보냄'으로 막힌다."""
     remote = FakeRemoteStore()
+    senders = [FakeSender(name="a", error=Permanent("404")),
+               FakeSender(name="b", error=Permanent("403"))]
 
-    def failing_send(blocks, text):
-        raise RuntimeError("웹훅 404")
-
-    with pytest.raises(RuntimeError, match="웹훅"):
+    with pytest.raises(AllSendersFailedError):
         notify(
-            briefing=_briefing([_summary()]),
-            raw=_raw(),
-            remote=remote,
-            briefing_date="2026-11-10",
-            send_slack=failing_send,
-            force=False,
-        )
-
-    assert remote.runs == []
-
-
-def test_영구_전송_실패도_이력을_남기지_않는다():
-    """웹훅이 삭제된 경우. 이력을 남기면 웹훅을 고친 뒤 재실행이 막힌다."""
-    from pipeline.lib.retry import Permanent
-
-    remote = FakeRemoteStore()
-
-    def refusing_send(blocks, text):
-        raise Permanent("슬랙 웹훅 HTTP 404 — no_service")
-
-    with pytest.raises(Permanent):
-        notify(
-            briefing=_briefing([_summary()]),
-            raw=_raw(),
-            remote=remote,
-            briefing_date="2026-11-10",
-            send_slack=refusing_send,
-            force=False,
+            briefing=_briefing([_summary()]), raw=_raw(), remote=remote,
+            briefing_date="2026-11-10", senders=senders, force=False,
         )
 
     assert remote.runs == []
     assert remote.saved == []
 
 
-def test_알림_텍스트에_건수가_들어간다():
-    _, sent = _notify(_briefing([_summary(0), _summary(1)]))
-    _blocks, text = sent[0]
-
-    assert "2건" in text
+def test_센더가_하나도_없으면_거부한다():
+    """설정 실수로 조용히 아무 데도 안 보내는 것을 막는다."""
+    with pytest.raises(ValueError, match="센더"):
+        _notify(_briefing([_summary()]), senders=[])
 ```
 
-- [ ] **Step 2: 실패를 확인**
+- [ ] **Step 6: 가짜 센더를 `tests/fakes.py`에 추가**
+
+```python
+class FakeSender:
+    """호출 횟수를 세고, 필요하면 정해진 예외를 던진다."""
+
+    def __init__(self, name: str = "fake", error: Exception | None = None) -> None:
+        self.name = name
+        self._error = error
+        self.calls = 0
+        self.briefings: list = []
+
+    def send(self, *, briefing, raw) -> None:
+        self.calls += 1
+        self.briefings.append(briefing)
+        if self._error is not None:
+            raise self._error
+```
+
+- [ ] **Step 7: 실패를 확인**
 
 ```bash
 pytest tests/test_notify.py
@@ -6242,15 +6109,19 @@ pytest tests/test_notify.py
 
 Expected: FAIL — `ModuleNotFoundError: No module named 'pipeline.notify'`
 
-- [ ] **Step 3: 최소 구현 작성**
+- [ ] **Step 8: 최소 구현 작성**
 
 `pipeline/notify.py`:
 
 ```python
-"""06 전송: 슬랙으로 보내고 실행 이력을 남긴다.
+"""04.5 전송: 센더로 내보내고 실행 이력을 남긴다.
 
-순서가 중요하다 — **전송에 성공한 뒤에 이력을 남긴다.** 거꾸로 하면 전송이
-실패했는데 "이미 보냄"으로 기록되어, 재실행이 막히고 그날 브리핑이 사라진다.
+순서가 중요하다 — **하나라도 전송에 성공한 뒤에 이력을 남긴다.** 거꾸로 하면
+전송이 실패했는데 "이미 보냄"으로 기록되어, 원인을 고친 뒤 재실행이 막히고
+그날 브리핑이 사라진다.
+
+계획 1의 센더는 ConsoleSender 하나다. 계획 3에서 KakaoSender와
+SlackSender가 추가된다.
 
 실행:
   python -m pipeline.notify
@@ -6259,19 +6130,20 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'pipeline.notify'`
 
 import argparse
 from datetime import datetime, timezone
-from typing import Callable
 
+from pipeline.lib.sender import ConsoleSender, Sender
 from pipeline.lib.secrets import require
-from pipeline.lib.slack import build_blocks, send
 from pipeline.lib.store import LocalStore, RemoteStore, SupabaseStore
 from pipeline.lib.timeutil import KST
 from pipeline.models import Briefing, RawBundle
 
-SendSlackFn = Callable[[list[dict], str], None]
-
 
 class AlreadySentError(RuntimeError):
     """이 윈도우는 이미 전송됐다. --force로 우회할 수 있다."""
+
+
+class AllSendersFailedError(RuntimeError):
+    """모든 센더가 실패했다. 이력을 남기지 않았으므로 재실행할 수 있다."""
 
 
 def notify(
@@ -6280,10 +6152,15 @@ def notify(
     raw: RawBundle,
     remote: RemoteStore,
     briefing_date: str,
-    send_slack: SendSlackFn,
+    senders: list[Sender],
     force: bool = False,
 ) -> None:
-    """전송하고 이력을 남긴다. 0건도 전송한다."""
+    """센더로 내보내고 이력을 남긴다. 0건도 내보낸다."""
+    if not senders:
+        raise ValueError(
+            "센더가 하나도 없다. 설정 실수로 아무 데도 보내지 않는 것을 막는다."
+        )
+
     window_start = datetime.fromisoformat(briefing.window_start)
     window_end = datetime.fromisoformat(briefing.window_end)
 
@@ -6296,12 +6173,28 @@ def notify(
                 f"다시 보내려면 --force를 쓴다."
             )
 
-    count = len(briefing.summaries)
-    label = f"{count}건" if count else "보낼 글 없음"
-    notification = f"📡 IT 브리핑 · {label}"
+    # 센더는 서로 독립이다. 계획 3에서 카톡 토큰이 만료돼도 슬랙은 가야 한다.
+    delivered: list[str] = []
+    failures: list[dict] = []
 
-    # 전송을 먼저 한다. 실패하면 예외가 올라가고 이력은 남지 않는다.
-    send_slack(build_blocks(briefing), notification)
+    for sender in senders:
+        try:
+            sender.send(briefing=briefing, raw=raw)
+            delivered.append(sender.name)
+        except Exception as error:  # noqa: BLE001 — 센더 단위로 격리한다
+            failures.append({
+                "source": f"sender:{sender.name}",
+                "kind": "config",
+                "message": f"{type(error).__name__}: {error}",
+            })
+
+    if not delivered:
+        # 아무 데도 못 보냈다. 이력을 남기면 재실행이 막힌다.
+        detail = "; ".join(failure["message"] for failure in failures)
+        raise AllSendersFailedError(
+            f"모든 센더가 실패했다 ({len(senders)}개). 이력을 남기지 않았으므로 "
+            f"원인을 고친 뒤 그대로 재실행하면 된다. {detail}"
+        )
 
     if briefing.summaries:
         remote.save_articles(
@@ -6314,10 +6207,10 @@ def notify(
     remote.record_run(
         window_start=window_start,
         window_end=window_end,
-        published_count=count,
+        published_count=len(briefing.summaries),
         source_counts=raw.source_counts,
         input_tokens=None,
-        errors=[error.model_dump() for error in raw.errors],
+        errors=[error.model_dump() for error in raw.errors] + failures,
     )
 
 
@@ -6329,45 +6222,29 @@ def main() -> None:
 
     date = datetime.now(timezone.utc).astimezone(KST).date().isoformat()
     store = LocalStore(date=date)
-    webhook = require("SLACK_WEBHOOK_URL")
-
-    raw = store.read("raw", RawBundle)
 
     notify(
         briefing=store.read("briefing", Briefing),
-        raw=raw,
+        raw=store.read("raw", RawBundle),
         remote=SupabaseStore(require("SUPABASE_URL"), require("SUPABASE_SERVICE_KEY")),
         briefing_date=date,
-        send_slack=lambda blocks, text: send(
-            webhook_url=webhook, blocks=blocks, notification_text=text
-        ),
+        # 계획 3에서 KakaoSender·SlackSender가 이 목록에 추가된다.
+        senders=[ConsoleSender()],
         force=args.force,
     )
 
     print(f"전송 완료 ({date})")
-
-    # 설정 문제는 내가 고쳐야 하므로 전송 후에도 한 번 더 짚어준다.
-    config_errors = [error for error in raw.errors if error.kind == "config"]
-    moved = [error for error in raw.errors if error.kind == "moved"]
-    if config_errors:
-        print()
-        print(f"  고쳐야 할 소스 {len(config_errors)}개:")
-        for error in config_errors:
-            print(f"    {error.source}: {error.message}")
-    if moved:
-        print()
-        print(f"  주소가 이전된 소스 {len(moved)}개 (sources.yaml 갱신):")
-        for error in moved:
-            print(f"    {error.source}: {error.message}")
 
 
 if __name__ == "__main__":
     main()
 ```
 
-> **설명** — `action="store_true"`는 `--force`가 있으면 `True`, 없으면 `False`가 되는 플래그를 만든다(값을 받지 않는다). `last >= window_end` 비교가 가능한 이유는 두 값이 모두 타임존을 가진 aware datetime이기 때문이다 — Task 3에서 naive를 막아둔 이유다.
+> **설명** — 센더가 여럿일 때 **언제 이력을 남기는지**가 설계 판단이다. 전부 실패하면 남기지 않아야 재실행이 되고, 하나라도 성공하면 남겨야 재실행이 성공한 센더에 두 번 보내지 않는다. 실패한 센더는 `runs.errors`에 `sender:<이름>`으로 기록해 나중에 추적한다.
+>
+> `except Exception`으로 센더를 감싸는 것은 의도적이다. 여기서는 "어떤 이유로든 한 센더가 죽어도 나머지는 보낸다"가 요구사항이므로 분류가 필요 없다. 반면 `lib/http.py`나 `enrich.py`에서는 분류가 **행동을 바꾸므로**(재시도 여부) 반드시 나눈다.
 
-- [ ] **Step 4: 통과를 확인**
+- [ ] **Step 9: 통과를 확인**
 
 ```bash
 pytest tests/test_notify.py
@@ -6375,16 +6252,16 @@ pytest tests/test_notify.py
 
 Expected: `15 passed`
 
-- [ ] **Step 5: 커밋**
+- [ ] **Step 10: 커밋**
 
 ```bash
-git add pipeline/notify.py tests/test_notify.py
-git commit -m "feat: 전송 단계 — 멱등성, 0건 전송, 전송 성공 후 이력 기록"
+git add pipeline/lib/sender.py pipeline/notify.py tests/fakes.py tests/test_sender.py tests/test_notify.py
+git commit -m "feat: 전송 — Sender 프로토콜, 터미널 출력, 센더별 격리, 실행 이력"
 ```
 
 ---
 
-## Task 22: 중간 산출물 정리
+## Task 21: 중간 산출물 정리
 
 스펙 7.5의 "`data/` 90일 경과분 삭제" 항목이다. 날짜 디렉터리가 무한 증식하는 것을 막는다.
 
@@ -6541,7 +6418,7 @@ git commit -m "feat: 중간 산출물 90일 정리 (시드는 보호)"
 
 ---
 
-## Task 23: 엔드투엔드 검증과 사용 문서
+## Task 22: 엔드투엔드 검증과 사용 문서
 
 **Files:**
 - Create: `README.md`
@@ -6590,15 +6467,19 @@ Expected: `요약 N건 / 후보 10건`, 헤드라인과 요점.
 python -m pipeline.notify
 ```
 
-Expected: `전송 완료 (YYYY-MM-DD)`
+Expected: 터미널에 브리핑이 출력되고 마지막에 `전송 완료 (YYYY-MM-DD)`
 
-- [ ] **Step 3: 슬랙에서 실제 메시지를 확인**
+- [ ] **Step 3: 출력을 실제로 읽어본다**
 
-확인 항목:
-- 헤드라인이 링크로 걸려 원문이 열리는가
-- 요점이 읽을 만한가
-- 출처와 점수가 보이는가
-- 폰 알림에 "📡 IT 브리핑 · N건"이 뜨는가
+이게 계획 1의 결과물이다. 확인 항목:
+
+- 헤드라인이 **30자 안에서 내용을 전달하는가** (카카오톡 제약이므로 여기서 확인해야 한다)
+- 요점 2~3개가 글의 핵심을 담는가, 아니면 제목 보강 수준인가
+- `왜:` 한 줄이 "그래서 뭐"에 답하는가
+- 점수와 출처를 보고 **"이게 왜 뽑혔는지" 납득되는가**
+- 하단 경고에 발췌 폴백·죽은 소스가 제대로 나오는가
+
+납득이 안 되면 **계획 2로 넘어가지 않는다.** `config/interests.md`와 `pipeline/summarize.py`의 프롬프트를 고치고 해당 단계만 재실행한다.
 
 - [ ] **Step 4: 멱등성을 확인**
 
@@ -6612,7 +6493,7 @@ Expected: `AlreadySentError` — "이 윈도우는 이미 전송됐다 ... --for
 python -m pipeline.notify --force
 ```
 
-Expected: 다시 전송되고 슬랙에 같은 메시지가 한 번 더 온다.
+Expected: 브리핑이 한 번 더 출력된다.
 
 - [ ] **Step 5: Supabase에 데이터가 들어갔는지 확인**
 
@@ -6669,28 +6550,31 @@ Expected: 출력 마지막에 `[설정] 테스트_죽은소스: ... HTTP 404`, �
 
 확인 후 `sources.yaml`에서 그 블록을 지운다.
 
-**7-2. 잘못된 웹훅이 즉시 실패하는지**
+**7-2. 본문을 못 가져오는 소스가 폴백되는지**
+
+`config/sources.yaml`의 소스 하나에서 **RSS는 살아있지만 본문 페이지가 봇을 차단하는** 경우를 재현하기는 어렵다. 대신 `data/<날짜>/ranked.json`을 열어 `selected` 중 한 건의 `url`을 없는 주소로 바꾼 뒤 본문 단계만 다시 돌린다.
 
 ```bash
-SLACK_WEBHOOK_URL=https://hooks.slack.com/services/XXX/YYY/ZZZ \
-  python -m pipeline.notify --force
+python -m pipeline.enrich
 ```
 
-Expected: **재시도 없이 즉시** `Permanent` 예외. 메시지에 `no_service` 같은 슬랙의 이유가 포함되고, **웹훅 URL은 들어 있지 않다.**
+Expected: 그 건이 `[발췌]`로 표시되고, 하단 경고에 `접근 불가 — ... HTTP 404`가 나온다. **나머지 건은 정상으로 처리된다.**
 
-몇 초간 멈췄다가 실패하면 재시도가 걸린 것이므로 분류가 틀렸다 — 404는 `Permanent`여야 한다.
+재시도로 몇 초 멈추면 안 된다 — 404는 `Permanent`이므로 1회로 끝나야 한다.
+
+확인 후 `python -m pipeline.rank`를 다시 돌려 `ranked.json`을 원복한다.
 
 - [ ] **Step 8: `README.md` 작성**
 
 ````markdown
 # 토픽 컬럼 자동화
 
-매일 아침 IT 토픽을 수집·선별·요약해서 슬랙으로 받는다.
+매일 아침 IT 토픽을 수집·선별·요약해서 카카오톡으로 받는다.
 
 - 설계: `docs/superpowers/specs/2026-11-10-it-column-automation-design.md`
-- 계획 1 (현재): 파이프라인 + 슬랙
+- 계획 1 (현재): 파이프라인 — 수집·선별·요약, 결과는 터미널
 - 계획 2 (예정): 웹페이지 + 좋아요·클릭
-- 계획 3 (예정): 카카오톡 + 경고 장치 + GitHub Actions 자동화
+- 계획 3 (예정): 카카오톡 전송 + 슬랙 경고 + 경고 장치 + GitHub Actions
 
 ## 준비
 
@@ -6707,7 +6591,7 @@ python -m pipeline.collect      # 수집  → data/<날짜>/raw.json
 python -m pipeline.rank         # 선별  → ranked.json
 python -m pipeline.enrich       # 본문  → articles.json
 python -m pipeline.summarize    # 요약  → briefing.json
-python -m pipeline.notify       # 슬랙 전송
+python -m pipeline.notify       # 터미널 출력 + 발행 이력 기록
 ```
 
 각 단계는 **단독 재실행이 가능하다.** 요약 프롬프트를 고쳤으면
@@ -6740,7 +6624,9 @@ python -m pipeline.prune --dry-run  # 정리 대상 확인
 - **수집 윈도우는 "마지막 발송 이후"**다 (상한 96시간). 주말을 쉬면 월요일이
   자동으로 72시간이 되어 주말 해외 콘텐츠가 들어온다.
 - **건수는 고정이 아니다.** 점수 임계값(60)을 넘는 것만 보내므로 2건인 날도
-  0건인 날도 정상이다. 0건이어도 슬랙에 한 줄이 간다.
+  0건인 날도 정상이다. 0건이어도 "조용한 날"이라고 출력된다.
+- **`notify`를 건너뛰면 안 된다.** 여기서 `runs`를 기록하고, 그게 다음 실행의
+  수집 윈도우 시작점이 된다. 안 돌리면 같은 구간을 계속 다시 수집한다.
 - **같은 윈도우는 두 번 보내지 않는다.** 다시 보내려면 `--force`.
 - **본문은 Supabase의 `article_bodies`에만 있다.** 리포지토리에 커밋하지 않고
   공개 페이지에서도 읽히지 않는다. Phase 3의 RAG 재료다.
@@ -6760,24 +6646,33 @@ git commit -m "docs: README — 실행 방법과 튜닝 절차"
 ## 완료 조건
 
 - [ ] `pytest`가 전부 통과한다
-- [ ] 파이프라인 5단계를 순차 실행하면 슬랙에 브리핑이 온다
-- [ ] 슬랙 메시지의 헤드라인 링크가 원문으로 연결된다
+- [ ] 파이프라인 5단계를 순차 실행하면 터미널에 브리핑이 출력된다
+- [ ] 출력된 헤드라인이 30자 안에서 내용을 전달한다 (카카오톡 제약 선검증)
+- [ ] 출력의 점수·출처·판단 이유를 보고 "왜 뽑혔는지" 납득된다
 - [ ] 같은 윈도우를 두 번 보내려 하면 거부된다
 - [ ] Supabase의 `articles`와 `article_bodies` 건수가 일치한다
 - [ ] anon 키로 `article_bodies`를 읽으면 권한 거부가 난다
 - [ ] 두 번째 수집에서 윈도우가 좁아지고 기존 글이 걸러진다
 - [ ] `python -m pipeline.evaluate`의 상위 10건 중 8건 이상이 "읽고 싶다"
 - [ ] `check_feeds.py` 출력에서 `[설정]`과 `[일시]`가 구분되어 나온다
-- [ ] 잘못된 `SLACK_WEBHOOK_URL`로 `notify`를 돌리면 **재시도 없이** 즉시 실패하고, 에러 메시지에 웹훅 URL이 들어 있지 않다
+- [ ] `ranked.json`의 URL을 없는 주소로 바꾸고 `enrich`를 돌리면 **재시도 없이** 발췌로 폴백되고, 그 이유가 경고에 나온다
+- [ ] 센더를 빈 목록으로 주면 `notify`가 거부한다 (조용히 아무 데도 안 보내는 것 방지)
 - [ ] `runs` 테이블의 `errors`에 `kind`가 들어 있다
 
 ---
 
 ## 다음 계획
 
-**계획 2 (웹페이지):** `pipeline/render.py` + Vite·React·Tailwind SPA + 좋아요·클릭 저장. 끝나면 공개 URL이 생기고 폰에서 읽을 수 있다.
+**계획 2 (웹페이지):** `pipeline/render.py` + Vite·React·Tailwind SPA + 좋아요·클릭 저장. 끝나면 공개 URL이 생기고 폰에서 읽을 수 있다. 카카오톡의 "전체 보기" 버튼이 가리킬 곳이 생기므로 계획 3보다 먼저 와야 한다.
 
-**계획 3 (자동화):** 카카오톡 전송(토큰 인증, 200자 제약, 상위 5건 + "외 N건") + `lib/guard.py` 경고 장치 + GitHub Actions 워크플로. 끝나면 매일 아침 자동으로 카톡이 온다.
+**계획 3 (전달과 자동화):** `Sender` 목록에 둘을 추가하고 자동화한다.
+
+- **`KakaoSender`** — 토큰 최초 인증, 매일 갱신(`refresh_token_expires_in` 저장), 텍스트 템플릿 200자 안에 상위 5건 + "외 N건" + 페이지 버튼
+- **`SlackSender`** — **경고 전용이다.** 브리핑 전문을 보내지 않는다(페이지가 그 일을 한다). 카카오 토큰이 만료되면 카톡으로는 그 사실을 알릴 수 없으므로, **만료가 없는 채널이 하나 필요하다.** `collect_warnings`의 결과와 `lib/guard.py`의 경고가 여기로 간다
+- **`lib/guard.py`** — 토큰 만료 14일 전, 소스 3일 연속 0건, 크레딧 조기 소진
+- **GitHub Actions 워크플로** + `prune.py`
+
+끝나면 매일 아침 자동으로 카톡이 오고, 시스템이 조용히 죽지 않는다.
 
 ### 계획 3에서 메워야 할 것 (의도적으로 남긴 구멍)
 
