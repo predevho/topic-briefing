@@ -1943,10 +1943,27 @@ SQL이므로 단위 테스트가 아니라 **실제 적용 후 권한 검증**�
 - [ ] **Step 1: Supabase 프로젝트 생성**
 
 1. https://supabase.com 에서 새 프로젝트 생성 (리전은 `Northeast Asia (Seoul)`)
-2. Project Settings → API에서 세 값을 복사해 `.env`에 넣는다
-   - `SUPABASE_URL` = Project URL
-   - `SUPABASE_SECRET_KEY` = `service_role` 키 (**비밀. 브라우저에 절대 노출 금지**)
-   - `VITE_SUPABASE_PUBLISHABLE_KEY` = `anon` 키 (계획 2에서 쓴다. 지금 적어둔다)
+   - Database Password는 비밀번호 관리자에 저장한다. 지금은 쓰지 않지만 나중에
+     `psql`로 붙을 때 필요하고, 분실하면 재설정해야 한다
+2. 값 세 개를 `.env`에 넣는다. **받는 곳이 두 군데로 나뉜다.**
+
+| `.env` 키 | 어디서 | 형태 |
+|---|---|---|
+| `SUPABASE_URL` | **Connect 다이얼로그** (프로젝트 상단 Connect 버튼) | `https://<ref>.supabase.co` |
+| `VITE_SUPABASE_PUBLISHABLE_KEY` | 같은 Connect 다이얼로그 (계획 2에서 쓴다) | `sb_publishable_…` |
+| `SUPABASE_SECRET_KEY` | **Settings → API Keys** | `sb_secret_…` |
+
+> ⚠️ **`Settings → API` 페이지는 존재하지 않는다.** 문서가 명시한다 —
+> "모든 키는 Settings → API Keys에 있고, 별도의 Settings → API 페이지는 없다."
+> Connect 다이얼로그는 **publishable 키만** 보여주므로 secret은 API Keys에서 받는다.
+>
+> **URL은 주소창에서도 만들 수 있다.** 대시보드 URL이
+> `supabase.com/dashboard/project/<ref>` 이므로 `https://<ref>.supabase.co`가
+> 그 프로젝트의 URL이다.
+>
+> API Keys 페이지에는 레거시 `anon`/`service_role`도 함께 있다.
+> **`eyJ`로 시작하는 긴 JWT가 아니라 `sb_secret_`로 시작하는 짧은 것**을 고른다.
+> 레거시 키는 2026년 말에 폐지된다.
 
 - [ ] **Step 2: `supabase/schema.sql` 작성**
 
