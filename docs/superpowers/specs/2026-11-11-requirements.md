@@ -87,10 +87,10 @@
 | ID | 요구사항 | 스펙 | 충족 위치 | 검증 | 상태 |
 |---|---|---|---|---|---|
 | D1 | 본문 전문을 1일차부터 적재한다 (Phase 3 대비) | 2장 | `article_bodies` + `save_articles` | Task 22 Step 5 — `articles`와 `article_bodies` 건수 일치 확인 | 🔍 |
-| D2 | **본문은 공개되지 않는다** | 7.2 | `article_bodies`에 anon 권한 없음 | Task 9 Step 6 — anon 키로 `curl`해서 권한 거부 확인 | 🔍 |
+| D2 | **본문은 공개되지 않는다** | 7.2 | `article_bodies`에 anon 권한 없음 | `scripts/verify_anon_access.sh` — **재실행 가능**. 2026-11-11 실측 통과 (401/`42501`) | ✅ |
 | D3 | 본문은 리포지토리에 커밋되지 않는다 | 7.2 | `docs/data/*.json`에 본문 미포함 | 계획 2에서 `render` 작성 시 | ⏳ |
 | D4 | 검색 색인 차단 (`robots.txt` + `noindex`) | 7.2 | 계획 2 | 계획 2 | ⏳ |
-| D5 | service_key와 anon_key를 분리한다 | 7.2 | `.env` 2개 키 | Task 9 Step 5 — 권한 조회 쿼리 | 🔍 |
+| D5 | secret 키와 publishable 키를 분리한다 | 7.2 | `.env`의 `SUPABASE_SECRET_KEY` / `VITE_SUPABASE_PUBLISHABLE_KEY` | `verify_anon_access.sh` 0번 — secret 키로 돌리면 거부하고 종료한다 | ✅ |
 | D6 | 실행 이력으로 윈도우·멱등성·소스 감지를 지탱한다 | 7.1 | `runs` | `test_실행_이력을_남긴다` 외 | ✅ |
 | D7 | 전송 실패한 실행도 기록한다 | ERD 4.3 | `runs.status` | `test_전부_실패해도_실패_상태로_기록한다` | ✅ |
 | D8 | 0건인 날의 후보 수·최고 점수를 남긴다 | ERD 4.2 | `runs.considered_count`, `max_score` | `test_수집_후보_최고점수를_이력에_남긴다` | ✅ |
@@ -98,8 +98,8 @@
 | D10 | 타임존 없는 값을 거부한다 (조용한 오차 방지) | 7.4 | `timeutil._require_aware` | `test_윈도우_경계가_타임존_없는_값을_거부한다` | ✅ |
 | D11 | 중간 산출물 90일 정리, 시드는 보호 | 7.5 | `prune.py` | `test_시드_디렉터리는_절대_지우지_않는다` | ✅ |
 | D12 | Phase 3 임베딩은 별도 테이블 (1:N) | ERD 3.4 | Phase 3 `article_chunks` | Phase 3 | ⏳ |
-| D13 | 반응의 주인을 구분할 수 있다 | 2.1 | `reactions`·`clicks`·`notes`의 `user_id` | Task 9 Step 5 — INSERT 정책이 `(user_id IS NULL)`인지 확인 | 🔍 |
-| D14 | anon이 남의 `user_id`로 위장하지 못한다 | 2.1 | 세 테이블의 `with check (user_id is null)` | 같음 | 🔍 |
+| D13 | 반응의 주인을 구분할 수 있다 | 2.1 | `reactions`·`clicks`·`notes`의 `user_id` | `verify_anon_access.sh` 4번 — `user_id` 없는 삽입이 `23503`까지 간다 | ✅ |
+| D14 | anon이 남의 `user_id`로 위장하지 못한다 | 2.1 | 세 테이블의 `with check (user_id is null)` | `verify_anon_access.sh` 3번 — `user_id` 채운 삽입이 `42501` | ✅ |
 
 ---
 
@@ -210,8 +210,8 @@
 
 | 상태 | 개수 | 비고 |
 |---|---|---|
-| ✅ 자동 테스트 | 43 | C5가 조치로 ⚠️에서 넘어왔다 |
-| 🔍 수동 확인 단계 있음 | 12 | R10이 조치로 ⚠️에서 넘어왔고, D13·D14가 더해졌다 |
+| ✅ 자동 테스트 / 재실행 가능한 검증 | 47 | C5가 조치로 넘어왔고, D2·D5·D13·D14가 `verify_anon_access.sh`로 자동화됐다 |
+| 🔍 수동 확인 단계 있음 | 8 | |
 | ⏳ 계획 2 또는 3 | 14 | |
 | ⚠️ 검증 수단 없음 | **0** | 6.1·6.2 모두 조치했다 |
 | ⚠️ 알려진 한계 (수용) | 1 | 6.8 — DB 계층 예외 분류 |

@@ -1939,6 +1939,7 @@ SQL이므로 단위 테스트가 아니라 **실제 적용 후 권한 검증**�
 **Files:**
 - Create: `supabase/schema.sql`
 - Create: `supabase/verify_permissions.sql`
+- Create: `scripts/verify_anon_access.sh`
 
 - [ ] **Step 1: Supabase 프로젝트 생성**
 
@@ -2269,20 +2270,43 @@ order by tablename;
 
 Expected (두 번째 쿼리): 7개 테이블 전부 `relrowsecurity = true`
 
-- [ ] **Step 6: anon 키로 본문이 안 읽히는지 실제 확인**
+- [ ] **Step 6: `scripts/verify_anon_access.sh` 작성**
+
+권한 표를 눈으로 보는 것만으로는 부족하다. **publishable 키로 실제로 때려봐야** 한다. 그리고 이것은 한 번 쓰고 버릴 확인이 아니다 — **스키마나 정책을 고칠 때마다 다시 돌려야 하므로** 스크립트로 남긴다.
+
+스크립트가 네 가지를 확인한다.
+
+| 확인 | 기대 |
+|---|---|
+| `articles` 읽힘 | HTTP 200 — 안 읽히면 페이지가 빈다 |
+| `article_bodies`·`runs`·`kakao_auth` | **200이 아님** |
+| `user_id`를 채운 삽입 | `42501` — 정책이 막는다 |
+| `user_id` 없는 삽입 | `23503` — 정책 통과, FK에서만 걸린다 |
+
+**마지막 둘이 서로 다른 코드로 나오는 것이 핵심이다.** 정책이 "막는다"와 "통과시킨다"를 실제로 구분한다는 증거다. 둘 다 `42501`이면 좋아요를 아무도 못 누르고, 둘 다 `23503`이면 `user_id` 위장이 가능하다.
+
+삽입 테스트는 **존재하지 않는 `article_id`**를 쓴다. 정책을 통과하면 외래 키에서 걸리고 막히면 `42501`이 되므로, **어느 경로든 행이 만들어지지 않는다** — 운영 데이터를 건드리지 않고 정책의 방향만 본다.
+
+차단 판정은 **"200이 아닌지"**로 한다. PostgREST가 권한 거부에 401을 줄 때도 403을 줄 때도 있어서 특정 상태 코드에 묶으면 깨지기 쉽다(실측에서는 401 + `42501`이 나왔다).
+
+스크립트 전문은 `scripts/verify_anon_access.sh`에 있다.
+
+- [ ] **Step 7: 검증 실행**
 
 ```bash
-curl -s "$SUPABASE_URL/rest/v1/article_bodies?select=*" \
-  -H "apikey: $VITE_SUPABASE_PUBLISHABLE_KEY" \
-  -H "Authorization: Bearer $VITE_SUPABASE_PUBLISHABLE_KEY"
+bash scripts/verify_anon_access.sh
 ```
 
-Expected: 권한 거부 에러 (`"code":"42501"` 또는 유사). **빈 배열 `[]`이 나오면 안 된다** — 그건 "권한은 있고 데이터가 없다"는 뜻이므로 데이터가 쌓이면 노출된다.
+Expected: 모든 줄에 `✓`, 마지막에 `전부 통과. anon 권한이 설계대로다.`, 종료 코드 0
 
-- [ ] **Step 7: 커밋**
+**`★`가 하나라도 보이면 멈추고 고친다.** 특히 `article_bodies 가 읽힌다`는 **테이블이 비어 있는 동안 증상이 없다** — 데이터가 쌓인 뒤 발견하면 이미 공개돼 있던 것이다.
+
+이 스크립트는 `.env`의 `VITE_SUPABASE_PUBLISHABLE_KEY`를 쓴다(없으면 `SUPABASE_KEY`도 받는다 — Connect 다이얼로그가 그 이름으로 준다).
+
+- [ ] **Step 8: 커밋**
 
 ```bash
-git add supabase/
+git add supabase/ scripts/verify_anon_access.sh
 git commit -m "feat: Supabase 스키마 — 본문 테이블 분리로 anon 차단, RLS 전면 활성화"
 ```
 
