@@ -477,7 +477,7 @@ runs            -- 실행 이력
 - `articles.body`는 RLS로 브라우저 anon key에서 **읽기 불가**로 설정한다.
 - `kakao_auth`는 anon key에서 접근 불가.
 - `reactions`·`clicks`는 anon key로 **삽입만** 가능.
-- 파이프라인은 `SUPABASE_SERVICE_KEY`(쓰기), 브라우저는 `VITE_SUPABASE_ANON_KEY`를 쓴다. 키를 분리하는 것이 RLS가 실제로 작동하는 전제다.
+- 파이프라인은 `SUPABASE_SECRET_KEY`(쓰기), 브라우저는 `VITE_SUPABASE_PUBLISHABLE_KEY`를 쓴다. 키를 분리하는 것이 RLS가 실제로 작동하는 전제다.
 - **`robots.txt` + `noindex` 메타 태그로 검색 색인을 차단한다.** GitHub Pages는 검색엔진에 색인되므로, 이것이 없으면 "아무도 모르는 URL"이라는 전제가 깨진다.
 
 **리포지토리는 퍼블릭이다.** GitHub Pages는 무료 플랜에서 퍼블릭 리포만 지원하고, 이 설계는 비밀값을 리포에 두지 않으므로(전부 Actions Secrets와 Supabase) 퍼블릭이 안전하다. 단 한 가지 규칙이 따라붙는다 — **`articles.body`는 Supabase에만 존재하고 리포에 커밋되지 않는다.** `docs/data/*.json`에는 요약·헤드라인·링크만 담고 본문은 넣지 않는다. 이것이 7.2의 본문 비공개 원칙이 퍼블릭 리포에서도 성립하는 조건이다.
@@ -625,8 +625,8 @@ KAKAO_REST_API_KEY
 KAKAO_CLIENT_SECRET
 SLACK_WEBHOOK_URL
 SUPABASE_URL
-SUPABASE_SERVICE_KEY       # 파이프라인용 (쓰기)
-VITE_SUPABASE_ANON_KEY     # 브라우저용 (RLS로 보호)
+SUPABASE_SECRET_KEY       # 파이프라인용 (쓰기)
+VITE_SUPABASE_PUBLISHABLE_KEY     # 브라우저용 (RLS로 보호)
 ```
 
 **Max 크레딧은 플랜 1개 ↔ Console 조직 1개로 연결되고 본인이 변경할 수 없다(변경은 지원팀 문의).** 따라서 `ANTHROPIC_API_KEY`는 크레딧이 연결된 조직에서 발급해야 한다.

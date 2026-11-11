@@ -191,7 +191,7 @@ ANTHROPIC_API_KEY=sk-ant-...
 
 # Supabase
 SUPABASE_URL=https://xxxxx.supabase.co
-SUPABASE_SERVICE_KEY=eyJ...
+SUPABASE_SECRET_KEY=eyJ...
 
 ```
 
@@ -1945,8 +1945,8 @@ SQL이므로 단위 테스트가 아니라 **실제 적용 후 권한 검증**�
 1. https://supabase.com 에서 새 프로젝트 생성 (리전은 `Northeast Asia (Seoul)`)
 2. Project Settings → API에서 세 값을 복사해 `.env`에 넣는다
    - `SUPABASE_URL` = Project URL
-   - `SUPABASE_SERVICE_KEY` = `service_role` 키 (**비밀. 브라우저에 절대 노출 금지**)
-   - `VITE_SUPABASE_ANON_KEY` = `anon` 키 (계획 2에서 쓴다. 지금 적어둔다)
+   - `SUPABASE_SECRET_KEY` = `service_role` 키 (**비밀. 브라우저에 절대 노출 금지**)
+   - `VITE_SUPABASE_PUBLISHABLE_KEY` = `anon` 키 (계획 2에서 쓴다. 지금 적어둔다)
 
 - [ ] **Step 2: `supabase/schema.sql` 작성**
 
@@ -2163,6 +2163,20 @@ create policy notes_public_insert on public.notes
 
 -- article_bodies / runs / kakao_auth: anon 정책을 만들지 않는다.
 -- 권한도 회수했고 정책도 없으므로 이중으로 차단된다.
+
+-- ---------------------------------------------------------------
+-- 파이프라인(service_role) 권한
+-- ---------------------------------------------------------------
+-- 파이프라인은 secret 키로 접속하고, 그것은 service_role 역할이 된다.
+-- service_role은 BYPASSRLS지만 **테이블 grant는 별개다** — RLS를 우회하는
+-- 것과 테이블에 닿을 수 있는 것은 다른 층이다.
+--
+-- Supabase가 기본으로 주지만, Data API 설정의 "Automatically expose new
+-- tables"를 끈 프로젝트에서 service_role이 어떻게 되는지가 문서로 명확하지
+-- 않다(그 설정은 "Data API가 쓰는 권한을 회수한다"고만 말한다).
+-- 명시해두면 중복이어도 무해하고, 빠졌을 때 겪는 42501 에러를 피한다.
+grant select, insert, update, delete on all tables in schema public to service_role;
+grant usage, select on all sequences in schema public to service_role;
 ```
 
 > **설명** — `generated always as identity`는 자동 증가 정수 기본키를 만드는 표준 SQL 문법이다. 구식 `serial`과 달리 숨은 시퀀스에 별도 권한을 줄 필요가 없어, anon이 삽입하는 테이블에서 특히 편하다. `timestamptz`는 타임존을 포함한 시각 타입으로, `timestamp`(타임존 없음)를 쓰면 서버 시간대에 따라 값이 달라진다. `jsonb`는 JSON을 이진 형태로 저장해 인덱스와 질의가 가능하다. `check` 제약은 잘못된 값이 DB에 들어오는 것을 애플리케이션 버그와 무관하게 막는다.
@@ -2173,6 +2187,14 @@ Supabase 대시보드 → SQL Editor에 `supabase/schema.sql` 전체를 붙여 �
 
 Expected: `Success. No rows returned`
 
+> **`grant`가 곧 Data API 노출 메커니즘이다.** Supabase는 2026-10-30부터 새 테이블을
+> Data API에 자동 노출하지 않는다. 이 스키마는 `revoke all` 후 필요한 것만 명시적으로
+> `grant`하므로 그 설정이 켜져 있든 꺼져 있든 결과가 같다 — 오히려 설정이 켜져 있을 때
+> `revoke all`이 과잉 노출을 걷어낸다.
+>
+> 나중에 페이지가 테이블을 못 읽으면 PostgREST가 **`42501`** 에러와 함께
+> **필요한 `grant` 문장을 그대로 알려준다.** 그 메시지를 그대로 실행하면 된다.
+>
 > `auth.users`를 참조하는 외래 키가 들어 있다. Supabase는 프로젝트를 만들 때
 > `auth` 스키마를 함께 프로비저닝하므로 사용자가 0명이어도 참조가 성립한다.
 > **만약 `relation "auth.users" does not exist`가 나면** 세 줄의
@@ -2234,8 +2256,8 @@ Expected (두 번째 쿼리): 7개 테이블 전부 `relrowsecurity = true`
 
 ```bash
 curl -s "$SUPABASE_URL/rest/v1/article_bodies?select=*" \
-  -H "apikey: $VITE_SUPABASE_ANON_KEY" \
-  -H "Authorization: Bearer $VITE_SUPABASE_ANON_KEY"
+  -H "apikey: $VITE_SUPABASE_PUBLISHABLE_KEY" \
+  -H "Authorization: Bearer $VITE_SUPABASE_PUBLISHABLE_KEY"
 ```
 
 Expected: 권한 거부 에러 (`"code":"42501"` 또는 유사). **빈 배열 `[]`이 나오면 안 된다** — 그건 "권한은 있고 데이터가 없다"는 뜻이므로 데이터가 쌓이면 노출된다.
@@ -2650,7 +2672,7 @@ def check_key_does_not_leak() -> bool:
 
 
 def main() -> None:
-    store = SupabaseStore(require("SUPABASE_URL"), require("SUPABASE_SERVICE_KEY"))
+    store = SupabaseStore(require("SUPABASE_URL"), require("SUPABASE_SECRET_KEY"))
 
     print("1) 마지막 발송 시각 조회...")
     print(f"   → {store.last_sent_at()}  (최초 실행이면 None)")
@@ -2701,7 +2723,7 @@ mkdir -p scripts && python scripts/smoke_supabase.py
 
 Expected: 다섯 단계가 모두 출력되고 마지막에 "성공". 2번에서 기록한 시각이 조회되어야 하고, **5번이 "키는 새지 않았다"로 끝나야 한다.**
 
-5번이 `★ 키가 예외 메시지에 들어간다`로 끝나면 **멈추고 고친다.** 리포지토리가 퍼블릭이므로 Actions 로그도 공개된다 — 그 로그에 `SUPABASE_SERVICE_KEY`가 남으면 DB 전체가 열린다.
+5번이 `★ 키가 예외 메시지에 들어간다`로 끝나면 **멈추고 고친다.** 리포지토리가 퍼블릭이므로 Actions 로그도 공개된다 — 그 로그에 `SUPABASE_SECRET_KEY`가 남으면 DB 전체가 열린다.
 
 확인 후 Supabase SQL Editor에서 테스트 행을 지운다:
 
@@ -3623,7 +3645,7 @@ def collect(
 
 
 def main() -> None:
-    remote = SupabaseStore(require("SUPABASE_URL"), require("SUPABASE_SERVICE_KEY"))
+    remote = SupabaseStore(require("SUPABASE_URL"), require("SUPABASE_SECRET_KEY"))
     now = datetime.now(timezone.utc)
     window_start, window_end = compute_window(now=now, last_sent_at=remote.last_sent_at())
 
@@ -4773,7 +4795,7 @@ def main() -> None:
     store = LocalStore(date=date)
     raw = store.read("raw", RawBundle)
 
-    remote = SupabaseStore(require("SUPABASE_URL"), require("SUPABASE_SERVICE_KEY"))
+    remote = SupabaseStore(require("SUPABASE_URL"), require("SUPABASE_SECRET_KEY"))
     weights = {source.name: source.weight for source in load_sources()}
 
     bundle = rank(
@@ -6594,7 +6616,7 @@ def main() -> None:
         briefing=store.read("briefing", Briefing),
         ranked=store.read("ranked", RankedBundle),
         raw=store.read("raw", RawBundle),
-        remote=SupabaseStore(require("SUPABASE_URL"), require("SUPABASE_SERVICE_KEY")),
+        remote=SupabaseStore(require("SUPABASE_URL"), require("SUPABASE_SECRET_KEY")),
         briefing_date=date,
         # 계획 3에서 KakaoSender·SlackSender가 이 목록에 추가된다.
         senders=[ConsoleSender()],
