@@ -1278,7 +1278,7 @@ def fetch(
 pytest tests/test_http.py
 ```
 
-Expected: `21 passed`
+Expected: `22 passed`
 
 - [ ] **Step 5: 커밋**
 
