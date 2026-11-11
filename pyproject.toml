@@ -1,0 +1,28 @@
+[project]
+name = "topic-briefing"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "feedparser>=6.0.11",      # RSS/Atom 파싱. 매체별 포맷 차이를 흡수한다
+    "trafilatura>=2.0.0",      # HTML에서 본문만 추출 (광고·내비 제거)
+    "httpx>=0.28.1",           # HTTP 클라이언트. 타임아웃 지정이 명확하다
+    "anthropic>=2.7.0",        # Claude API 공식 SDK (2.x 기준으로 코드를 썼다)
+    "supabase>=2.15.0",        # Supabase 클라이언트
+    "PyYAML>=6.0.2",           # sources.yaml 읽기
+    "pydantic>=2.11.0",        # LLM 구조화된 출력 검증
+    "python-dotenv>=1.0.1",    # 로컬 .env 로딩
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.3.0"]
+
+# setuptools는 flat 레이아웃에서 최상위 디렉터리를 자동으로 패키지 후보로
+# 본다. tests는 자동 제외되지만 config와 supabase(SQL 파일용)는 아니라서
+# "최상위 패키지가 여러 개"로 설치가 거부된다. 찾을 범위를 명시해 막는다.
+[tool.setuptools.packages.find]
+include = ["pipeline*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# -q: 간결한 출력. --strict-markers: 오타난 마커를 에러로
+addopts = "-q --strict-markers"
