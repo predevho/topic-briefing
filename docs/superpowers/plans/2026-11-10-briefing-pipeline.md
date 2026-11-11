@@ -2035,9 +2035,18 @@ create table if not exists public.runs (
 );
 
 -- 좋아요 (계획 2)
+--
+-- user_id가 지금부터 있는 이유: 페이지가 공개이고 인증이 없으므로 누구나
+-- 좋아요를 누를 수 있다. 그런데 Phase 2는 "내 좋아요"를 선별 프롬프트에
+-- 주입한다 — 낯선 사람의 클릭이 내 큐레이션 기준을 바꾼다.
+-- 인증은 지금 켜지 않는다. 컬럼만 두면 전부 NULL("아마 나")이 되고,
+-- 나중에 Auth를 켜는 순간 where user_id = auth.uid()로 바로 걸러진다.
+-- 처음부터 두면 마이그레이션이 없다. 이것이 "지금 하면 싸고 나중에 하면
+-- 비싼" 유일한 항목이다.
 create table if not exists public.reactions (
   id         bigint generated always as identity primary key,
   article_id bigint not null references public.articles(id) on delete cascade,
+  user_id    uuid references auth.users(id) on delete set null,
   created_at timestamptz not null default now()
 );
 
@@ -2045,6 +2054,7 @@ create table if not exists public.reactions (
 create table if not exists public.clicks (
   id         bigint generated always as identity primary key,
   article_id bigint not null references public.articles(id) on delete cascade,
+  user_id    uuid references auth.users(id) on delete set null,
   created_at timestamptz not null default now()
 );
 
@@ -2052,6 +2062,7 @@ create table if not exists public.clicks (
 create table if not exists public.notes (
   id         bigint generated always as identity primary key,
   article_id bigint not null references public.articles(id) on delete cascade,
+  user_id    uuid references auth.users(id) on delete set null,
   text       text   not null,
   tags       jsonb  not null default '[]'::jsonb,
   created_at timestamptz not null default now()
@@ -2086,6 +2097,12 @@ create index if not exists runs_sent_at_idx
 create index if not exists reactions_article_id_idx on public.reactions (article_id);
 create index if not exists clicks_article_id_idx    on public.clicks (article_id);
 create index if not exists notes_article_id_idx     on public.notes (article_id);
+
+-- user_id도 외래 키다. Phase 2가 "내 것만" 거르는 질의를 쓰므로 인덱스를
+-- 둔다. 지금은 전부 NULL이어서 인덱스가 거의 비어 있다 — 비용이 없다.
+create index if not exists reactions_user_id_idx on public.reactions (user_id);
+create index if not exists clicks_user_id_idx    on public.clicks (user_id);
+create index if not exists notes_user_id_idx     on public.notes (user_id);
 
 -- ---------------------------------------------------------------
 -- RLS 활성화
@@ -2123,20 +2140,26 @@ create policy articles_public_read on public.articles
 
 -- reactions/clicks: 삽입만. 조회는 service_role(= 나)만 한다.
 -- identity 컬럼은 시퀀스 권한을 따로 주지 않아도 삽입된다(serial과 다름).
+-- with check (user_id is null): anon이 삽입하는 행은 user_id가 반드시
+-- 비어 있어야 한다. 이것이 없으면 인증을 켠 뒤에 anon 키로 남의 user_id를
+-- 적어 넣을 수 있다 — 위장 경로를 처음부터 막는다. 인증된 사용자는
+-- 그때 별도 정책(auth.uid() = user_id)으로 삽입한다.
 grant insert on public.reactions to anon;
 create policy reactions_public_insert on public.reactions
-  for insert to anon with check (true);
+  for insert to anon with check (user_id is null);
 
 grant insert on public.clicks to anon;
 create policy clicks_public_insert on public.clicks
-  for insert to anon with check (true);
+  for insert to anon with check (user_id is null);
 
--- notes: 내 메모를 내 페이지에서 쓰고 읽는다
+-- notes: 내 메모를 내 페이지에서 쓰고 읽는다.
+-- 다수 사용자로 가면 이 select 정책은 남의 메모까지 노출하므로
+-- auth.uid() = user_id로 좁혀야 한다 (스펙 2.1 참조).
 grant select, insert on public.notes to anon;
 create policy notes_public_read on public.notes
   for select to anon using (true);
 create policy notes_public_insert on public.notes
-  for insert to anon with check (true);
+  for insert to anon with check (user_id is null);
 
 -- article_bodies / runs / kakao_auth: anon 정책을 만들지 않는다.
 -- 권한도 회수했고 정책도 없으므로 이중으로 차단된다.
@@ -2149,6 +2172,12 @@ create policy notes_public_insert on public.notes
 Supabase 대시보드 → SQL Editor에 `supabase/schema.sql` 전체를 붙여 넣고 Run.
 
 Expected: `Success. No rows returned`
+
+> `auth.users`를 참조하는 외래 키가 들어 있다. Supabase는 프로젝트를 만들 때
+> `auth` 스키마를 함께 프로비저닝하므로 사용자가 0명이어도 참조가 성립한다.
+> **만약 `relation "auth.users" does not exist`가 나면** 세 줄의
+> `references auth.users(id) on delete set null`을 지우고 `uuid`만 남긴다 —
+> 컬럼의 목적(주인 구분)은 그대로 달성되고, 참조 무결성만 포기한다.
 
 - [ ] **Step 4: 권한 검증 쿼리 작성**
 
@@ -2184,6 +2213,17 @@ clicks     | INSERT
 notes      | INSERT
 notes      | SELECT
 reactions  | INSERT
+```
+
+그리고 **anon이 `user_id`를 채워 삽입하려 하면 거부되는지** 확인한다.
+
+```sql
+-- anon 역할로 실행해볼 수 없으므로 정책 자체를 확인한다.
+-- 기대: reactions/clicks/notes의 insert 정책이 (user_id IS NULL)
+select tablename, policyname, cmd, with_check
+from pg_policies
+where schemaname = 'public' and cmd = 'INSERT'
+order by tablename;
 ```
 
 `article_bodies`, `runs`, `kakao_auth`가 **목록에 없어야** 한다. 하나라도 보이면 `revoke`가 적용되지 않은 것이므로 본문이 공개된다.
