@@ -3382,11 +3382,38 @@ git commit -m "feat: 소스 설정 로더 (이름·주소 중복, 스킴 오타,
 
 **Files:**
 - Create: `pipeline/collect.py`
+- Create: `pipeline/lib/text.py`
 - Create: `tests/fixtures/feed_two_items.xml`
 - Create: `tests/fixtures/feed_empty.xml`
+- Create: `tests/fixtures/feed_atom_updated.xml`
 - Create: `tests/test_collect.py`
+- Create: `tests/test_text.py`
 
-- [ ] **Step 1: 테스트 fixture 작성**
+> **계획에서 고친 것 — 버그 셋** (테스트 21개 → 30개, `lib/text.py` 추가)
+>
+> **1. 에러 분류 테스트 다섯 개가 애초에 통과할 수 없었다.** `collect`는
+> **전부** 실패하면 `RuntimeError`를 던진다(spec 8.2). 그런데 그 테스트들은
+> 소스가 하나뿐인 채로 그 하나를 깨뜨리고 번들을 기대했다. 소스 1개 중 1개
+> 실패 = 전부 실패다. 깨진 소스 + 정상 소스로 바꿨고(`_one_broken` 도움 함수),
+> 원래 의도였던 "소스 1개가 실패하면 중단"은 별도 테스트로 못 박았다.
+>
+> **2. 중복 제거가 정반대로 동작했다.** `{item.url: item for item in collected}`에
+> "dict는 삽입 순서를 유지하므로 먼저 만난 소스가 남는다"는 주석이 붙어 있었다.
+> **틀렸다.** 삽입 순서가 유지되는 건 **키**이고, 같은 키에 다시 대입하면
+> **값은 나중 것으로 덮인다.** 즉 마지막 소스가 남았다. 살아남은 항목의
+> `source`가 선별 가중치를 정하므로(`sources.yaml` 순서 = 우선순위) 이건
+> 품질에 직접 영향을 준다. `setdefault`로 바꿨다. **추가한 테스트가 잡았다.**
+>
+> **3. `bytes` 리터럴에 한글이 있었다.** `b"...날짜 깨짐..."`은 `SyntaxError:
+> bytes can only contain ASCII literal characters`다. `str`로 쓰고 `.encode()`한다.
+>
+> **그리고 실제로 돌려 보고 하나 더 — 발췌에 HTML이 그대로 들어왔다.**
+> 273건 중 **140건**이 `<div><ul><li>`를 담고 있었다. 선별 프롬프트와
+> (본문 확보 실패 시) 폴백 본문이 둘 다 이걸 쓰므로 양쪽으로 번진다.
+> `lib/text.strip_html`을 만들어 수집에서 한 번 벗긴다. **길이는 자르지 않는다** —
+> 선별은 `excerpt[:400]`만 보지만 폴백 본문은 전체를 쓴다(Task 18).
+
+- [x] **Step 1: 테스트 fixture 작성**
 
 `tests/fixtures/feed_two_items.xml` — 윈도우 안의 한 건과 윈도우 밖의 한 건:
 
@@ -3422,7 +3449,192 @@ git commit -m "feat: 소스 설정 로더 (이름·주소 중복, 스킴 오타,
 </rss>
 ```
 
-- [ ] **Step 2: 실패하는 테스트 작성**
+`tests/fixtures/feed_atom_updated.xml` — **Atom은 `published` 없이 `updated`만
+주는 경우가 많다.** 네이버 D2가 `.atom`을 주고 실제로 이 모양이다. 구현에
+`entry.get("published") or entry.get("updated")` 폴백이 있는데 계획에는 그걸
+확인하는 테스트가 없었다. 이걸 놓치면 그 소스 **전체가 조용히 0건**이 된다:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Atom 피드</title>
+  <entry>
+    <title>published 없이 updated만 있는 글</title>
+    <link rel="alternate" href="https://d2.naver.com/helloworld/1234"/>
+    <updated>2026-11-10T14:30:00+09:00</updated>
+    <summary>네이버 D2처럼 .atom을 주는 소스가 이 모양이다.</summary>
+  </entry>
+</feed>
+```
+
+- [x] **Step 2: HTML 제거 유틸 — 실패하는 테스트**
+
+`tests/test_text.py`:
+
+```python
+from pipeline.lib.text import strip_html
+
+
+def test_태그를_벗긴다():
+    assert strip_html("<p>본문이다</p>") == "본문이다"
+
+
+def test_중첩된_태그도_벗긴다():
+    assert strip_html("<div><p>강조 <strong>된</strong> 글</p></div>") == "강조 된 글"
+
+
+def test_블록_태그는_공백으로_나눈다():
+    """<li>a</li><li>b</li>를 그냥 이으면 "ab"가 된다. GeekNews 발췌가
+    전부 <ul><li> 목록이라 이게 깨지면 단어가 붙어 버린다.
+    """
+    assert strip_html("<ul><li>첫째</li><li>둘째</li></ul>") == "첫째 둘째"
+
+
+def test_br도_공백으로_나눈다():
+    assert strip_html("한 줄<br/>다음 줄") == "한 줄 다음 줄"
+
+
+def test_인라인_태그는_붙인다():
+    """<strong>은 단어 중간에 올 수 있다. 공백을 넣으면 단어가 쪼개진다."""
+    assert strip_html("<p>Postgre<strong>SQL</strong></p>") == "PostgreSQL"
+
+
+def test_엔티티를_되돌린다():
+    assert strip_html("<p>a &amp; b &lt; c &quot;d&quot;</p>") == 'a & b < c "d"'
+
+
+def test_공백을_하나로_모은다():
+    """피드의 HTML은 들여쓰기와 줄바꿈이 섞여 있다. 그대로 두면
+    프롬프트에 빈 줄만 들어간다.
+    """
+    assert strip_html("<p>앞\n\n   뒤</p>") == "앞 뒤"
+
+
+def test_앞뒤_공백을_없앤다():
+    assert strip_html("  <p> 가운데 </p>  ") == "가운데"
+
+
+def test_script와_style_내용은_버린다():
+    """본문이 아니다. 프롬프트에 들어가면 토큰만 먹는다."""
+    assert strip_html("<p>글</p><script>var x = 1;</script>") == "글"
+    assert strip_html("<style>.a{color:red}</style><p>글</p>") == "글"
+
+
+def test_태그가_없으면_내용만_정리한다():
+    assert strip_html("그냥  텍스트") == "그냥 텍스트"
+
+
+def test_빈_문자열은_빈_문자열이다():
+    assert strip_html("") == ""
+
+
+def test_닫히지_않은_태그도_예외를_내지_않는다():
+    """피드의 HTML은 깨져 있는 경우가 흔하다. 한 건 때문에 수집이
+    멈추면 안 된다.
+    """
+    assert strip_html("<p>앞<div>뒤") == "앞 뒤"
+
+
+def test_주석은_버린다():
+    assert strip_html("<!-- 숨김 --><p>보임</p>") == "보임"
+
+
+def test_링크의_주소는_버리고_글자만_남긴다():
+    """Lobsters 발췌가 <a href=...>Comments</a> 하나뿐이다. 주소까지
+    남기면 프롬프트가 URL로 가득 찬다.
+    """
+    assert strip_html('<p><a href="https://lobste.rs/s/abc">Comments</a></p>') == "Comments"
+```
+
+- [x] **Step 3: HTML 제거 유틸 구현**
+
+`pipeline/lib/text.py`:
+
+```python
+"""피드에서 온 HTML을 글자만 남긴 텍스트로 바꾼다.
+
+RSS·Atom의 `summary`/`content`는 거의 항상 HTML이다. 그대로 두면
+- 선별 프롬프트에 `<div><ul><li>`가 들어가 토큰을 먹고 신호를 흐린다
+- 본문 확보 실패 시 폴백 본문(`body_source="rss_excerpt"`)에 태그가 남아
+  요약 프롬프트까지 번진다
+
+그래서 수집 단계에서 한 번 벗겨 저장한다. 길이는 자르지 않는다 —
+선별은 `excerpt[:400]`만 쓰지만 폴백 본문은 전체를 쓴다.
+"""
+
+import re
+from html.parser import HTMLParser
+
+# 이 태그들은 경계가 곧 띄어쓰기다. <li>첫째</li><li>둘째</li>를 그냥 이으면
+# "첫째둘째"가 된다. 반대로 <strong>은 단어 중간에 오므로 붙여야 한다.
+BLOCK_TAGS = frozenset({
+    "address", "article", "aside", "blockquote", "br", "dd", "div", "dl", "dt",
+    "figcaption", "figure", "footer", "h1", "h2", "h3", "h4", "h5", "h6",
+    "header", "hr", "li", "ol", "p", "pre", "section", "table", "tbody", "td",
+    "tfoot", "th", "thead", "tr", "ul",
+})
+
+# 글이 아니다. 내용까지 버린다.
+DROP_TAGS = frozenset({"script", "style"})
+
+_WHITESPACE = re.compile(r"\s+")
+
+
+class _TextOnly(HTMLParser):
+    """태그를 버리고 글자만 모은다."""
+
+    def __init__(self) -> None:
+        # convert_charrefs=True(기본값)면 &amp; 같은 엔티티를 알아서 되돌려준다.
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self._dropping = 0
+
+    def handle_starttag(self, tag: str, attrs: object) -> None:
+        if tag in DROP_TAGS:
+            self._dropping += 1
+        elif tag in BLOCK_TAGS:
+            self.parts.append(" ")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in DROP_TAGS:
+            # 0 밑으로 내려가지 않게 한다. 깨진 HTML은 여는 태그 없이
+            # 닫는 태그만 나오는 경우가 있다.
+            self._dropping = max(0, self._dropping - 1)
+        elif tag in BLOCK_TAGS:
+            self.parts.append(" ")
+
+    def handle_data(self, data: str) -> None:
+        if not self._dropping:
+            self.parts.append(data)
+
+
+def strip_html(value: str) -> str:
+    """HTML에서 글자만 남긴다. 공백은 하나로 모으고 앞뒤를 자른다.
+
+    HTMLParser는 깨진 HTML에도 예외를 내지 않는다. 피드의 HTML은 자주
+    깨져 있고, 한 항목 때문에 수집이 멈추면 안 되므로 이 성질이 필요하다.
+    """
+    parser = _TextOnly()
+    parser.feed(value)
+    parser.close()
+    return _WHITESPACE.sub(" ", "".join(parser.parts)).strip()
+```
+
+> **설명** — 표준 라이브러리 `html.parser.HTMLParser`를 쓴다. 정규식으로
+> `<[^>]+>`를 지우는 방법보다 안전하다(속성 안의 `>`, 주석, CDATA를 다룬다).
+> 새 의존성도 필요 없다.
+>
+> `convert_charrefs=True`(기본값)면 `&amp;` 같은 엔티티를 알아서 되돌려준다.
+>
+> **블록 태그와 인라인 태그를 나눈 이유** — `<li>첫째</li><li>둘째</li>`를
+> 그냥 이으면 `"첫째둘째"`가 된다. 반대로 `<strong>`은 단어 중간에 오므로
+> (`Postgre<strong>SQL</strong>`) 공백을 넣으면 단어가 쪼개진다. 그래서
+> 블록 태그 경계에만 공백을 넣는다.
+>
+> HTMLParser는 **깨진 HTML에도 예외를 내지 않는다.** 피드의 HTML은 자주
+> 깨져 있고 한 항목 때문에 수집이 멈추면 안 되므로 이 성질이 필요하다.
+
+- [x] **Step 4: 수집 — 실패하는 테스트 작성**
 
 `tests/test_collect.py`:
 
@@ -3442,6 +3654,8 @@ FIXTURES = Path(__file__).parent / "fixtures"
 # fixture의 첫 항목은 2026-11-10T05:30:00Z, 두 번째는 2025-11-10T00:00:00Z
 WINDOW_START = datetime(2026, 11, 9, 22, 20, tzinfo=timezone.utc)
 WINDOW_END = datetime(2026, 11, 10, 22, 20, tzinfo=timezone.utc)
+
+BROKEN_URL = "https://broken.com/r"
 
 
 def _source(name: str = "토스_기술블로그", url: str = "https://toss.tech/rss.xml") -> Source:
@@ -3471,6 +3685,32 @@ def _collect(**overrides):
     return collect(**kwargs)
 
 
+def _one_broken(fail):
+    """깨진 소스 하나 + 정상 소스 하나로 수집한다.
+
+    collect는 **전부** 실패할 때만 중단한다(spec 8.2). 그래서 실패의 분류를
+    보려면 살아 있는 소스가 하나 있어야 한다. 소스가 하나뿐인 채로 그 하나를
+    깨뜨리면 번들이 아니라 RuntimeError가 나온다 —
+    test_소스가_하나일_때_그_하나가_실패하면_중단한다가 그쪽을 맡는다.
+
+    fail(url)은 깨진 소스에서 부를 함수다. 예외를 던지거나 FetchResult를 돌려준다.
+    """
+    data = (FIXTURES / "feed_two_items.xml").read_bytes()
+    calls: list[str] = []
+
+    def fetch(url: str) -> FetchResult:
+        calls.append(url)
+        if url == BROKEN_URL:
+            return fail(url)
+        return FetchResult(content=data, final_url=url, moved_from=None)
+
+    bundle = _collect(
+        sources=[_source("깨진소스", BROKEN_URL), _source("정상소스", "https://ok.com/r")],
+        fetch=fetch,
+    )
+    return bundle, calls
+
+
 # --- 정상 경로 ---
 
 def test_윈도우_안의_항목만_수집한다():
@@ -3493,6 +3733,17 @@ def test_발행_시각을_UTC로_정규화한다():
     assert _collect().items[0].published == "2026-11-10T05:30:00+00:00"
 
 
+def test_published가_없으면_updated를_본다():
+    """Atom(.atom)을 주는 소스는 published 없이 updated만 있는 경우가 많다.
+    네이버 D2가 그렇다. 이걸 놓치면 그 소스 전체가 조용히 0건이 된다.
+    """
+    bundle = _collect(fetch=_ok("feed_atom_updated.xml"))
+
+    assert len(bundle.items) == 1
+    assert bundle.items[0].published == "2026-11-10T05:30:00+00:00"
+    assert bundle.items[0].url == "https://d2.naver.com/helloworld/1234"
+
+
 def test_이미_발행한_URL을_제외한다():
     bundle = _collect(
         known_urls=lambda urls: {"https://toss.tech/article/payment-latency"},
@@ -3505,6 +3756,24 @@ def test_같은_URL이_두_소스에_있으면_한_번만_담는다():
     bundle = _collect(sources=[_source("소스A", "https://a.com/r"),
                                _source("소스B", "https://b.com/r")])
     assert len(bundle.items) == 1
+
+
+def test_중복_제거는_먼저_만난_소스를_남긴다():
+    """sources.yaml의 순서가 우선순위가 된다."""
+    bundle = _collect(sources=[_source("소스A", "https://a.com/r"),
+                               _source("소스B", "https://b.com/r")])
+    assert bundle.items[0].source == "소스A"
+
+
+def test_중복_제거가_소스별_집계를_줄이지_않는다():
+    """집계는 "그 소스가 윈도우 안에서 몇 건을 냈나"다. 중복 제거로 빠진
+    건까지 0으로 세면, 멀쩡한 소스가 침묵한 것처럼 보인다.
+    """
+    bundle = _collect(sources=[_source("소스A", "https://a.com/r"),
+                               _source("소스B", "https://b.com/r")])
+
+    assert len(bundle.items) == 1
+    assert bundle.source_counts == {"소스A": 1, "소스B": 1}
 
 
 def test_소스별_건수를_집계한다():
@@ -3528,10 +3797,26 @@ def test_윈도우_경계를_번들에_기록한다():
 
 def test_발행_시각을_읽을_수_없는_항목은_건너뛴다():
     """한 건의 날짜 오류로 수집이 중단되면 안 된다."""
-    xml = b"""<?xml version="1.0"?><rss version="2.0"><channel>
+    # bytes 리터럴(b"...")에는 ASCII만 들어간다. 한글이 있으면 SyntaxError다.
+    # str로 쓰고 encode한다.
+    xml = """<?xml version="1.0"?><rss version="2.0"><channel>
       <item><title>날짜 깨짐</title><link>https://e.com/a</link>
       <pubDate>언젠가</pubDate><description>d</description></item>
-    </channel></rss>"""
+    </channel></rss>""".encode("utf-8")
+
+    bundle = _collect(
+        fetch=lambda url: FetchResult(content=xml, final_url=url, moved_from=None)
+    )
+    assert bundle.items == []
+    assert bundle.errors == []      # 항목 하나의 문제는 소스 에러가 아니다
+
+
+def test_링크가_없는_항목은_건너뛴다():
+    """URL은 중복 제거 키이자 upsert 키다. 없으면 담을 수 없다."""
+    xml = """<?xml version="1.0"?><rss version="2.0"><channel>
+      <item><title>링크 없음</title>
+      <pubDate>Tue, 10 Nov 2026 14:30:00 +0900</pubDate><description>d</description></item>
+    </channel></rss>""".encode("utf-8")
 
     bundle = _collect(
         fetch=lambda url: FetchResult(content=xml, final_url=url, moved_from=None)
@@ -3539,43 +3824,83 @@ def test_발행_시각을_읽을_수_없는_항목은_건너뛴다():
     assert bundle.items == []
 
 
+def test_발췌의_HTML을_벗긴다():
+    """피드의 summary는 거의 항상 HTML이다(실측: 273건 중 140건).
+    그대로 저장하면 선별 프롬프트와 폴백 본문에 태그가 그대로 번진다.
+    """
+    xml = """<?xml version="1.0"?><rss version="2.0"><channel>
+      <item><title>제목</title><link>https://e.com/a</link>
+      <pubDate>Tue, 10 Nov 2026 14:30:00 +0900</pubDate>
+      <description>&lt;div&gt;&lt;ul&gt;&lt;li&gt;첫째&lt;/li&gt;&lt;li&gt;둘째&lt;/li&gt;&lt;/ul&gt;&lt;/div&gt;</description>
+      </item></channel></rss>""".encode("utf-8")
+
+    bundle = _collect(
+        fetch=lambda url: FetchResult(content=xml, final_url=url, moved_from=None)
+    )
+    assert bundle.items[0].excerpt == "첫째 둘째"
+
+
+def test_제목의_HTML도_벗긴다():
+    xml = """<?xml version="1.0"?><rss version="2.0"><channel>
+      <item><title>a &amp;amp; b</title><link>https://e.com/a</link>
+      <pubDate>Tue, 10 Nov 2026 14:30:00 +0900</pubDate><description>d</description>
+      </item></channel></rss>""".encode("utf-8")
+
+    bundle = _collect(
+        fetch=lambda url: FetchResult(content=xml, final_url=url, moved_from=None)
+    )
+    assert bundle.items[0].title == "a & b"
+
+
+def test_발췌_길이는_자르지_않는다():
+    """선별은 excerpt[:400]만 쓰지만, 본문 확보가 실패하면 발췌 전체가
+    폴백 본문이 된다(spec 8.2). 수집에서 자르면 그 본문이 잘린다.
+    """
+    긴글 = "가" * 5000
+    xml = f"""<?xml version="1.0"?><rss version="2.0"><channel>
+      <item><title>제목</title><link>https://e.com/a</link>
+      <pubDate>Tue, 10 Nov 2026 14:30:00 +0900</pubDate>
+      <description>{긴글}</description>
+      </item></channel></rss>""".encode("utf-8")
+
+    bundle = _collect(
+        fetch=lambda url: FetchResult(content=xml, final_url=url, moved_from=None)
+    )
+    assert len(bundle.items[0].excerpt) == 5000
+
+
 # --- 에러 분류 ---
 
 def test_영구_실패는_config로_기록하고_재시도하지_않는다():
     """404는 sources.yaml을 고쳐야 한다. 재시도는 낭비다."""
-    calls = []
-
-    def fetch(url: str) -> FetchResult:
-        calls.append(url)
+    def fail(url):
         raise Permanent(f"{url} HTTP 404")
 
-    bundle = _collect(fetch=fetch)
+    bundle, calls = _one_broken(fail)
 
-    assert len(calls) == 1              # 재시도하지 않았다
-    assert bundle.items == []
+    assert calls.count(BROKEN_URL) == 1          # 재시도하지 않았다
+    assert bundle.errors[0].source == "깨진소스"
     assert bundle.errors[0].kind == "config"
     assert "404" in bundle.errors[0].message
-    assert bundle.source_counts == {"토스_기술블로그": 0}
+    assert bundle.source_counts["깨진소스"] == 0
 
 
 def test_403도_config로_기록한다():
     """봇 차단. 기다려도 안 풀린다."""
-    def fetch(url: str) -> FetchResult:
+    def fail(url):
         raise Permanent(f"{url} HTTP 403")
 
-    assert _collect(fetch=fetch).errors[0].kind == "config"
+    bundle, _ = _one_broken(fail)
+    assert bundle.errors[0].kind == "config"
 
 
 def test_일시_실패는_재시도하고_transient로_기록한다():
-    calls = []
-
-    def fetch(url: str) -> FetchResult:
-        calls.append(url)
+    def fail(url):
         raise Transient(f"{url} HTTP 503")
 
-    bundle = _collect(fetch=fetch)
+    bundle, calls = _one_broken(fail)
 
-    assert len(calls) == SOURCE_ATTEMPTS   # 재시도했다
+    assert calls.count(BROKEN_URL) == SOURCE_ATTEMPTS   # 재시도했다
     assert bundle.errors[0].kind == "transient"
 
 
@@ -3601,7 +3926,8 @@ def test_재시도할_때_간격을_둔다():
     def fetch(url: str) -> FetchResult:
         raise Transient("장애")
 
-    _collect(fetch=fetch, sleep=delays.append)
+    with pytest.raises(RuntimeError):
+        _collect(fetch=fetch, sleep=delays.append)
 
     assert len(delays) == SOURCE_ATTEMPTS - 1
 
@@ -3618,16 +3944,10 @@ def test_영구_이전은_실패가_아니지만_기록한다():
 
 def test_소스_하나가_죽어도_나머지는_수집한다():
     """핵심 요구사항. 매체 하나의 장애로 그날이 날아가면 안 된다."""
-    data = (FIXTURES / "feed_two_items.xml").read_bytes()
+    def fail(url):
+        raise Permanent("HTTP 404")
 
-    def fetch(url: str) -> FetchResult:
-        if url == "https://broken.com/r":
-            raise Permanent("HTTP 404")
-        return FetchResult(content=data, final_url=url, moved_from=None)
-
-    bundle = _collect(sources=[_source("깨진소스", "https://broken.com/r"),
-                               _source("정상소스", "https://ok.com/r")],
-                      fetch=fetch)
+    bundle, _ = _one_broken(fail)
 
     assert len(bundle.items) == 1
     assert bundle.items[0].source == "정상소스"
@@ -3637,11 +3957,11 @@ def test_소스_하나가_죽어도_나머지는_수집한다():
 
 
 def test_피드_파싱이_깨지면_config로_기록한다():
-    def fetch(url: str) -> FetchResult:
+    def fail(url):
         # feedparser는 웬만한 쓰레기도 파싱하므로 bytes가 아닌 것을 넘겨 예외를 유도한다
         return FetchResult(content=None, final_url=url, moved_from=None)  # type: ignore[arg-type]
 
-    bundle = _collect(fetch=fetch)
+    bundle, _ = _one_broken(fail)
 
     assert bundle.errors[0].kind == "config"
     assert "파싱" in bundle.errors[0].message
@@ -3650,7 +3970,7 @@ def test_피드_파싱이_깨지면_config로_기록한다():
 # --- 전체 실패 ---
 
 def test_전부_영구_실패면_설정_확인을_안내한다():
-    """"네트워크 확인"이라고 하면 엉뚱한 곳을 보게 된다."""
+    """ "네트워크 확인"이라고 하면 엉뚱한 곳을 보게 된다."""
     def fetch(url: str) -> FetchResult:
         raise Permanent("HTTP 404")
 
@@ -3668,13 +3988,34 @@ def test_전부_일시_실패면_네트워크_확인을_안내한다():
                  fetch=fetch)
 
 
+def test_섞여_실패하면_네트워크_확인을_안내한다():
+    """config 하나, transient 하나. 전부 config일 때만 sources.yaml을 가리킨다."""
+    def fetch(url: str) -> FetchResult:
+        if url == "https://a.com/r":
+            raise Permanent("HTTP 404")
+        raise Transient("HTTP 503")
+
+    with pytest.raises(RuntimeError, match="네트워크"):
+        _collect(sources=[_source("A", "https://a.com/r"), _source("B", "https://b.com/r")],
+                 fetch=fetch)
+
+
+def test_소스가_하나일_때_그_하나가_실패하면_중단한다():
+    """소스 1개 = 전부. 조용히 0건 번들을 쓰면 다음 단계가 빈 입력으로 돈다."""
+    def fetch(url: str) -> FetchResult:
+        raise Permanent("HTTP 404")
+
+    with pytest.raises(RuntimeError, match="sources.yaml"):
+        _collect(fetch=fetch)
+
+
 def test_이전_기록만_있으면_전체_실패가_아니다():
     """moved는 실패가 아니다. 이걸 실패로 세면 정상 실행이 중단된다."""
     bundle = _collect(fetch=_ok(moved_from="https://old.com/r"))
     assert len(bundle.items) == 1
 ```
 
-- [ ] **Step 3: 실패를 확인**
+- [x] **Step 5: 실패를 확인**
 
 ```bash
 pytest tests/test_collect.py
@@ -3682,7 +4023,7 @@ pytest tests/test_collect.py
 
 Expected: FAIL — `ModuleNotFoundError: No module named 'pipeline.collect'`
 
-- [ ] **Step 4: 최소 구현 작성**
+- [x] **Step 6: 최소 구현 작성**
 
 `pipeline/collect.py`:
 
@@ -3693,6 +4034,9 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'pipeline.collect'`
 - config    주소를 고쳐야 한다 (404/403/파싱 불가). 재시도하지 않는다.
 - transient 기다리면 된다 (429/5xx/타임아웃). 재시도 후에도 실패한 경우.
 - moved     301/308로 이전됐다. 수집은 성공했지만 설정을 갱신해야 한다.
+
+전부 실패하면 중단한다(spec 8.2). 일부만 실패하면 계속한다 —
+매체 하나의 장애로 그날이 날아가면 안 된다.
 
 실행: python -m pipeline.collect
 """
@@ -3709,11 +4053,13 @@ from pipeline.lib.http import fetch as http_fetch
 from pipeline.lib.retry import Permanent, Transient, with_retry
 from pipeline.lib.secrets import require
 from pipeline.lib.store import LocalStore, SupabaseStore
+from pipeline.lib.text import strip_html
 from pipeline.lib.timeutil import KST, compute_window, to_utc_iso
 from pipeline.lib.urls import normalize_url
 from pipeline.models import RawBundle, RawItem, SourceError
 
-# 소스당 시도 횟수. 소스가 10여 개라 넉넉히 주면 전체 실행이 길어진다.
+# 소스당 시도 횟수. 소스가 48개라 넉넉히 주면 전체 실행이 길어진다.
+# 일시 장애는 다음 실행(하루 뒤)에 대체로 풀려 있다.
 SOURCE_ATTEMPTS = 2
 
 FetchFn = Callable[[str], FetchResult]
@@ -3732,7 +4078,8 @@ def _parse_source(
     items: list[RawItem] = []
 
     for entry in feed.entries:
-        # 매체마다 키가 다르다. published가 없으면 updated를 본다.
+        # 매체마다 키가 다르다. RSS는 pubDate → published로 오고, Atom은
+        # published 없이 updated만 있는 경우가 많다(네이버 D2가 그렇다).
         raw_date = entry.get("published") or entry.get("updated")
         published = to_utc_iso(raw_date)
         if published is None:
@@ -3745,14 +4092,18 @@ def _parse_source(
 
         link = entry.get("link")
         if not link:
+            # URL은 중복 제거 키이자 upsert 키다. 없으면 담을 수 없다.
             continue
 
+        # HTML을 여기서 한 번 벗긴다. 피드의 summary는 거의 항상 HTML이고,
+        # 선별 프롬프트와 폴백 본문이 둘 다 이걸 쓴다. 길이는 자르지 않는다 —
+        # 선별은 excerpt[:400]만 보지만 폴백 본문은 전체를 쓴다.
         items.append(RawItem(
             source=source.name,
-            title=(entry.get("title") or "").strip(),
+            title=strip_html(entry.get("title") or ""),
             url=normalize_url(link),
             published=published,
-            excerpt=(entry.get("summary") or "").strip(),
+            excerpt=strip_html(entry.get("summary") or ""),
         ))
 
     return items
@@ -3837,8 +4188,20 @@ def collect(
         )
 
     # 실행 내 중복 제거 — 같은 글이 여러 소스에 올라오는 경우.
-    # dict는 삽입 순서를 유지하므로 먼저 만난 소스의 항목이 남는다.
-    unique = list({item.url: item for item in collected}.values())
+    #
+    # setdefault로 **먼저 만난 소스**를 남긴다. sources.yaml의 순서가 우선순위가
+    # 되고, 살아남은 항목의 source가 선별 가중치를 정하므로 임의로 정해지면 안 된다.
+    #
+    # `{item.url: item for item in collected}`로 쓰면 안 된다. dict가 삽입
+    # 순서를 유지하는 건 **키**의 순서이고, 같은 키에 다시 대입하면 **값은
+    # 나중 것으로 덮인다.** 즉 마지막 소스가 남는다 — 의도의 정반대다.
+    #
+    # counts는 줄이지 않는다. 집계는 "그 소스가 윈도우 안에서 몇 건을 냈나"이고,
+    # 중복으로 빠진 건까지 0으로 세면 멀쩡한 소스가 침묵한 것처럼 보인다.
+    by_url: dict[str, RawItem] = {}
+    for item in collected:
+        by_url.setdefault(item.url, item)
+    unique = list(by_url.values())
 
     # 이미 발행한 것 제거 (DB 조회 1회)
     already = known_urls([item.url for item in unique])
@@ -3878,39 +4241,92 @@ def main() -> None:
     marks = {"config": "설정", "transient": "일시", "moved": "이전"}
     for error in bundle.errors:
         print(f"  [{marks[error.kind]}] {error.source}: {error.message}")
-```
 
-```python
+
 if __name__ == "__main__":
     main()
 ```
 
-> **설명** — `from pipeline.lib.http import fetch as http_fetch`에서 `as`로 이름을 바꾼 이유는, 이 모듈의 인자 이름이 `fetch`라서 가려지는 것을 막기 위함이다.
+> **설명** — `from pipeline.lib.http import fetch as http_fetch`에서 `as`로 이름을
+> 바꾼 이유는, 이 모듈의 인자 이름이 `fetch`라서 가려지는 것을 막기 위함이다.
 >
-> 그리고 `pipeline/lib/http.py`라는 이름이 표준 라이브러리 `http` 모듈과 겹쳐 보이지만 **문제가 없다.** Python 3는 기본이 절대 임포트라서, 다른 곳에서 `import http.client`라고 쓰면 표준 라이브러리를 가져온다. 우리 모듈은 `pipeline.lib.http`라는 완전한 경로로만 참조된다.
+> 그리고 `pipeline/lib/http.py`라는 이름이 표준 라이브러리 `http` 모듈과 겹쳐
+> 보이지만 **문제가 없다.** Python 3는 기본이 절대 임포트라서, 다른 곳에서
+> `import http.client`라고 쓰면 표준 라이브러리를 가져온다. 우리 모듈은
+> `pipeline.lib.http`라는 완전한 경로로만 참조된다.
 >
-> `lambda url=source.url: fetch(url)`에서 기본 인자를 쓴 것은 **늦은 바인딩(late binding)** 함정 때문이다. `lambda: fetch(source.url)`은 호출 시점에 `source`를 찾으므로, 반복문이 끝난 뒤에 호출하면 마지막 소스를 가리킨다. 기본 인자는 **정의 시점**에 값이 고정된다. Python을 쓰다 보면 반드시 한 번은 물리는 함정이다.
+> `lambda url=source.url: fetch(url)`에서 기본 인자를 쓴 것은 **늦은
+> 바인딩(late binding)** 함정 때문이다. `lambda: fetch(source.url)`은 호출
+> 시점에 `source`를 찾으므로, 반복문이 끝난 뒤에 호출하면 마지막 소스를
+> 가리킨다. 기본 인자는 **정의 시점**에 값이 고정된다.
+>
+> `by_url.setdefault(item.url, item)`은 **이미 있으면 덮지 않는다.** 이게
+> "먼저 만난 소스가 남는다"를 실제로 만드는 부분이다(위 버그 2).
 
-- [ ] **Step 5: 통과를 확인**
+- [x] **Step 7: 통과를 확인**
 
 ```bash
-pytest tests/test_collect.py
+pytest tests/test_collect.py tests/test_text.py
 ```
 
-Expected: `21 passed`
+Expected: `30 passed`, `14 passed`
 
-- [ ] **Step 6: 전체 테스트 확인**
+- [x] **Step 8: 전체 테스트 확인**
 
 ```bash
 pytest
 ```
 
-Expected: 전부 통과, 실패 0.
+실측: `142 passed`.
 
-- [ ] **Step 7: 커밋**
+- [x] **Step 9: 실제 48개 소스로 1회 시험 수집**
 
 ```bash
-git add pipeline/collect.py tests/test_collect.py tests/fixtures/
+python -m pipeline.collect
+```
+
+**실측 (2026-11-11):** 4일 윈도우(마지막 발송이 없어 96시간 상한)에서
+**273건, 33초, 에러 0건.** `[설정]`·`[일시]`·`[이전]`이 하나도 없었다.
+
+| 확인한 것 | 결과 |
+|---|---|
+| 전체 소요 시간 | 48개 소스 순차 수집에 33초. Actions 타임아웃 걱정 없음 |
+| 소스별 집계 합 vs 최종 건수 | 277 → 273. **중복 제거가 4건 실제로 걸렸다** |
+| URL 유일성 | 중복 없음 |
+| 추적 파라미터 | `utm_*`·`fbclid` 남은 것 없음 |
+| HTML 제거 | 벗긴 뒤 `<`·`>`가 남은 6건은 전부 **정상 텍스트** — `<참고>`(네이버 D2의 한국어 표기), 코드 얘기 속 `` `<img>` ``, Kotlin 제네릭 `actions<ListingActions>()`, HTML 요소를 논하는 `<details><summary>` |
+| 발췌 길이 | 중앙값 250자, 최대 19,908자(PostgreSQL Planet은 피드에 본문 전체를 담는다) |
+| raw.json | 468KB |
+
+**0건인 소스 14개**는 정상이다. 기업 기술블로그는 주 1회~월 1회 발행이
+흔하다. 소스 침묵 경고는 "**며칠 연속** 0건"으로 판정하므로(계획 3) 하루
+0건은 신호가 아니다.
+
+> **애그리게이터 세 곳의 `<link>`가 서로 다르다 — 측정 결과**
+>
+> | 소스 | `<link>`가 가리키는 곳 | 발췌 |
+> |---|---|---|
+> | Hacker News (hnrss) | **원문 URL** | `Article URL: ... Comments URL: ...` (쓸모 없음) |
+> | Lobsters | **원문 URL** | `Comments` 한 단어 (쓸모 없음) |
+> | GeekNews | **GeekNews topic 페이지** | **한국어 요약 불릿** (좋음) |
+>
+> GeekNews의 Atom 피드에는 **원문 URL이 아예 없다.** `<link>`, `<id>`, `<links>`
+> 전부 `news.hada.io/topic?id=...`를 가리킨다. 원문 주소는 topic 페이지 HTML에만 있다.
+>
+> **그대로 두기로 했다.** 원문을 쫓으려면 enrich에 "GeekNews면 topic 페이지를
+> 긁어서 원문 링크를 찾고 그걸 다시 받는다"는 소스별 분기가 생긴다. 지금까지
+> 피해 온 종류의 분기다. 그리고 바꿀 이유도 약하다 — GeekNews의 `content`는
+> **이미 한국어 요약 불릿**이어서, 한국어 독자에게는 영문 원문보다 낫고,
+> topic 페이지에는 요약·댓글·원문 링크가 다 있다. 즉 `원문 보기`가 GeekNews를
+> 가리키는 것이 손실이 아니다.
+>
+> HN·Lobsters 발췌가 쓸모없는 건 문제가 아니다. **제목이 신호를 다 담고**,
+> `<link>`가 원문을 가리키므로 enrich가 본문을 제대로 가져온다.
+
+- [x] **Step 10: 커밋**
+
+```bash
+git add pipeline/collect.py pipeline/lib/text.py tests/test_collect.py tests/test_text.py tests/fixtures/
 git commit -m "feat: 수집 단계 — 윈도우 필터, 소스 장애 격리, 실패 성격별 분류"
 ```
 

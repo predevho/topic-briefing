@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Atom 피드</title>
+  <entry>
+    <title>published 없이 updated만 있는 글</title>
+    <link rel="alternate" href="https://d2.naver.com/helloworld/1234"/>
+    <updated>2026-11-10T14:30:00+09:00</updated>
+    <summary>네이버 D2처럼 .atom을 주는 소스가 이 모양이다.</summary>
+  </entry>
+</feed>

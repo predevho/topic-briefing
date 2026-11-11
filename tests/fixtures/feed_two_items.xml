@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>테스트 기술블로그</title>
+    <item>
+      <title>결제 서버 P99 40ms 달성기</title>
+      <link>https://toss.tech/article/payment-latency?utm_source=rss</link>
+      <pubDate>Tue, 10 Nov 2026 14:30:00 +0900</pubDate>
+      <description>지연의 원인을 추적한 과정을 정리했다.</description>
+    </item>
+    <item>
+      <title>작년에 쓴 오래된 글</title>
+      <link>https://toss.tech/article/old-one</link>
+      <pubDate>Mon, 10 Nov 2025 09:00:00 +0900</pubDate>
+      <description>윈도우 밖이라 걸러져야 한다.</description>
+    </item>
+  </channel>
+</rss>
