@@ -2,6 +2,8 @@
 
 - 작성일: 2026-11-10
 - 상태: 승인됨 (Phase 1 구현 대기)
+- 데이터 모델: `2026-11-11-erd.md` (관계도, 공개 범위, Phase 3 임베딩 결정)
+- 페이지 디자인: 캔버스 목업 — A 톤 확정
 
 ## 1. 목적
 
@@ -394,17 +396,31 @@ React 앱은 코드가 바뀔 때만 빌드한다. 파이프라인은 `docs/data
 ### 7.1 Supabase 테이블 (Phase 1)
 
 ```sql
-articles   -- 발행된 모든 글. id, date, url, headline, bullets, why_it_matters,
-           -- topic, score, reason, body, body_source
-reactions  -- 좋아요. article_id, created_at
-clicks     -- 클릭. article_id, created_at
-notes      -- 짧은 메모 + 태그. article_id, text, tags[]
-kakao_auth -- refresh_token, refresh_token_expires_in, updated_at
-runs       -- 실행 이력. id, window_start, window_end, sent_at,
-           -- published_count, source_counts(jsonb), input_tokens, errors(jsonb)
-           -- errors의 각 항목: {source, kind, message}
-           --   kind = config | transient | moved (8.1 참조)
+articles        -- 발행된 글의 요약과 메타 (공개 가능한 것만)
+article_bodies  -- 기사 본문 전문 + body_source + fallback_reason
+                --   별도 테이블로 분리해 anon 권한을 아예 주지 않는다
+reactions       -- 좋아요. article_id, created_at
+clicks          -- 클릭. article_id, created_at
+notes           -- 짧은 메모 + 태그. article_id, text, tags
+kakao_auth      -- refresh_token, refresh_token_expires_at, updated_at
+runs            -- 실행 이력
+                --   window_start, window_end, sent_at(NULL 가능)
+                --   status           sent | failed
+                --   collected_count  중복 제거 후 수집 건수
+                --   considered_count 요약 후보로 올린 건수
+                --   max_score        그 실행의 최고 점수 (0건이면 NULL)
+                --   published_count  임계값 통과 건수
+                --   source_counts    소스별 건수 (jsonb)
+                --   input_tokens, errors(jsonb)
+                --   errors의 각 항목: {source, kind, message}
+                --     kind = config | transient | moved (8.1 참조)
 ```
+
+**`runs.status`가 있는 이유:** 8.2가 "전송 성공 후에만 이력을 남긴다"로 고정돼 있는데, 그러면 전송이 실패한 날의 `source_counts`가 사라진다. 그것은 8.4의 소스 침묵 경고의 **유일한 입력**이므로, 실패한 날이 빠지면 경고가 그만큼 늦어진다. → 실패한 실행도 `status='failed'`로 남기고, 멱등성 판정과 윈도우 계산은 `status='sent'`만 본다.
+
+**`collected_count`·`considered_count`·`max_score`가 있는 이유:** 0건인 날 페이지가 "후보 10건 / 최고 54점 / 기준 60점"을 보여준다. 0건인 날은 `articles`가 비어 있으므로 **다른 어디에서도 알 수 없다.** 이 숫자가 없으면 "기준이 6점 높았나, 소스가 문제인가"를 판단할 수 없다 — 그 화면의 존재 이유가 이 숫자다.
+
+**Phase 3에서 추가될 것:** `article_chunks (article_id, chunk_index, chunk_text, embedding)`. 본문을 청크로 쪼개 임베딩하면 벡터가 여러 개 생기므로 `article_bodies`에 컬럼으로 넣는 방식(1:1)은 불가능하다. 자세한 근거는 ERD 문서 3.4에 있다.
 
 `runs`는 세 곳에서 쓰인다. **4.2의 윈도우 계산**(`last_sent_at` = 마지막 `sent_at`), **8.2의 멱등성 판정**, **8.3의 소스 침묵 감지**(`source_counts`를 최근 3회분 조회). 별도 테이블 없이 이 하나로 처리한다.
 
@@ -503,6 +519,8 @@ runs       -- 실행 이력. id, window_start, window_end, sent_at,
 
 `notify.py`는 저장된 발송 이력을 확인한다. 같은 윈도우에 대해 이미 보냈으면 건너뛰고, `--force` 플래그로만 우회한다. Actions cron 중복 실행이나 수동 재실행 시 카톡이 두 번 가는 것을 막는다.
 
+판정은 **`status='sent'`인 행만** 본다. 실패한 실행도 기록에 남지만(7.1), 그것을 "보냈다"로 세면 원인을 고친 뒤 재실행이 막히고 그날 브리핑이 사라진다. DB 쪽에도 제약을 걸어 `status`와 `sent_at`이 어긋나는 행이 들어오지 못하게 한다 — 둘이 어긋나면 윈도우 계산이 조용히 틀어진다.
+
 명령행 인자는 `argparse`로 처리한다.
 
 **어제 분을 나중에 복구하는 것은 불가능하다.** RSS는 과거 항목을 충분히 제공하지 않으므로, 하루를 놓치면 그 하루는 회복되지 않는다. 이를 받아들인다.
@@ -513,7 +531,7 @@ runs       -- 실행 이력. id, window_start, window_end, sent_at,
 
 | 대상 | 임계값 | 동작 |
 |---|---|---|
-| **소스 침묵** | 3일 연속 0건 | 슬랙 경고. 주말 때문에 하루 0건은 흔하므로 느슨하게 둔다 |
+| **소스 침묵** | 3일 연속 0건 | 슬랙 경고. 주말 때문에 하루 0건은 흔하므로 느슨하게 둔다. `runs.status`가 있어 **전송이 실패한 날의 수집 기록도 포함**되므로 카운트가 정확하다 |
 | **토큰 만료** | 만료 14일 전부터 | 슬랙 경고 + 재인증 방법 안내 |
 | **크레딧 소진** | 월 크레딧의 일정 비율 초과 또는 입력 토큰이 평소의 3배 초과 | 중단하고 경고 |
 

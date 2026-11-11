@@ -1391,6 +1391,16 @@ def test_빈_브리핑도_유효하다():
     assert briefing.summaries == []
 
 
+def test_최고_점수는_없어도_된다():
+    """수집이 0건이면 최고 점수가 존재하지 않는다."""
+    bundle = RankedBundle(
+        window_start="2026-11-09T22:20:00+00:00",
+        window_end="2026-11-10T22:20:00+00:00",
+        selected=[], all_scores=[],
+    )
+    assert bundle.max_score is None
+
+
 def test_RankedBundle과_ArticlesBundle이_왕복한다():
     ranked = RankedBundle(
         window_start="2026-11-09T22:20:00+00:00",
@@ -1508,6 +1518,9 @@ class RankedBundle(Contract):
     window_end: str
     selected: list[RankedItem]      # 상위 N건
     all_scores: list[ScoreItem]     # 전체 — 탈락 이유 조회용
+    # 가중치 적용 후 최고 점수. 0건인 날 화면이 "최고 54점 / 기준 60점"을
+    # 보여주는 데 쓴다 — 0건이면 articles가 비어서 다른 데서 알 수 없다.
+    max_score: int | None = None
 
 
 # --- 03 본문 ---
@@ -1566,7 +1579,7 @@ class Briefing(Contract):
 pytest tests/test_models.py
 ```
 
-Expected: `16 passed`
+Expected: `17 passed`
 
 - [ ] **Step 5: sanity 테스트 삭제 후 전체 실행**
 
@@ -1913,10 +1926,13 @@ create table if not exists public.articles (
 -- 기사 본문. 별도 테이블로 분리해 anon에게 권한을 아예 주지 않는다.
 -- Phase 3의 임베딩 컬럼도 여기에 추가한다.
 create table if not exists public.article_bodies (
-  article_id  bigint primary key references public.articles(id) on delete cascade,
-  body        text not null,
-  body_source text not null,
-  created_at  timestamptz not null default now(),
+  article_id      bigint primary key references public.articles(id) on delete cascade,
+  body            text not null,
+  body_source     text not null,
+  -- 폴백이 일어난 이유. 폴백이 없으면 NULL. 과거 기록에서
+  -- "이 소스는 늘 403이 난다"를 확인할 수 있다.
+  fallback_reason text,
+  created_at      timestamptz not null default now(),
 
   constraint article_bodies_source_enum
     check (body_source in ('trafilatura', 'rss_excerpt'))
@@ -1924,15 +1940,30 @@ create table if not exists public.article_bodies (
 
 -- 실행 이력. 윈도우 계산·멱등성 판정·소스 침묵 감지가 모두 이걸 읽는다.
 create table if not exists public.runs (
-  id              bigint generated always as identity primary key,
-  window_start    timestamptz not null,
-  window_end      timestamptz not null,
-  sent_at         timestamptz not null default now(),
-  published_count int         not null default 0,
+  id               bigint generated always as identity primary key,
+  window_start     timestamptz not null,
+  window_end       timestamptz not null,
+  -- 전송 성공 시각. status='failed'인 행에서는 NULL이다.
+  sent_at          timestamptz,
+  -- 전송이 실패한 실행도 남긴다. source_counts가 소스 침묵 경고의 유일한
+  -- 입력이므로, 실패한 날이 빠지면 경고가 그만큼 늦어진다.
+  status           text        not null,
+  collected_count  int         not null default 0,   -- 중복 제거 후 수집 건수
+  considered_count int         not null default 0,   -- 요약 후보로 올린 건수
+  max_score        int,                              -- 수집 0건이면 NULL
+  published_count  int         not null default 0,
   -- {"토스_기술블로그": 3, "전자신문_오피니언": 0} — 3회 연속 0건이면 경고
-  source_counts   jsonb       not null default '{}'::jsonb,
-  input_tokens    int,
-  errors          jsonb       not null default '[]'::jsonb
+  source_counts    jsonb       not null default '{}'::jsonb,
+  input_tokens     int,
+  errors           jsonb       not null default '[]'::jsonb,
+
+  constraint runs_status_enum check (status in ('sent', 'failed')),
+  -- 'sent'면 sent_at이 있어야 하고 'failed'면 없어야 한다. 애플리케이션
+  -- 버그로 둘이 어긋나면 윈도우 계산이 조용히 틀어지므로 DB가 막는다.
+  constraint runs_sent_at_matches_status check (
+    (status = 'sent' and sent_at is not null)
+    or (status = 'failed' and sent_at is null)
+  )
 );
 
 -- 좋아요 (계획 2)
@@ -1976,9 +2007,11 @@ create table if not exists public.kakao_auth (
 create index if not exists articles_briefing_date_idx
   on public.articles (briefing_date desc);
 
--- 마지막 발송 시각 조회 (윈도우 계산이 매 실행마다 쓴다)
+-- 마지막 발송 시각 조회 (윈도우 계산이 매 실행마다 쓴다).
+-- 부분 인덱스다 — 그 조회가 항상 status='sent'를 거치므로 실패한 행을
+-- 인덱스에서 빼면 더 작고 빠르다.
 create index if not exists runs_sent_at_idx
-  on public.runs (sent_at desc);
+  on public.runs (sent_at desc) where status = 'sent';
 
 -- 외래 키 컬럼에는 인덱스를 만든다. 없으면 부모 행 삭제 시 자식 테이블을
 -- 전체 스캔하고, article_id로 집계할 때도 느리다.
@@ -2154,6 +2187,11 @@ def test_기록한_실행의_시각을_돌려준다():
     fake.record_run(
         window_start=datetime(2026, 11, 9, 22, 20, tzinfo=timezone.utc),
         window_end=sent,
+        status="sent",
+        sent_at=sent,
+        collected_count=42,
+        considered_count=10,
+        max_score=94,
         published_count=3,
         source_counts={"s": 5},
         input_tokens=12000,
@@ -2161,6 +2199,28 @@ def test_기록한_실행의_시각을_돌려준다():
     )
 
     assert fake.last_sent_at() == sent
+
+
+def test_실패한_실행은_마지막_발송으로_세지_않는다():
+    """세면 원인을 고친 뒤 재실행이 "이미 보냄"으로 막힌다."""
+    fake = FakeRemoteStore()
+
+    fake.record_run(
+        window_start=datetime(2026, 11, 9, 22, 20, tzinfo=timezone.utc),
+        window_end=datetime(2026, 11, 10, 22, 20, tzinfo=timezone.utc),
+        status="failed",
+        sent_at=None,
+        collected_count=42,
+        considered_count=10,
+        max_score=94,
+        published_count=0,
+        source_counts={"s": 5},
+        input_tokens=None,
+        errors=[{"source": "sender:kakao", "kind": "config", "message": "HTTP 404"}],
+    )
+
+    assert fake.last_sent_at() is None
+    assert len(fake.runs) == 1          # 기록은 남는다
 
 
 def test_이미_발행한_URL을_알려준다():
@@ -2220,12 +2280,17 @@ class RemoteStore(Protocol):
         *,
         window_start: datetime,
         window_end: datetime,
+        status: str,                 # "sent" | "failed"
+        sent_at: datetime | None,    # failed면 None
+        collected_count: int,
+        considered_count: int,
+        max_score: int | None,
         published_count: int,
         source_counts: dict[str, int],
         input_tokens: int | None,
         errors: list[dict],
     ) -> None:
-        """실행 이력을 남긴다. 0건이어도 반드시 호출한다."""
+        """실행 이력을 남긴다. 0건이어도, 전송에 실패해도 반드시 호출한다."""
         ...
 
     def save_articles(self, *, briefing_date: str, summaries: list) -> None:
@@ -2247,6 +2312,9 @@ class SupabaseStore:
         rows = (
             self._db.table("runs")
             .select("sent_at")
+            # 전송에 성공한 실행만 본다. 실패한 실행까지 세면 원인을 고친 뒤
+            # 재실행이 "이미 보냄"으로 막힌다.
+            .eq("status", "sent")
             .order("sent_at", desc=True)
             .limit(1)
             .execute()
@@ -2288,6 +2356,11 @@ class SupabaseStore:
         *,
         window_start: datetime,
         window_end: datetime,
+        status: str,
+        sent_at: datetime | None,
+        collected_count: int,
+        considered_count: int,
+        max_score: int | None,
         published_count: int,
         source_counts: dict[str, int],
         input_tokens: int | None,
@@ -2296,7 +2369,11 @@ class SupabaseStore:
         self._db.table("runs").insert({
             "window_start": window_start.isoformat(),
             "window_end": window_end.isoformat(),
-            "sent_at": window_end.isoformat(),
+            "status": status,
+            "sent_at": sent_at.isoformat() if sent_at is not None else None,
+            "collected_count": collected_count,
+            "considered_count": considered_count,
+            "max_score": max_score,
             "published_count": published_count,
             "source_counts": source_counts,
             "input_tokens": input_tokens,
@@ -2330,6 +2407,7 @@ class SupabaseStore:
                 "article_id": article_id,
                 "body": summary.article.body,
                 "body_source": summary.article.body_source,
+                "fallback_reason": summary.article.fallback_reason,
             }, on_conflict="article_id").execute()
 ```
 
@@ -2377,15 +2455,27 @@ class FakeRemoteStore:
         *,
         window_start: datetime,
         window_end: datetime,
+        status: str,
+        sent_at: datetime | None,
+        collected_count: int,
+        considered_count: int,
+        max_score: int | None,
         published_count: int,
         source_counts: dict[str, int],
         input_tokens: int | None,
         errors: list[dict],
     ) -> None:
-        self._last_sent = window_end
+        # 실제 저장소처럼, 성공한 실행만 "마지막 발송"으로 센다.
+        if status == "sent":
+            self._last_sent = sent_at
         self.runs.append({
             "window_start": window_start,
             "window_end": window_end,
+            "status": status,
+            "sent_at": sent_at,
+            "collected_count": collected_count,
+            "considered_count": considered_count,
+            "max_score": max_score,
             "published_count": published_count,
             "source_counts": source_counts,
             "input_tokens": input_tokens,
@@ -2402,7 +2492,7 @@ class FakeRemoteStore:
 pytest tests/test_remote_store.py
 ```
 
-Expected: `5 passed`
+Expected: `6 passed`
 
 - [ ] **Step 6: 실제 연결 확인 스크립트 작성**
 
@@ -2431,6 +2521,11 @@ def main() -> None:
     store.record_run(
         window_start=now - timedelta(hours=24),
         window_end=now,
+        status="sent",
+        sent_at=now,
+        collected_count=0,
+        considered_count=0,
+        max_score=None,
         published_count=0,
         source_counts={"smoke_test": 0},
         input_tokens=None,
@@ -4322,6 +4417,35 @@ def test_같은_index를_두_번_주면_한_번만_센다():
     assert len(bundle.selected) == 1
 
 
+def test_최고_점수를_기록한다():
+    """0건인 날 화면이 "최고 54점 / 기준 60점"을 보여주는 데 쓴다."""
+    items = [_item(0), _item(1)]
+    scores = [
+        ScoreItem(index=0, score=50, reason="r", topic="AI"),
+        ScoreItem(index=1, score=90, reason="r", topic="AI"),
+    ]
+    bundle, _ = _rank(items, scores)
+
+    assert bundle.max_score == 90
+
+
+def test_가중치_적용_후의_점수를_최고로_기록한다():
+    items = [_item(0, "토스_기술블로그")]
+    scores = [ScoreItem(index=0, score=60, reason="r", topic="AI")]
+    bundle, _ = _rank(items, scores, weights={"토스_기술블로그": 1.3})
+
+    assert bundle.max_score == 78
+
+
+def test_수집이_0건이면_최고_점수가_없다():
+    llm = FakeLLM(responses=[])
+    bundle = rank(
+        items=[], interests="i", recent_headlines=[], weights={},
+        llm=llm, window_start=WINDOW[0], window_end=WINDOW[1],
+    )
+    assert bundle.max_score is None
+
+
 def test_수집_항목이_없으면_LLM을_호출하지_않는다():
     """토큰을 쓰지 않는다."""
     llm = FakeLLM(responses=[])
@@ -4493,6 +4617,9 @@ def rank(
         window_end=window_end,
         selected=ranked[:TOP_N],
         all_scores=kept_scores,
+        # 정렬했으므로 첫 항목이 최고 점수다. 0건이면 None으로 둔다 —
+        # 0으로 두면 "최고 0점"과 "수집 없음"이 구분되지 않는다.
+        max_score=ranked[0].score if ranked else None,
     )
 
 
@@ -4533,7 +4660,7 @@ if __name__ == "__main__":
 pytest tests/test_rank.py
 ```
 
-Expected: `15 passed`
+Expected: `18 passed`
 
 - [ ] **Step 5: 커밋**
 
@@ -5891,6 +6018,7 @@ from pipeline.lib.retry import Permanent
 from pipeline.models import (
     Article,
     Briefing,
+    RankedBundle,
     RankedItem,
     RawBundle,
     RawItem,
@@ -5932,28 +6060,48 @@ def _briefing(summaries) -> Briefing:
     )
 
 
-def _raw() -> RawBundle:
+SENT_AT = datetime(2026, 11, 10, 22, 22, tzinfo=timezone.utc)
+
+
+def _raw(item_count: int = 42) -> RawBundle:
     return RawBundle(
         window_start=WINDOW_START.isoformat(),
         window_end=WINDOW_END.isoformat(),
-        items=[],
+        items=[
+            RawItem(
+                source="토스_기술블로그", title=f"수집 {i}",
+                url=f"https://toss.tech/raw/{i}",
+                published="2026-11-10T05:30:00+00:00", excerpt="발췌",
+            )
+            for i in range(item_count)
+        ],
         source_counts={"토스_기술블로그": 3, "조용한소스": 0},
         errors=[SourceError(source="깨진소스", kind="config",
                             message="https://broken.com/r HTTP 404")],
     )
 
 
-def _notify(briefing, senders=None, store=None, force=False):
+def _ranked(max_score: int | None = 94) -> RankedBundle:
+    return RankedBundle(
+        window_start=WINDOW_START.isoformat(),
+        window_end=WINDOW_END.isoformat(),
+        selected=[], all_scores=[], max_score=max_score,
+    )
+
+
+def _notify(briefing, senders=None, store=None, force=False, ranked=None, raw=None):
     remote = store or FakeRemoteStore()
     sent = senders if senders is not None else [FakeSender()]
 
     notify(
         briefing=briefing,
-        raw=_raw(),
+        ranked=ranked or _ranked(),
+        raw=raw or _raw(),
         remote=remote,
         briefing_date="2026-11-10",
         senders=sent,
         force=force,
+        now=SENT_AT,
     )
     return remote, sent
 
@@ -5990,6 +6138,24 @@ def test_에러의_성격까지_이력에_남긴다():
     """계획 3의 소스 경고가 "죽은 소스"와 "불안정한 소스"를 구분하는 근거다."""
     remote, _ = _notify(_briefing([_summary()]))
     assert remote.runs[0]["errors"][0]["kind"] == "config"
+
+
+def test_수집_후보_최고점수를_이력에_남긴다():
+    """0건인 날 화면이 "후보 10건 / 최고 54점 / 기준 60점"을 보여주는 데 쓴다.
+    이 셋이 없으면 "기준이 높은가, 소스가 문제인가"를 판단할 수 없다."""
+    remote, _ = _notify(_briefing([_summary()]), ranked=_ranked(max_score=54))
+    run = remote.runs[0]
+
+    assert run["collected_count"] == 42
+    assert run["considered_count"] == 10
+    assert run["max_score"] == 54
+
+
+def test_성공한_실행은_sent_상태와_발송_시각을_남긴다():
+    remote, _ = _notify(_briefing([_summary()]))
+
+    assert remote.runs[0]["status"] == "sent"
+    assert remote.runs[0]["sent_at"] == SENT_AT
 
 
 # --- 0건 ---
@@ -6060,20 +6226,60 @@ def test_하나라도_갔으면_실패한_센더를_이력에_남긴다():
     assert any(error.get("source") == "sender:broken" for error in errors)
 
 
-def test_전부_실패하면_이력을_남기지_않는다():
-    """이력을 남기면 원인을 고친 뒤 재실행이 '이미 보냄'으로 막힌다."""
+def _fail_all():
+    """전부 실패하는 센더 둘로 notify를 돌리고 저장소를 돌려준다."""
     remote = FakeRemoteStore()
     senders = [FakeSender(name="a", error=Permanent("404")),
                FakeSender(name="b", error=Permanent("403"))]
 
     with pytest.raises(AllSendersFailedError):
         notify(
-            briefing=_briefing([_summary()]), raw=_raw(), remote=remote,
-            briefing_date="2026-11-10", senders=senders, force=False,
+            briefing=_briefing([_summary()]), ranked=_ranked(), raw=_raw(),
+            remote=remote, briefing_date="2026-11-10", senders=senders,
+            force=False, now=SENT_AT,
         )
+    return remote
 
-    assert remote.runs == []
-    assert remote.saved == []
+
+def test_전부_실패해도_실패_상태로_기록한다():
+    """source_counts가 소스 침묵 경고의 유일한 입력이다. 실패한 날이
+    기록에서 빠지면 그만큼 경고가 늦어진다."""
+    remote = _fail_all()
+
+    assert len(remote.runs) == 1
+    assert remote.runs[0]["status"] == "failed"
+    assert remote.runs[0]["sent_at"] is None
+    assert remote.runs[0]["source_counts"] == {"토스_기술블로그": 3, "조용한소스": 0}
+
+
+def test_전부_실패하면_글을_저장하지_않는다():
+    assert _fail_all().saved == []
+
+
+def test_실패_기록이_재실행을_막지_않는다():
+    """last_sent_at이 status='sent'만 보므로 막히지 않아야 한다."""
+    remote = _fail_all()
+
+    assert remote.last_sent_at() is None
+
+    # 원인을 고치고 그대로 재실행
+    working = FakeSender(name="working")
+    notify(
+        briefing=_briefing([_summary()]), ranked=_ranked(), raw=_raw(),
+        remote=remote, briefing_date="2026-11-10", senders=[working],
+        force=False, now=SENT_AT,
+    )
+
+    assert working.calls == 1
+    assert remote.last_sent_at() == SENT_AT
+
+
+def test_실패한_센더를_이력의_에러에_남긴다():
+    errors = _fail_all().runs[0]["errors"]
+    names = [error.get("source") for error in errors]
+
+    assert "sender:a" in names
+    assert "sender:b" in names
 
 
 def test_센더가_하나도_없으면_거부한다():
@@ -6135,7 +6341,7 @@ from pipeline.lib.sender import ConsoleSender, Sender
 from pipeline.lib.secrets import require
 from pipeline.lib.store import LocalStore, RemoteStore, SupabaseStore
 from pipeline.lib.timeutil import KST
-from pipeline.models import Briefing, RawBundle
+from pipeline.models import Briefing, RankedBundle, RawBundle
 
 
 class AlreadySentError(RuntimeError):
@@ -6149,13 +6355,15 @@ class AllSendersFailedError(RuntimeError):
 def notify(
     *,
     briefing: Briefing,
+    ranked: RankedBundle,
     raw: RawBundle,
     remote: RemoteStore,
     briefing_date: str,
     senders: list[Sender],
     force: bool = False,
+    now: datetime | None = None,
 ) -> None:
-    """센더로 내보내고 이력을 남긴다. 0건도 내보낸다."""
+    """센더로 내보내고 이력을 남긴다. 0건도 내보내고, 실패해도 기록한다."""
     if not senders:
         raise ValueError(
             "센더가 하나도 없다. 설정 실수로 아무 데도 보내지 않는 것을 막는다."
@@ -6163,6 +6371,23 @@ def notify(
 
     window_start = datetime.fromisoformat(briefing.window_start)
     window_end = datetime.fromisoformat(briefing.window_end)
+    moment = now or datetime.now(timezone.utc)
+
+    def record(status: str, sent_at: datetime | None, extra: list[dict]) -> None:
+        """실행 이력을 남긴다. 성공·실패 양쪽에서 같은 값을 쓴다."""
+        remote.record_run(
+            window_start=window_start,
+            window_end=window_end,
+            status=status,
+            sent_at=sent_at,
+            collected_count=len(raw.items),
+            considered_count=briefing.considered,
+            max_score=ranked.max_score,
+            published_count=len(briefing.summaries),
+            source_counts=raw.source_counts,
+            input_tokens=None,
+            errors=[error.model_dump() for error in raw.errors] + extra,
+        )
 
     if not force:
         last = remote.last_sent_at()
@@ -6189,10 +6414,14 @@ def notify(
             })
 
     if not delivered:
-        # 아무 데도 못 보냈다. 이력을 남기면 재실행이 막힌다.
+        # 아무 데도 못 보냈다. status='failed'로 **기록은 남기고** 예외를 올린다.
+        # 기록을 남기는 이유: source_counts가 소스 침묵 경고의 유일한 입력이고,
+        # 실패한 날이 빠지면 경고가 그만큼 늦어진다.
+        # 재실행이 막히지 않는 이유: last_sent_at이 status='sent'만 보기 때문이다.
+        record("failed", None, failures)
         detail = "; ".join(failure["message"] for failure in failures)
         raise AllSendersFailedError(
-            f"모든 센더가 실패했다 ({len(senders)}개). 이력을 남기지 않았으므로 "
+            f"모든 센더가 실패했다 ({len(senders)}개). 전송 이력은 남지 않았으므로 "
             f"원인을 고친 뒤 그대로 재실행하면 된다. {detail}"
         )
 
@@ -6204,14 +6433,7 @@ def notify(
 
     # 0건이어도 반드시 남긴다. 남기지 않으면 다음 윈도우가 계속 늘어나
     # 같은 항목을 반복 평가하게 된다.
-    remote.record_run(
-        window_start=window_start,
-        window_end=window_end,
-        published_count=len(briefing.summaries),
-        source_counts=raw.source_counts,
-        input_tokens=None,
-        errors=[error.model_dump() for error in raw.errors] + failures,
-    )
+    record("sent", moment, failures)
 
 
 def main() -> None:
@@ -6225,6 +6447,7 @@ def main() -> None:
 
     notify(
         briefing=store.read("briefing", Briefing),
+        ranked=store.read("ranked", RankedBundle),
         raw=store.read("raw", RawBundle),
         remote=SupabaseStore(require("SUPABASE_URL"), require("SUPABASE_SERVICE_KEY")),
         briefing_date=date,
@@ -6250,7 +6473,7 @@ if __name__ == "__main__":
 pytest tests/test_notify.py
 ```
 
-Expected: `15 passed`
+Expected: `21 passed`
 
 - [ ] **Step 10: 커밋**
 
