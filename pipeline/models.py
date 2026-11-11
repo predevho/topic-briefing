@@ -22,6 +22,12 @@ BodySource = Literal["trafilatura", "rss_excerpt"]
 #   moved     — 301/308로 이전됐다. 실패는 아니지만 sources.yaml을 고쳐야 한다
 ErrorKind = Literal["config", "transient", "moved"]
 
+# 선별이 붙이는 분류. 프롬프트에만 적어 두면 LLM 준수에 의존하게 되고,
+# 값이 흔들리면(AI / ai / 인공지능) 집계와 화면 분류가 조용히 깨진다.
+# Literal로 두면 JSON 스키마에 enum이 들어가 API가 생성 단계에서 막는다.
+# 2026-11-12 실측에서는 240건 모두 아래 다섯 값 안이었다.
+Topic = Literal["AI", "backend", "infra", "tooling", "other"]
+
 
 class Contract(BaseModel):
     """모든 계약 모델의 공통 설정."""
@@ -63,7 +69,7 @@ class ScoreItem(Contract):
     index: int = Field(ge=0)
     score: int = Field(ge=0, le=100)
     reason: str             # 탈락 이유를 나중에 조회하기 위해 항상 남긴다
-    topic: str
+    topic: Topic
 
 
 class ScoreSheet(Contract):
@@ -76,7 +82,7 @@ class RankedItem(Contract):
     item: RawItem
     score: int = Field(ge=0, le=100)
     reason: str
-    topic: str
+    topic: Topic
 
 
 class RankedBundle(Contract):

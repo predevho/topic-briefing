@@ -77,9 +77,18 @@ class FakeLLM:
         self._responses = list(responses)
         self._input_tokens = input_tokens
         self.prompts: list[str] = []
+        # 호출할 때 넘긴 인자도 기록한다. effort와 max_tokens는 비용과
+        # 잘림을 좌우하므로 "무엇을 넘겼는가"가 테스트 대상이다.
+        self.calls: list[dict] = []
 
     def parse(self, *, prompt: str, output_format, effort, max_tokens: int = 16000):
         self.prompts.append(prompt)
+        self.calls.append({
+            "prompt": prompt,
+            "output_format": output_format,
+            "effort": effort,
+            "max_tokens": max_tokens,
+        })
         if not self._responses:
             raise AssertionError("FakeLLM에 준비된 응답이 없다. responses를 더 넣는다.")
         return self._responses.pop(0), self._input_tokens

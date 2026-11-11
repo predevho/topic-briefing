@@ -10,14 +10,19 @@ import pytest
 from pydantic import BaseModel
 
 from pipeline.lib.llm import (
+    DEFAULT_MAX_TOKENS,
     FALLBACK_BETA,
     LLM,
     MODEL,
+    NONSTREAMING_MAX_TOKENS,
     SCHEMA_ATTEMPTS,
     Effort,
     RefusedError,
     SchemaError,
+    TruncatedError,
+    classify_response,
     classify_sdk_error,
+    needs_streaming,
     retry_on_schema,
 )
 from pipeline.lib.retry import Permanent, Transient
@@ -301,3 +306,140 @@ def test_가짜_LLM이_응답이_떨어지면_알려준다():
 
     with pytest.raises(AssertionError, match="준비된 응답이 없다"):
         fake.parse(prompt="b", output_format=Answer, effort="low")
+
+
+# --- 응답 자체의 문제 분류 ---
+#
+# 거부·잘림·스키마 실패는 셋 다 HTTP 200으로 온다. SDK 호출과 분리해 뒀으므로
+# 네트워크 없이 테스트할 수 있다.
+
+def _classify(stop_reason=None, parsed=object(), stop_details=None, max_tokens=16000):
+    return classify_response(
+        stop_reason=stop_reason, stop_details=stop_details,
+        parsed=parsed, max_tokens=max_tokens,
+    )
+
+
+def test_정상_응답은_아무것도_던지지_않는다():
+    _classify(stop_reason="end_turn")
+
+
+def test_거부는_RefusedError다():
+    class 상세:
+        category = "cyber"
+
+    with pytest.raises(RefusedError, match="cyber"):
+        _classify(stop_reason="refusal", stop_details=상세())
+
+
+def test_거부가_stop_details_없이_와도_던진다():
+    """stop_details는 거부일 때만 채워진다고 문서에 있지만, None으로
+    와도 죽지 않아야 한다.
+    """
+    with pytest.raises(RefusedError):
+        _classify(stop_reason="refusal", stop_details=None)
+
+
+def test_max_tokens_잘림은_스키마_실패와_구분된다():
+    """구분하지 않으면 증상이 "출력이 비어 있다"로 나와 원인을 못 찾는다.
+    실제로는 max_tokens가 모자란 것이고 재시도해도 똑같이 잘린다.
+    """
+    with pytest.raises(TruncatedError, match="33,000"):
+        _classify(stop_reason="max_tokens", parsed=None, max_tokens=33000)
+
+
+def test_잘림은_재시도하지_않는다():
+    """TruncatedError는 Permanent의 하위다."""
+    assert issubclass(TruncatedError, Permanent)
+
+    calls = []
+
+    def truncated():
+        calls.append(1)
+        raise TruncatedError("잘렸다")
+
+    with pytest.raises(TruncatedError):
+        retry_on_schema(truncated)
+    assert len(calls) == 1
+
+
+def test_잘림_판정이_스키마_판정보다_먼저다():
+    """parsed가 None이면서 stop_reason이 max_tokens일 때 어느 쪽으로
+    가는지가 진단 품질을 바꾼다.
+    """
+    with pytest.raises(TruncatedError):
+        _classify(stop_reason="max_tokens", parsed=None)
+
+
+def test_거부_판정이_잘림_판정보다_먼저다():
+    with pytest.raises(RefusedError):
+        _classify(stop_reason="refusal", parsed=None)
+
+
+def test_출력이_비면_SchemaError다():
+    with pytest.raises(SchemaError, match="end_turn"):
+        _classify(stop_reason="end_turn", parsed=None)
+
+
+# --- 스트리밍 전환 ---
+#
+# 2026-11-12 실측으로 걸렸다. 240건 채점에 max_tokens=34,400을 요청했더니
+# SDK가 1초 만에 거부했다:
+#   ValueError: Streaming is required for operations that may take longer
+#               than 10 minutes
+# 호출하는 단계가 이걸 신경 쓸 일이 아니라, 래퍼가 알아서 고른다.
+
+def test_기본_max_tokens는_비스트리밍이다():
+    assert not needs_streaming(DEFAULT_MAX_TOKENS)
+
+
+def test_한계까지는_비스트리밍이다():
+    assert not needs_streaming(NONSTREAMING_MAX_TOKENS)
+
+
+def test_한계를_한_토큰_넘으면_스트리밍이다():
+    assert needs_streaming(NONSTREAMING_MAX_TOKENS + 1)
+
+
+def test_240건_채점에_필요한_양은_스트리밍이다():
+    """실측: 8,000(사고) + 240*110 = 34,400."""
+    assert needs_streaming(34_400)
+
+
+def test_비스트리밍_한계가_SDK와_일치한다():
+    """SDK의 내부 계산을 직접 두드린다. 비공개 메서드지만 **우리를 막은
+    것이 바로 이것**이므로 여기에 고정해 둔다. SDK가 공식을 바꾸면
+    (3600 * max_tokens / 128_000 > 600) 이 테스트가 알려준다.
+    """
+    client = anthropic.Anthropic(api_key="sk-ant-테스트용-호출하지-않는다")
+
+    # 우리 상수까지는 받아들인다
+    client._calculate_nonstreaming_timeout(NONSTREAMING_MAX_TOKENS, None)
+
+    # 한 토큰 더는 거부한다
+    with pytest.raises(ValueError, match="Streaming is required"):
+        client._calculate_nonstreaming_timeout(NONSTREAMING_MAX_TOKENS + 1, None)
+
+
+def test_스트림의_반환이_parse와_같은_타입이다():
+    """둘이 같은 타입을 돌려주는 덕분에 응답 처리가 한 갈래로 끝난다."""
+    import inspect
+
+    from anthropic.lib.streaming._beta_messages import BetaMessageStream
+
+    client = anthropic.Anthropic(api_key="sk-ant-테스트용-호출하지-않는다")
+    parse_반환 = inspect.signature(client.beta.messages.parse).return_annotation
+    stream_반환 = inspect.signature(BetaMessageStream.get_final_message).return_annotation
+
+    assert str(parse_반환) == str(stream_반환)
+
+
+def test_스트림에도_필요한_인자가_모두_있다():
+    """parse에만 있고 stream에 없으면 큰 요청에서 폴백이 사라진다."""
+    import inspect
+
+    client = anthropic.Anthropic(api_key="sk-ant-테스트용-호출하지-않는다")
+    params = inspect.signature(client.beta.messages.stream).parameters
+
+    for name in ("output_format", "output_config", "betas", "fallbacks"):
+        assert name in params, name

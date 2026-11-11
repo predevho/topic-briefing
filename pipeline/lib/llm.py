@@ -37,9 +37,20 @@ SDK_MAX_RETRIES = 3
 # 스키마 검증 실패에 대한 내 쪽 시도 횟수(최초 1회 + 재시도 1회).
 SCHEMA_ATTEMPTS = 2
 
-# 비스트리밍 요청의 기본 출력 상한. 이보다 크게 잡으려면 스트리밍으로
-# 바꿔야 한다 — SDK HTTP 타임아웃에 걸린다.
+# 비스트리밍 요청의 기본 출력 상한.
 DEFAULT_MAX_TOKENS = 16000
+
+# 비스트리밍으로 보낼 수 있는 max_tokens의 상한.
+#
+# SDK가 스스로 막는다(`_base_client._calculate_nonstreaming_timeout`):
+#   expected_time = 3600 * max_tokens / 128_000
+#   expected_time > 600초 이면 ValueError
+# → max_tokens > 128_000 * 600 / 3600 = 21,333 이면 거부된다.
+#
+# 2026-11-12 실측으로 걸렸다. 240건 채점에 34,400을 요청했더니 SDK가 1초
+# 만에 "Streaming is required for operations that may take longer than
+# 10 minutes"로 거부했다. 넘으면 스트리밍으로 보낸다.
+NONSTREAMING_MAX_TOKENS = 21_333
 
 Effort = Literal["low", "medium", "high", "xhigh", "max"]
 TOut = TypeVar("TOut", bound=BaseModel)
@@ -48,6 +59,14 @@ TResult = TypeVar("TResult")
 
 class RefusedError(Permanent):
     """정책 거부. 같은 입력을 다시 보내도 또 거부되므로 재시도하지 않는다."""
+
+
+class TruncatedError(Permanent):
+    """max_tokens에 걸려 출력이 잘렸다.
+
+    Permanent인 이유: 같은 max_tokens로 다시 보내면 똑같이 잘린다.
+    재시도가 아니라 max_tokens를 올리거나 입력을 줄여야 한다.
+    """
 
 
 class SchemaError(Transient):
@@ -130,6 +149,54 @@ def classify_sdk_error(error: Exception) -> Exception:
     return error
 
 
+def needs_streaming(max_tokens: int) -> bool:
+    """이 max_tokens는 스트리밍으로 보내야 하나.
+
+    호출하는 단계가 신경 쓸 일이 아니다 — 래퍼가 알아서 고른다.
+    """
+    return max_tokens > NONSTREAMING_MAX_TOKENS
+
+
+def classify_response(
+    *,
+    stop_reason: str | None,
+    stop_details: object | None,
+    parsed: object | None,
+    max_tokens: int,
+) -> None:
+    """응답 자체의 문제를 분류해 던진다. 문제가 없으면 아무것도 하지 않는다.
+
+    SDK 호출과 분리해 둔 덕분에 네트워크 없이 테스트할 수 있다
+    (`classify_sdk_error`와 같은 이유).
+
+    **순서가 중요하다.** 거부와 잘림은 둘 다 HTTP 200으로 오고, 그때
+    content를 먼저 읽으면 엉뚱한 것을 보게 된다.
+    """
+    # 거부는 예외가 아니라 200 + stop_reason으로 온다. stop_details는
+    # 거부일 때만 채워지고 그 외에는 None이다.
+    if stop_reason == "refusal":
+        category = getattr(stop_details, "category", None)
+        raise RefusedError(
+            f"정책 거부 (category={category}). 서버 측 폴백도 실패했다. "
+            f"같은 입력은 다시 보내도 거부된다."
+        )
+
+    # 잘림을 스키마 실패와 구분해야 한다. 구분하지 않으면 증상이
+    # "구조화된 출력이 비어 있다"로 나와 원인을 못 찾는다 — 실제로는
+    # max_tokens가 모자란 것이고, 재시도해도 똑같이 잘린다.
+    if stop_reason == "max_tokens":
+        raise TruncatedError(
+            f"출력이 max_tokens({max_tokens:,})에 걸려 잘렸다. 재시도해도 같다. "
+            f"max_tokens를 올리거나(그만큼 크면 스트리밍이 필요하다) "
+            f"입력 항목 수를 줄인다."
+        )
+
+    # parsed_output은 content 블록을 훑는 프로퍼티다. 스키마를 못 맞췄으면
+    # None이 나온다. 위 두 경우를 걸러낸 뒤에야 이 판정이 의미를 갖는다.
+    if parsed is None:
+        raise SchemaError(f"구조화된 출력이 비어 있다 (stop_reason={stop_reason})")
+
+
 def retry_on_schema(
     call: Callable[[], TResult],
     *,
@@ -195,50 +262,53 @@ class AnthropicLLM:
         effort: Effort,
         max_tokens: int,
     ) -> tuple[TOut, int]:
+        # beta.messages.*를 쓴다. 비-beta 쪽에는 betas·fallbacks 인자가
+        # 없어서 거부 폴백을 넘길 수 없다
+        # (test_parse에_필요한_인자가_모두_있다가 고정한다).
+        #
+        # thinking은 **넘기지 않는다.** Opus 5.5는 사고가 항상 켜져 있고
+        # {"type": "disabled"}나 budget_tokens는 어떤 effort에서도 400이다.
+        # 깊이 조절은 output_config의 effort로만 한다.
+        kwargs = dict(
+            model=self._model,
+            max_tokens=max_tokens,
+            # fallbacks: 정책 거부 시 서버가 다른 모델로 같은 요청을
+            # 재실행한다. "default"는 거부 범주에 따라 자동 라우팅하므로
+            # 모델 목록을 직접 관리하지 않아도 된다.
+            betas=[FALLBACK_BETA],
+            fallbacks="default",
+            # effort는 추론 깊이와 토큰 지출을 조절한다. Opus 5.5의
+            # 기본값은 medium이지만 단계마다 명시해 넘긴다 —
+            # 채점에는 low, 요약에는 medium을 쓴다.
+            output_config={"effort": effort},
+            # output_format은 **이 헬퍼들 자신의 인자**다. messages.create의
+            # 폐기된 output_format과 다르다(create에서는 output_config.format을
+            # 쓴다). pydantic 모델 클래스를 넘기면 응답이 그 스키마를 따르고
+            # parsed_output으로 검증된 객체가 나온다.
+            output_format=output_format,
+            messages=[{"role": "user", "content": prompt}],
+        )
+
         try:
-            # beta.messages.parse를 쓴다. 비-beta messages.parse에는
-            # betas·fallbacks 인자가 없어서 거부 폴백을 넘길 수 없다
-            # (test_parse에_필요한_인자가_모두_있다가 고정한다).
-            #
-            # thinking은 **넘기지 않는다.** Opus 5.5는 사고가 항상 켜져 있고
-            # {"type": "disabled"}나 budget_tokens는 어떤 effort에서도 400이다.
-            # 깊이 조절은 output_config의 effort로만 한다.
-            response = self._client.beta.messages.parse(
-                model=self._model,
-                max_tokens=max_tokens,
-                # fallbacks: 정책 거부 시 서버가 다른 모델로 같은 요청을
-                # 재실행한다. "default"는 거부 범주에 따라 자동 라우팅하므로
-                # 모델 목록을 직접 관리하지 않아도 된다.
-                betas=[FALLBACK_BETA],
-                fallbacks="default",
-                # effort는 추론 깊이와 토큰 지출을 조절한다. Opus 5.5의
-                # 기본값은 medium이지만 단계마다 명시해 넘긴다 —
-                # 채점에는 low, 요약에는 medium을 쓴다.
-                output_config={"effort": effort},
-                # output_format은 **parse 헬퍼 자신의 인자**다. messages.create의
-                # 폐기된 output_format과 다르다(create에서는 output_config.format을
-                # 쓴다). parse에 pydantic 모델 클래스를 넘기면 응답이 그 스키마를
-                # 따르고 parsed_output으로 검증된 객체가 나온다.
-                output_format=output_format,
-                messages=[{"role": "user", "content": prompt}],
-            )
+            if needs_streaming(max_tokens):
+                # SDK가 비스트리밍을 거부하는 구간이다. stream의
+                # get_final_message()도 parse와 같은 ParsedBetaMessage를
+                # 돌려주므로 아래 처리는 한 가지로 끝난다.
+                with self._client.beta.messages.stream(**kwargs) as stream:
+                    response = stream.get_final_message()
+            else:
+                response = self._client.beta.messages.parse(**kwargs)
         except Exception as error:  # noqa: BLE001 — classify_sdk_error가 선별한다
             raise classify_sdk_error(error) from error
 
-        # 거부는 예외가 아니라 HTTP 200 + stop_reason으로 온다.
-        # content를 읽기 전에 반드시 확인한다. stop_details는 거부일 때만
-        # 채워지고 그 외에는 None이므로 순서가 중요하다.
-        if response.stop_reason == "refusal":
-            category = getattr(response.stop_details, "category", None)
-            raise RefusedError(
-                f"정책 거부 (category={category}). 서버 측 폴백도 실패했다. "
-                f"같은 입력은 다시 보내도 거부된다."
-            )
-
-        # parsed_output은 content 블록을 훑는 프로퍼티다. 스키마를 못 맞췄으면
-        # None이 나온다.
+        # 거부·잘림·스키마 실패를 순서대로 가려낸다. 셋 다 HTTP 200으로 온다.
         parsed = response.parsed_output
-        if parsed is None:
-            raise SchemaError("구조화된 출력이 비어 있다")
+        classify_response(
+            stop_reason=response.stop_reason,
+            stop_details=response.stop_details,
+            parsed=parsed,
+            max_tokens=max_tokens,
+        )
+        assert parsed is not None     # classify_response가 None이면 던진다
 
         return parsed, response.usage.input_tokens

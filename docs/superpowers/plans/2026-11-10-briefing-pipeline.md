@@ -5588,16 +5588,135 @@ git commit -m "feat: Claude API 래퍼 — SDK에 전송 재시도 위임, 예�
 **Files:**
 - Create: `pipeline/rank.py`
 - Create: `tests/test_rank.py`
+- Modify: `pipeline/lib/llm.py` (스트리밍 전환, 잘림 분류)
+- Modify: `pipeline/models.py` (`Topic` Literal)
 
-- [ ] **Step 1: 실패하는 테스트 작성**
+> **실제 규모로 돌려 보고 세 가지가 드러났다** (테스트 18개 → 43개).
+> 단위 테스트는 항목 2~15건으로 돌아서 전부 통과했는데, **240건을 넣자
+> 셋이 연달아 터졌다.** 규모가 바뀌면 다른 코드가 된다.
+>
+> ### 1. 출력이 `max_tokens`에 걸려 잘린다
+>
+> 실측(2026-11-12): 240건을 한 프롬프트에 넣으면 입력 **42,135토큰**,
+> `ScoreItem` 한 건이 JSON으로 **82토큰**이라 출력에 **18,614토큰**이 필요하다.
+> 래퍼의 기본값 16,000으로는 모자란다.
+>
+> 잘리면 `stop_reason=max_tokens`로 오는데, 계획의 래퍼는 그걸 보지 않고
+> `parsed_output is None`만 봐서 **"구조화된 출력이 비어 있다"**를 던진다.
+> 그건 `SchemaError`(Transient)라서 한 번 더 호출하고, 똑같이 잘리고, 결국
+> 실패한다 — **토큰을 두 배 쓰고 원인은 안 알려주는 실패**다.
+>
+> 고친 것:
+> - `lib/llm.classify_response()`로 거부·잘림·스키마 실패를 **순서대로** 가려낸다
+> - `TruncatedError(Permanent)` 추가 — 재시도해도 같으므로 Permanent다
+> - `rank.rank_max_tokens(항목수)`로 기본값에 맡기지 않고 계산해 넘긴다
+>
+> ### 2. SDK가 비스트리밍을 거부한다
+>
+> 계산한 `max_tokens=34,400`을 보냈더니 **1초 만에** 거부당했다:
+>
+> ```
+> ValueError: Streaming is required for operations that may take longer
+>             than 10 minutes
+> ```
+>
+> SDK 내부(`_base_client._calculate_nonstreaming_timeout`)가 막는다:
+>
+> ```
+> expected_time = 3600 * max_tokens / 128_000
+> expected_time > 600초 이면 ValueError
+> → max_tokens > 128_000 * 600 / 3600 = 21,333 이면 거부
+> ```
+>
+> 항목을 쪼개면 **한 번에 넣어야 가능한 교차 판단(같은 사건 중복)이
+> 깨진다** — 그게 일괄 채점의 이유였다. 그래서 스트리밍을 넣었다.
+> `beta.messages.stream(...).get_final_message()`가 `parse()`와 **같은
+> `ParsedBetaMessage`를 돌려주므로** 응답 처리는 한 갈래로 끝난다.
+> 래퍼가 `needs_streaming(max_tokens)`로 알아서 고르고, 호출하는 단계는
+> 이걸 신경 쓰지 않는다.
+>
+> **결과: 240건 채점이 65초에 끝났다.** 240건 전부 채점됐다(누락 0).
+>
+> ### 3. 가중치 상한이 상위 순서를 납작하게 만든다
+>
+> 첫 성공 실행의 상위 6건이 **전부 100점**이었다. LLM 원점수는 잘 퍼져
+> 있었는데(최고 92, 최저 1, 중앙값 30, 90점 초과가 3건) **100점 쏠림은
+> 우리 상한이 만든 것**이었다:
+>
+> ```
+> 원 90 ×1.3 = 117.0 → 100
+> 원 85 ×1.3 = 110.5 → 100
+> 원 88 ×1.2 = 105.6 → 100
+> 원 85 ×1.2 = 102.0 → 100
+> ```
+>
+> 하필 **상위 10건을 고르는 자리**에서 순서가 사라졌다. 동점이면 입력
+> 순서로 결정되므로, TOP_N 경계에서 누가 잘리는지가 임의로 정해진다.
+>
+> 고친 것: **정렬은 상한 없는 값(`weighted_score`)으로, 표시·저장은 상한
+> 있는 값(`apply_weight`)으로** 한다. `score`의 계약이 0~100이고 DB 제약도
+> 같아서 120점을 보여 줄 수는 없다.
+>
+> 재실행으로 확인:
+>
+> ```
+> 표시 100  원 90 ×1.3 = 117.0  [토스_기술블로그]
+> 표시 100  원 90 ×1.3 = 117.0  [네이버_D2]
+> 표시 100  원 85 ×1.3 = 110.5  [네이버_D2]
+> 표시 100  원 90 ×1.2 = 108.0  [Hacker_News_Best]
+> 표시 100  원 85 ×1.2 = 102.0  [Shopify_Engineering]
+> 표시  98  원 82 ×1.2 =  98.4  [Cloudflare_Blog]
+> ```
+>
+> 전부 100으로 표시되지만 순서는 살아 있다.
+>
+> ### 그 밖에 측정하고 **고치지 않은** 것
+>
+> **`reason`이 짧다 — 중앙값 9자.** 처음엔 결함으로 봤는데, 점수대별로 나눠
+> 보니 길이가 점수에 따라 늘어났다:
+>
+> | 점수대 | 건수 | 이유 길이 중앙값 |
+> |---|---:|---:|
+> | 80+ | 12 | 18자 |
+> | 60~79 | 37 | 16자 |
+> | 40~59 | 45 | 13자 |
+> | 0~39 | 146 | 7자 |
+>
+> 2점짜리 "데브시스터즈, 3분기 매출 껑충"에 `"실적."`이면 **그게 정확히 맞는
+> 길이다.** 모델이 알맞게 아끼고 있다. 증거 없이 `min_length`를 걸지 않았다.
+> Task 17의 `evaluate`가 이유로 부족하다고 판단하면 그때 근거를 들고 고친다.
+>
+> **`topic`은 Literal로 묶었다.** 240건 모두 프롬프트의 다섯 값 안이었지만,
+> DB 컬럼을 **프롬프트 준수에만 의존**하는 것은 약하다. `Topic` Literal로
+> 두면 JSON 스키마에 `enum`이 들어가 API가 생성 단계에서 막는다. 실측
+> 분포는 other 97 / AI 81 / infra 23 / tooling 20 / backend 19였다.
+>
+> **중복 판정은 아직 한 번도 돌지 않았다.** `recent_headlines`가 0건이라
+> (아직 발행한 글이 없다) `build_prompt`가 그 섹션을 생략한다. 첫 발송
+> 이후에 자연히 켜진다. 조립 자체는 단위 테스트가 지킨다.
+
+- [x] **Step 1: 실패하는 테스트 작성**
 
 `tests/test_rank.py`:
 
 ```python
 import pytest
+from pydantic import ValidationError
 
+from pipeline.lib.llm import TruncatedError
 from pipeline.models import RawItem, ScoreItem, ScoreSheet
-from pipeline.rank import TOP_N, apply_weight, build_prompt, rank
+from pipeline.rank import (
+    MAX_OUTPUT_TOKENS,
+    OUTPUT_TOKENS_PER_ITEM,
+    RANK_EFFORT,
+    THINKING_ALLOWANCE,
+    TOP_N,
+    apply_weight,
+    build_prompt,
+    rank,
+    rank_max_tokens,
+    weighted_score,
+)
 from tests.fakes import FakeLLM
 
 WINDOW = ("2026-11-09T22:20:00+00:00", "2026-11-10T22:20:00+00:00")
@@ -5631,6 +5750,76 @@ def test_가중치가_점수를_내릴_수도_있다():
     assert apply_weight(80, 0.9) == 72
 
 
+# --- 출력 토큰 산정 ---
+#
+# 2026-11-12 실측: 227건을 한 프롬프트에 넣으면 입력 42,135토큰이고
+# 출력은 ScoreItem 한 건당 82토큰이라 18,614토큰이 필요하다. 기본값
+# 16,000으로는 잘린다 — 그러면 stop_reason=max_tokens로 와서 재시도해도
+# 똑같이 잘린다. 그래서 항목 수에 맞춰 계산한다.
+
+def test_항목_수에_비례해_늘어난다():
+    적음 = rank_max_tokens(10)
+    많음 = rank_max_tokens(200)
+    assert 많음 > 적음
+
+
+def test_사고_토큰_여유를_더한다():
+    """Opus 5.5는 사고가 항상 켜져 있고 사고 토큰도 max_tokens에 든다."""
+    assert rank_max_tokens(0) >= THINKING_ALLOWANCE
+
+
+def test_실측한_227건을_담을_수_있다():
+    """출력 18,614토큰 + 사고. 이게 96시간 윈도우의 현실적 상한이다."""
+    assert rank_max_tokens(227) >= 18_614 + THINKING_ALLOWANCE
+
+
+def test_실측값보다_넉넉하게_잡는다():
+    """이유 문장이 길어질 수 있다. 실측 82토큰보다 여유를 둔다."""
+    assert OUTPUT_TOKENS_PER_ITEM > 82
+
+
+def test_상한을_넘지_않는다():
+    assert rank_max_tokens(100_000) == MAX_OUTPUT_TOKENS
+
+
+def test_현실적_상한에_여유가_남아_있다():
+    """윈도우가 96시간으로 묶여 있어 227건이 현실적 최대였다.
+    소스를 늘려도 한동안 버티는지 확인한다 — 이 테스트가 깨지면
+    스트리밍을 도입할 때가 된 것이다.
+    """
+    여유 = (MAX_OUTPUT_TOKENS - THINKING_ALLOWANCE) // OUTPUT_TOKENS_PER_ITEM
+    assert 여유 >= 300, f"항목 {여유}건까지만 담긴다. 227건 실측 대비 여유가 부족하다"
+
+
+def test_산정한_max_tokens를_LLM에_넘긴다():
+    """계산만 하고 넘기지 않으면 아무 의미가 없다."""
+    items = [_item(i) for i in range(50)]
+    scores = [ScoreItem(index=i, score=70, reason="r", topic="AI") for i in range(50)]
+    _, llm = _rank(items, scores)
+
+    assert llm.calls[0]["max_tokens"] == rank_max_tokens(50)
+
+
+def test_채점은_낮은_effort로_한다():
+    """깊은 추론이 필요 없다. 토큰을 아낀다."""
+    _, llm = _rank([_item(0)], [ScoreItem(index=0, score=70, reason="r", topic="AI")])
+    assert llm.calls[0]["effort"] == RANK_EFFORT == "low"
+
+
+def test_항목이_너무_많으면_잘리기_전에_거부한다():
+    """조용히 잘리는 것보다 이유를 아는 실패가 낫다."""
+    한계 = (MAX_OUTPUT_TOKENS - THINKING_ALLOWANCE) // OUTPUT_TOKENS_PER_ITEM
+    items = [_item(i) for i in range(한계 + 1)]
+    llm = FakeLLM(responses=[])
+
+    with pytest.raises(TruncatedError, match="항목"):
+        rank(
+            items=items, interests="i", recent_headlines=[], weights={},
+            llm=llm, window_start=WINDOW[0], window_end=WINDOW[1],
+        )
+    assert llm.prompts == []      # 토큰을 쓰지 않고 거부했다
+
+
 # --- 프롬프트 조립 ---
 
 def test_프롬프트에_관심사_프로필이_들어간다():
@@ -5659,6 +5848,24 @@ def test_프롬프트에_항목이_번호와_함께_들어간다():
 def test_최근_헤드라인이_없으면_중복_섹션을_생략한다():
     prompt = build_prompt(interests="i", recent_headlines=[], items=[_item(0)])
     assert "최근 발행" not in prompt
+
+
+def test_프롬프트가_모든_항목에_점수를_요구한다():
+    """빠진 항목은 조용히 버려진다. 프롬프트가 전부 채점하라고 말해야 한다."""
+    prompt = build_prompt(
+        interests="i", recent_headlines=[], items=[_item(i) for i in range(3)]
+    )
+    assert "3" in prompt and "빠뜨리지" in prompt
+
+
+def test_발췌를_잘라_토큰을_아낀다():
+    긴발췌 = "가" * 2000
+    item = RawItem(source="s", title="t", url="https://e.com/1",
+                   published="2026-11-10T05:30:00+00:00", excerpt=긴발췌)
+
+    prompt = build_prompt(interests="i", recent_headlines=[], items=[item])
+    assert 긴발췌 not in prompt
+    assert "가" * 400 in prompt
 
 
 # --- 선별 ---
@@ -5724,6 +5931,14 @@ def test_소스_가중치를_반영한다():
     assert bundle.selected[0].score == 78
 
 
+def test_가중치_표에_없는_소스는_1로_본다():
+    """설정이 빠져도 죽지 않아야 한다."""
+    bundle, _ = _rank([_item(0, "모르는소스")],
+                      [ScoreItem(index=0, score=70, reason="r", topic="AI")],
+                      weights={})
+    assert bundle.selected[0].score == 70
+
+
 def test_범위를_벗어난_index는_무시한다():
     """LLM이 없는 번호를 돌려줘도 IndexError로 죽지 않아야 한다."""
     items = [_item(0)]
@@ -5736,6 +5951,25 @@ def test_범위를_벗어난_index는_무시한다():
     assert len(bundle.selected) == 1
 
 
+def test_음수_index는_계약_경계에서_막힌다():
+    """`rank`의 `0 <= index` 검사보다 먼저, pydantic이 거부한다.
+
+    `ScoreItem.index`에 `ge=0`이 있어 **스키마에도 minimum 0이 들어간다** —
+    LLM이 음수를 돌려줄 길이 없고, 돌려줘도 파싱에서 걸린다. 검사가
+    없으면 `index=-1`이 `items[-1]`(마지막 항목)을 가리킬 뻔했다.
+    """
+    with pytest.raises(ValidationError):
+        ScoreItem(index=-1, score=90, reason="r", topic="AI")
+
+
+def test_점수_범위도_계약_경계에서_막힌다():
+    """0~100을 벗어난 점수는 가중치 계산과 임계값 판정을 무의미하게 만든다."""
+    with pytest.raises(ValidationError):
+        ScoreItem(index=0, score=101, reason="r", topic="AI")
+    with pytest.raises(ValidationError):
+        ScoreItem(index=0, score=-1, reason="r", topic="AI")
+
+
 def test_같은_index를_두_번_주면_한_번만_센다():
     items = [_item(0), _item(1)]
     scores = [
@@ -5744,6 +5978,31 @@ def test_같은_index를_두_번_주면_한_번만_센다():
     ]
     bundle, _ = _rank(items, scores)
 
+    assert len(bundle.selected) == 1
+
+
+def test_먼저_나온_점수를_쓴다():
+    """중복 index에서 어느 쪽을 쓰는지가 정해져 있어야 한다."""
+    items = [_item(0), _item(1)]
+    scores = [
+        ScoreItem(index=0, score=80, reason="먼저", topic="AI"),
+        ScoreItem(index=0, score=90, reason="나중", topic="AI"),
+    ]
+    bundle, _ = _rank(items, scores)
+
+    assert bundle.selected[0].reason == "먼저"
+
+
+def test_채점되지_않은_항목은_빠진다():
+    """LLM이 일부를 빼먹으면 그 항목은 순위에 들어올 수 없다.
+    all_scores와 수집 건수를 비교하면 누락이 드러난다 —
+    main()이 양쪽을 함께 출력한다.
+    """
+    items = [_item(0), _item(1), _item(2)]
+    scores = [ScoreItem(index=0, score=80, reason="r", topic="AI")]
+    bundle, _ = _rank(items, scores)
+
+    assert len(bundle.all_scores) == 1
     assert len(bundle.selected) == 1
 
 
@@ -5776,6 +6035,14 @@ def test_수집이_0건이면_최고_점수가_없다():
     assert bundle.max_score is None
 
 
+def test_채점_결과가_모두_버려져도_최고_점수가_없다():
+    """"최고 0점"과 "점수 없음"은 다르다. 0으로 두면 0건인 날 화면이
+    "최고 0점"이라고 거짓말한다.
+    """
+    bundle, _ = _rank([_item(0)], [ScoreItem(index=99, score=90, reason="r", topic="AI")])
+    assert bundle.max_score is None
+
+
 def test_수집_항목이_없으면_LLM을_호출하지_않는다():
     """토큰을 쓰지 않는다."""
     llm = FakeLLM(responses=[])
@@ -5786,9 +6053,86 @@ def test_수집_항목이_없으면_LLM을_호출하지_않는다():
 
     assert bundle.selected == []
     assert llm.prompts == []
+
+
+def test_윈도우를_그대로_넘긴다():
+    bundle, _ = _rank([_item(0)], [ScoreItem(index=0, score=70, reason="r", topic="AI")])
+    assert bundle.window_start == WINDOW[0]
+    assert bundle.window_end == WINDOW[1]
+
+
+# --- 상한이 상위 순서를 망치지 않는다 ---
+#
+# 2026-11-12 실측에서 상위 6건이 전부 100점으로 묶였다. LLM 원점수는 잘
+# 퍼져 있었는데(최고 92, 중앙값 30) 우리 가중치 상한이 납작하게 만들었고,
+# 하필 상위 10건을 고르는 자리였다.
+
+def test_상한_없는_가중_점수는_100을_넘는다():
+    assert weighted_score(90, 1.3) == pytest.approx(117.0)
+
+
+def test_표시_점수는_여전히_100에서_멈춘다():
+    assert apply_weight(90, 1.3) == 100
+
+
+def test_상한에_묶여도_순서가_유지된다():
+    """실측 그대로: 원 90×1.3=117 과 원 85×1.2=102. 둘 다 100으로 표시되지만
+    117이 먼저 와야 한다.
+    """
+    items = [_item(0, "낮은가중"), _item(1, "높은가중")]
+    scores = [
+        ScoreItem(index=0, score=85, reason="r", topic="AI"),   # ×1.2 = 102.0
+        ScoreItem(index=1, score=90, reason="r", topic="AI"),   # ×1.3 = 117.0
+    ]
+    bundle, _ = _rank(items, scores, weights={"낮은가중": 1.2, "높은가중": 1.3})
+
+    assert [r.score for r in bundle.selected] == [100, 100]     # 둘 다 상한
+    assert bundle.selected[0].item.source == "높은가중"           # 순서는 살아 있다
+
+
+def test_상한_넘는_항목이_TOP_N_경계에서_밀리지_않는다():
+    """상한으로 정렬하면 100점 동점자 중 누가 잘리는지가 입력 순서로
+    결정된다. 상한 없는 값으로 정렬해야 실제 우열이 반영된다.
+    """
+    # 11건 모두 가중 후 100을 넘긴다. 진짜 1등은 마지막에 넣는다.
+    items = [_item(i, "높은가중") for i in range(TOP_N + 1)]
+    scores = [ScoreItem(index=i, score=80, reason="보통", topic="AI")
+              for i in range(TOP_N)]
+    scores.append(ScoreItem(index=TOP_N, score=95, reason="최고", topic="AI"))
+
+    bundle, _ = _rank(items, scores, weights={"높은가중": 1.3})
+
+    assert len(bundle.selected) == TOP_N
+    assert bundle.selected[0].reason == "최고"
+
+
+def test_최고_점수는_상한_있는_값으로_기록한다():
+    """0건인 날 화면이 "최고 117점 / 기준 60점"이면 안 된다."""
+    bundle, _ = _rank([_item(0, "높은가중")],
+                      [ScoreItem(index=0, score=90, reason="r", topic="AI")],
+                      weights={"높은가중": 1.3})
+    assert bundle.max_score == 100
+
+
+# --- topic 계약 ---
+
+def test_topic은_정해진_다섯_값만_받는다():
+    """프롬프트에만 적어 두면 LLM 준수에 의존한다. 값이 흔들리면
+    (AI / ai / 인공지능) 집계와 화면 분류가 조용히 깨진다.
+    """
+    with pytest.raises(ValidationError):
+        ScoreItem(index=0, score=50, reason="r", topic="인공지능")
+
+
+def test_topic이_스키마의_enum으로_나간다():
+    """API가 생성 단계에서 막아 주려면 스키마에 enum이 있어야 한다."""
+    schema = ScoreSheet.model_json_schema()
+    topic = schema["$defs"]["ScoreItem"]["properties"]["topic"]
+
+    assert set(topic["enum"]) == {"AI", "backend", "infra", "tooling", "other"}
 ```
 
-- [ ] **Step 2: 실패를 확인**
+- [x] **Step 2: 실패를 확인**
 
 ```bash
 pytest tests/test_rank.py
@@ -5796,7 +6140,7 @@ pytest tests/test_rank.py
 
 Expected: FAIL — `ModuleNotFoundError: No module named 'pipeline.rank'`
 
-- [ ] **Step 3: 최소 구현 작성**
+- [x] **Step 3: 최소 구현 작성**
 
 `pipeline/rank.py`:
 
@@ -5812,7 +6156,7 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'pipeline.rank'`
 from datetime import datetime, timezone
 
 from pipeline.lib.config import load_interests, load_sources
-from pipeline.lib.llm import LLM, AnthropicLLM, Effort
+from pipeline.lib.llm import LLM, AnthropicLLM, Effort, TruncatedError
 from pipeline.lib.secrets import require
 from pipeline.lib.store import LocalStore, SupabaseStore
 from pipeline.lib.timeutil import KST
@@ -5834,10 +6178,69 @@ DEDUP_LOOKBACK_DAYS = 14
 # 채점은 깊은 추론이 필요 없다. 토큰을 아낀다.
 RANK_EFFORT: Effort = "low"
 
+# 발췌를 자르는 길이. 그 이상은 채점 정확도에 기여하지 않으면서 토큰만
+# 늘린다(항목 수가 많으므로 누적이 크다).
+EXCERPT_CHARS = 400
+
+# --- 출력 토큰 산정 ---
+#
+# 2026-11-12 실측: 227건(96시간 윈도우의 현실적 상한)을 한 프롬프트에 넣으면
+# 입력 42,135토큰이고, ScoreItem 한 건이 JSON으로 82토큰이라 출력은
+# 18,614토큰이 필요하다. **래퍼의 기본값 16,000으로는 잘린다.**
+#
+# 잘리면 stop_reason=max_tokens로 오고, 재시도해도 똑같이 잘린다. 그래서
+# 기본값에 맡기지 않고 항목 수에서 계산해 넘긴다.
+
+# 실측 82토큰에 여유를 둔다. 이유 문장이 길어질 수 있다.
+OUTPUT_TOKENS_PER_ITEM = 110
+
+# Opus 5.5는 사고가 항상 켜져 있고(끌 수 없다), 사고 토큰도 max_tokens에
+# 포함된다. effort=low라 많지는 않지만 0은 아니다.
+THINKING_ALLOWANCE = 8_000
+
+# 비스트리밍으로 안전하게 받을 수 있는 상한. 이보다 크게 받으려면 스트리밍이
+# 필요하다. 지금 여유는 약 363건이고 실측 상한이 227건이라 한동안 버틴다
+# (test_현실적_상한에_여유가_남아_있다가 지킨다).
+MAX_OUTPUT_TOKENS = 48_000
+
+
+def weighted_score(score: int, weight: float) -> float:
+    """상한 없는 가중 점수. **정렬에만** 쓴다.
+
+    왜 상한 없는 값이 따로 필요한가 — 2026-11-12 실측:
+    상위권이 전부 100점으로 묶여 순서가 사라졌다.
+
+        원 90 ×1.3 = 117.0 → 100
+        원 85 ×1.3 = 110.5 → 100
+        원 88 ×1.2 = 105.6 → 100
+        원 85 ×1.2 = 102.0 → 100
+
+    LLM 원점수는 잘 퍼져 있었다(최고 92, 중앙값 30). **100점 쏠림은
+    우리 상한이 만든 것**이고, 하필 상위 10건을 고르는 자리에서 생겼다.
+    정렬은 상한 없는 값으로, 표시·저장은 상한 있는 값으로 한다.
+    """
+    return score * weight
+
 
 def apply_weight(score: int, weight: float) -> int:
-    """소스 가중치를 점수에 반영한다. 상한 100."""
+    """표시·저장용 가중 점수. 상한 100.
+
+    `score`의 계약이 0~100이고 DB 제약도 같다. 120점을 보여 줄 수는 없다.
+    """
     return min(100, round(score * weight))
+
+
+def rank_max_tokens(item_count: int) -> int:
+    """항목 수에 맞춘 출력 상한."""
+    return min(
+        MAX_OUTPUT_TOKENS,
+        THINKING_ALLOWANCE + item_count * OUTPUT_TOKENS_PER_ITEM,
+    )
+
+
+def max_items_per_call() -> int:
+    """한 번에 채점할 수 있는 항목 수의 상한."""
+    return (MAX_OUTPUT_TOKENS - THINKING_ALLOWANCE) // OUTPUT_TOKENS_PER_ITEM
 
 
 def build_prompt(
@@ -5851,6 +6254,11 @@ def build_prompt(
         "당신은 아래 '관심사 프로필'을 가진 사람의 큐레이터다.",
         "각 글을 0~100점으로 채점하고, 점수를 준 이유를 한 문장으로 쓴다.",
         "topic은 AI / backend / infra / tooling / other 중 하나로 분류한다.",
+        "",
+        # 빠뜨린 항목은 순위에 들어올 수 없다 — 조용히 버려진다. 그래서
+        # 건수를 명시해 전부 채점하라고 말한다.
+        f"글이 {len(items)}개 있다. **{len(items)}개 전부에 점수를 매긴다.** "
+        f"낮은 점수를 줄 글도 빠뜨리지 않는다.",
         "",
         "## 관심사 프로필",
         "",
@@ -5876,12 +6284,9 @@ def build_prompt(
         "",
     ]
     for index, item in enumerate(items):
-        # 발췌는 400자로 자른다. 그 이상은 채점 정확도에 기여하지 않으면서
-        # 토큰만 늘린다 (항목 수가 많으므로 누적이 크다).
-        excerpt = item.excerpt[:400]
         lines += [
             f"[{index}] ({item.source}) {item.title}",
-            f"      {excerpt}",
+            f"      {item.excerpt[:EXCERPT_CHARS]}",
             "",
         ]
 
@@ -5908,6 +6313,16 @@ def rank(
             all_scores=[],
         )
 
+    # 호출 전에 막는다. 보내 놓고 잘리면 토큰을 쓰고도 결과가 없다.
+    한계 = max_items_per_call()
+    if len(items) > 한계:
+        raise TruncatedError(
+            f"항목이 {len(items)}건인데 한 번에 채점할 수 있는 상한은 {한계}건이다. "
+            f"보내면 출력이 max_tokens에 걸려 잘리고, 재시도해도 같다. "
+            f"소스를 줄이거나, 여러 번에 나눠 채점하도록 고치거나, "
+            f"스트리밍을 도입해 MAX_OUTPUT_TOKENS를 올린다."
+        )
+
     prompt = build_prompt(
         interests=interests, recent_headlines=recent_headlines, items=items
     )
@@ -5915,32 +6330,43 @@ def rank(
     # 재시도는 llm.parse 안에서 끝난다 — 전송 계층은 SDK가, 스키마 실패는
     # 래퍼가 1회 담당한다. 여기서 또 감싸면 이중 재시도가 된다.
     sheet, _tokens = llm.parse(
-        prompt=prompt, output_format=ScoreSheet, effort=RANK_EFFORT
+        prompt=prompt,
+        output_format=ScoreSheet,
+        effort=RANK_EFFORT,
+        max_tokens=rank_max_tokens(len(items)),
     )
 
-    ranked: list[RankedItem] = []
+    # (정렬 기준, 항목) 쌍으로 모은다. 정렬 기준은 상한 없는 값이고
+    # 항목에 담기는 점수는 상한 있는 값이다 — weighted_score의 설명 참조.
+    scored: list[tuple[float, RankedItem]] = []
     seen_indexes: set[int] = set()
     kept_scores: list[ScoreItem] = []
 
     for score in sheet.scores:
         # LLM이 범위 밖 번호나 중복 번호를 돌려줄 수 있다. 둘 다 무시한다.
+        # (음수는 ScoreItem의 ge=0이 계약 경계에서 막는다.)
         if not (0 <= score.index < len(items)) or score.index in seen_indexes:
             continue
         seen_indexes.add(score.index)
 
         item = items[score.index]
-        weighted = apply_weight(score.score, weights.get(item.source, 1.0))
+        weight = weights.get(item.source, 1.0)
 
         kept_scores.append(score)
-        ranked.append(RankedItem(
-            item=item,
-            score=weighted,
-            reason=score.reason,
-            topic=score.topic,
+        scored.append((
+            weighted_score(score.score, weight),
+            RankedItem(
+                item=item,
+                score=apply_weight(score.score, weight),
+                reason=score.reason,
+                topic=score.topic,
+            ),
         ))
 
-    # 가중치 적용 후 점수로 정렬한다.
-    ranked.sort(key=lambda r: r.score, reverse=True)
+    # 상한 없는 값으로 정렬한다. 상한 있는 값으로 정렬하면 100에 묶인
+    # 항목들의 순서가 입력 순서로 결정돼 버린다.
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    ranked = [item for _, item in scored]
 
     return RankedBundle(
         window_start=window_start,
@@ -5949,6 +6375,7 @@ def rank(
         all_scores=kept_scores,
         # 정렬했으므로 첫 항목이 최고 점수다. 0건이면 None으로 둔다 —
         # 0으로 두면 "최고 0점"과 "수집 없음"이 구분되지 않는다.
+        # 상한 있는 값을 쓴다 — 0건인 날 화면이 "최고 117점"이면 안 된다.
         max_score=ranked[0].score if ranked else None,
     )
 
@@ -5972,7 +6399,17 @@ def main() -> None:
     )
 
     path = store.write("ranked", bundle)
-    print(f"채점 {len(bundle.all_scores)}건 → 선별 {len(bundle.selected)}건 → {path}")
+
+    # 수집과 채점 건수를 함께 낸다. LLM이 일부를 빼먹으면 그 항목은 순위에
+    # 들어올 수 없는데, 한쪽만 보면 누락이 드러나지 않는다.
+    누락 = len(raw.items) - len(bundle.all_scores)
+    print(f"수집 {len(raw.items)}건 → 채점 {len(bundle.all_scores)}건"
+          f"{f' (누락 {누락}건)' if 누락 else ''} → 선별 {len(bundle.selected)}건")
+    print(f"  → {path}")
+    if 누락:
+        print(f"  [주의] {누락}건이 채점되지 않았다. 프롬프트가 전부 채점하라고 "
+              f"말하는데도 빠졌다면 항목 수를 줄이는 것을 검토한다.")
+    print()
     for item in bundle.selected:
         print(f"  {item.score:3d}  [{item.topic}] {item.item.title[:50]}")
         print(f"       {item.reason[:70]}")
@@ -5982,20 +6419,67 @@ if __name__ == "__main__":
     main()
 ```
 
-> **설명** — `enumerate(items)`는 `(0, 첫항목), (1, 둘째항목), ...`을 돌려줘서 번호와 값을 함께 쓸 수 있다. `list.sort(key=..., reverse=True)`는 리스트를 제자리에서 정렬하며, `key`로 비교 기준을 지정한다(`lambda r: r.score`). `weights.get(name, 1.0)`은 소스가 가중치 표에 없으면 1.0을 쓴다 — 설정이 빠져도 죽지 않게 한다. `llm.parse`를 `retrying`으로 감싸지 않는 것이 의도적이다. 전송 계층 재시도는 anthropic SDK가 하고(`max_retries`), 스키마 실패 재시도는 `llm.parse` 안에서 한다. 여기서 한 겹 더 두르면 한 번의 논리적 호출이 여러 배로 늘어난다.
+> **설명** — `enumerate(items)`는 `(0, 첫항목), (1, 둘째항목), ...`을 돌려줘서
+> 번호와 값을 함께 쓸 수 있다. `list.sort(key=..., reverse=True)`는 리스트를
+> 제자리에서 정렬하며 `key`로 비교 기준을 지정한다. 여기서는 `(정렬기준, 항목)`
+> 튜플을 모아 `key=lambda pair: pair[0]`로 정렬하는데, **튜플째로 정렬하면
+> 안 된다** — 첫 값이 같을 때 두 번째 원소(`RankedItem`)를 비교하려 하고
+> pydantic 모델에는 `<` 연산이 없어 `TypeError`가 난다.
+>
+> `weights.get(name, 1.0)`은 소스가 가중치 표에 없으면 1.0을 쓴다 — 설정이
+> 빠져도 죽지 않게 한다.
+>
+> `llm.parse`를 재시도로 감싸지 않는 것이 의도적이다. 전송 계층 재시도는
+> anthropic SDK가 하고(`max_retries`), 스키마 실패 재시도는 `llm.parse`
+> 안에서 한다. 여기서 한 겹 더 두르면 한 번의 논리적 호출이 여러 배로 늘어난다.
 
-- [ ] **Step 4: 통과를 확인**
+- [x] **Step 4: 통과를 확인**
 
 ```bash
 pytest tests/test_rank.py
 ```
 
-Expected: `18 passed`
+Expected: `43 passed`. 전체 `238 passed`.
 
-- [ ] **Step 5: 커밋**
+- [x] **Step 5: 실제 240건으로 채점**
 
 ```bash
-git add pipeline/rank.py tests/test_rank.py
+python -m pipeline.rank
+```
+
+**실측 (2026-11-12): 240건 수집 → 240건 채점 → 10건 선별, 65초, 누락 0.**
+
+선별된 10건:
+
+```
+100  [AI] 실행은 격리하고, 세션은 이어간다: 망분리 환경의 Agent Platform 설계기
+100  [AI] 검수도 답변도 호출도 AI가? 커머스API의 2026
+100  [tooling] AI 스킬 만들기 10계명: Figma→Code 자동화 실전기
+100  [AI] Amazon saves millions by replacing Sonnet 4.6 with ...
+100  [AI] How we rebuilt the Shopify app in 12 weeks
+ 98  [backend] Choosing QuePaxa, an unusual consensus algorithm
+ 98  [AI] Long-horizon agents and durable execution
+ 98  [backend] 비가 오면 사장님이 먼저 압니다: SSE로 만든 실시간 기상악화 알림
+ 98  [AI] 딸깍으로 안되는 Multi-interest 개발기
+ 96  [AI] Fact-Checking at Scale: Building a More Accurate ...
+```
+
+**관심사 프로필이 작동하고 있다.** 같은 윈도우에 들어온 "3분기 매출",
+"ESG 등급", "코스피 마감"은 2~5점으로 깔렸고, 올라온 것은 전부 실전
+기록·원리 분석이다. 점수 분포도 한쪽으로 쏠리지 않았다:
+
+```
+90~99 ███ 3          40~49 ████████████████████████████ 28
+80~89 █████████ 9    30~39 ████████████████████████████ 28
+70~79 █████████████████████ 21   20~29 ███████████████████████████████████ 35
+60~69 ████████████████ 16        10~19 ██████████████████████ 22
+50~59 █████████████████ 17        0~ 9 █████████████████████████████████████████████████████████████ 61
+```
+
+- [x] **Step 6: 커밋**
+
+```bash
+git add pipeline/rank.py tests/test_rank.py pipeline/lib/llm.py pipeline/models.py
 git commit -m "feat: 선별 단계 — 일괄 채점, 소스 가중치, 잘못된 index 방어"
 ```
 
