@@ -676,7 +676,7 @@ def compute_window(
 pytest tests/test_timeutil.py
 ```
 
-Expected: `14 passed`
+Expected: `13 passed`
 
 - [ ] **Step 5: 커밋**
 
