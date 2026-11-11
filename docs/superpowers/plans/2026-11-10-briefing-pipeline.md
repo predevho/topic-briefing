@@ -4793,19 +4793,87 @@ git commit -m "feat: 시드 수집 — 피드 전체 항목 확보 (프롬프트
 > 그래서 역할을 나눈다 — **전송 계층 재시도는 SDK에 맡기고(`max_retries`를 명시),
 > 내 래퍼는 분류와 "스키마 실패 1회 재시도"만 담당한다.**
 
-- [ ] **Step 1: 실패하는 테스트 작성**
+> **계획에서 고친 것** (테스트 18개 → 28개)
+>
+> 이 태스크는 외부 SDK에 직접 붙으므로, 구현 전에 **설치된 SDK로 전부
+> 확인했다**(anthropic 2.8.0). 추측으로 쓸 수 있는 부분이 없었다.
+>
+> **1. `import httpx`가 틀렸다 — SDK는 `httpx2` 위에 올라가 있다.**
+> `anthropic._base_client`에 `httpx` 속성이 아예 없다(`httpx2`만 있다).
+> 테스트가 SDK 예외를 직접 만들려면 SDK가 쓰는 쪽을 써야 한다.
+> 우리 `pipeline/lib/http.py`는 `httpx`(0.28.1)를 쓰므로 **두 라이브러리가 한
+> 프로젝트에 공존한다** — 섞지 않는다. (실측: 지금은 둘 다로 예외를 만들 수
+> 있지만, 그건 덕 타이핑 덕분이고 보장이 아니다.)
+>
+> **2. `output_format`은 `parse()`에서는 맞다 — "폐기됐다"는 `create()` 쪽이다.**
+> 폐기된 것은 `messages.create(output_format=...)`이고, 그쪽은
+> `output_config={"format": ...}`를 쓴다. 반면 `parse()`의 `output_format`은
+> **그 헬퍼 자신의 인자**이고 타입이 `Optional[type[ResponseFormatT]]`다 —
+> pydantic 모델 **클래스**를 받는다. 계획이 맞았고, 나중에 누가 "폐기됐다"는
+> 말만 보고 고치지 않도록 구현에 주석을 달았다.
+>
+> **3. `thinking`을 넘기지 않는 것이 필수다.** Opus 5.5는 사고가 항상 켜져 있고
+> `{"type": "disabled"}`나 `budget_tokens`는 **어떤 effort에서도 400**이다.
+> 계획은 이미 넘기지 않았지만 이유가 적혀 있지 않아, 누가 "비용 절감"으로
+> 끄려 할 수 있었다. 주석으로 못 박았다.
+>
+> **4. SDK 계약 테스트 5개를 더했다.** 아래 문자열·인자가 SDK의 허용 목록에서
+> 빠지면 **07:20에 무인으로 돌 때가 아니라 지금** 알아야 한다:
+>
+> | 테스트 | 지키는 것 |
+> |---|---|
+> | `test_모델_ID에_날짜_접미사가_없다` | `claude-opus-5-5-20260401` 같은 ID는 존재하지 않는다 |
+> | `test_FALLBACK_BETA가_SDK의_허용_목록에_있다` | 오타, 베타 종료 |
+> | `test_fallbacks_default가_SDK의_허용값이다` | `"default"` 스칼라 형태 |
+> | `test_Effort가_SDK의_단계와_같다` | SDK가 단계를 더하거나 뺐는지 |
+> | `test_parse에_필요한_인자가_모두_있다` | `betas`·`fallbacks`는 **beta** parse에만 있다 |
+>
+> **5. `LLM` Protocol을 `runtime_checkable`로 바꿨다.** 계획의
+> `fake: LLM = FakeLLM(...)`은 타입 주석이라 런타임에 아무것도 검사하지
+> 않는다. 이제 `isinstance(fake, LLM)`로 실제 확인한다(`RemoteStore`와 동일).
+>
+> **6. `APITimeoutError`를 확인했다.** `APIConnectionError`의 하위이므로 기존
+> 분기에서 함께 잡힌다. 계획에 테스트가 없어 추가했다.
+
+**실측으로 확인한 SDK 표면 (anthropic 2.8.0):**
+
+| 확인한 것 | 결과 |
+|---|---|
+| 기반 HTTP 라이브러리 | `httpx2` 2.16.0 (`httpx`가 아니다) |
+| `messages.parse` | 있다. `output_format`·`output_config` 있고 **`betas`·`fallbacks` 없다** |
+| `beta.messages.parse` | 있다. `output_format`·`output_config`·`betas`·`fallbacks` 모두 있다 |
+| `output_format` 타입 | `Optional[type[ResponseFormatT]]` — pydantic 클래스를 받는다 |
+| `BetaOutputConfigParam` 키 | `effort`, `format`, `task_budget` |
+| `effort` 단계 | `low`, `medium`, `high`, `xhigh`, `max` |
+| `BetaFallbacksParam` | `Iterable[BetaFallbackParam] | Literal["default"]` |
+| `server-side-fallback-2026-07-01` | 허용 목록에 있다 |
+| 반환 타입 | `ParsedBetaMessage[ResponseFormatT]` |
+| `parsed_output` | **프로퍼티**다. content 블록을 훑어 없으면 `None` |
+| `APIConnectionError`가 `APIStatusError`의 하위? | **아니다**(형제다) |
+| `APITimeoutError`가 `APIConnectionError`의 하위? | 그렇다 |
+
+- [x] **Step 1: 실패하는 테스트 작성**
 
 `tests/test_llm.py`:
 
 ```python
+import typing
+
 import anthropic
-import httpx
+
+# anthropic 2.x는 httpx가 아니라 httpx2 위에 올라가 있다. SDK 예외를 직접
+# 만들려면 SDK가 쓰는 쪽을 써야 한다. (우리 pipeline/lib/http.py는 httpx를
+# 쓰므로 두 라이브러리가 한 프로젝트에 공존한다 — 섞지 않는다.)
+import httpx2
 import pytest
 from pydantic import BaseModel
 
 from pipeline.lib.llm import (
+    FALLBACK_BETA,
     LLM,
+    MODEL,
     SCHEMA_ATTEMPTS,
+    Effort,
     RefusedError,
     SchemaError,
     classify_sdk_error,
@@ -4819,13 +4887,78 @@ class Answer(BaseModel):
     value: int
 
 
-def _request() -> httpx.Request:
-    return httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+def _request() -> httpx2.Request:
+    return httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
 
 
 def _status_error(cls, status: int, message: str = "실패"):
     """SDK 상태 예외를 테스트에서 직접 만든다."""
-    return cls(message, response=httpx.Response(status, request=_request()), body=None)
+    return cls(message, response=httpx2.Response(status, request=_request()), body=None)
+
+
+def _literals(tp) -> set[str]:
+    """Literal 중첩·Optional·Union을 뚫고 문자열 값만 모은다."""
+    found: set[str] = set()
+    stack = [tp]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, str):
+            found.add(current)
+            continue
+        args = typing.get_args(current)
+        if args:
+            stack.extend(args)
+    return found
+
+
+# --- SDK 계약 ---
+#
+# 아래 넷은 SDK가 바뀌면 깨지라고 둔 테스트다. 우리가 넘기는 문자열이
+# SDK의 허용 목록에서 빠지면, 07:20에 무인으로 돌 때가 아니라 지금 알아야 한다.
+
+def test_모델_ID에_날짜_접미사가_없다():
+    """'claude-opus-5-5-20260401' 같은 형태는 존재하지 않는 모델이다.
+    훈련 데이터에서 본 날짜 접미사를 붙이는 실수가 흔하다.
+    """
+    assert MODEL == "claude-opus-5-5"
+
+    last = MODEL.split("-")[-1]
+    assert not (last.isdigit() and len(last) == 8), f"날짜 접미사가 붙었다: {MODEL}"
+
+
+def test_FALLBACK_BETA가_SDK의_허용_목록에_있다():
+    """오타나 SDK의 베타 종료를 테스트에서 잡는다."""
+    from anthropic.types.anthropic_beta_param import AnthropicBetaParam
+
+    assert FALLBACK_BETA in _literals(AnthropicBetaParam)
+
+
+def test_fallbacks_default가_SDK의_허용값이다():
+    """모델 목록을 직접 관리하지 않으려고 "default"를 쓴다."""
+    from anthropic.types.beta.beta_fallbacks_param import BetaFallbacksParam
+
+    assert "default" in _literals(BetaFallbacksParam)
+
+
+def test_Effort가_SDK의_단계와_같다():
+    """SDK가 단계를 더하거나 빼면 알아야 한다."""
+    from anthropic.types.beta.beta_output_config_param import BetaOutputConfigParam
+
+    sdk_levels = _literals(typing.get_type_hints(BetaOutputConfigParam)["effort"])
+    assert _literals(Effort) == sdk_levels
+
+
+def test_parse에_필요한_인자가_모두_있다():
+    """beta.messages.parse에만 betas·fallbacks가 있다. 비-beta parse로
+    바꾸면 폴백을 넘길 수 없다.
+    """
+    import inspect
+
+    client = anthropic.Anthropic(api_key="sk-ant-테스트용-호출하지-않는다")
+    params = inspect.signature(client.beta.messages.parse).parameters
+
+    for name in ("output_format", "output_config", "betas", "fallbacks"):
+        assert name in params, name
 
 
 # --- SDK 예외 분류 ---
@@ -4847,7 +4980,7 @@ def test_404는_모델_ID를_안내한다():
     """가장 흔한 원인이 모델 ID 오타다."""
     mapped = classify_sdk_error(_status_error(anthropic.NotFoundError, 404))
     assert isinstance(mapped, Permanent)
-    assert "claude-opus-5-5" in str(mapped)
+    assert MODEL in str(mapped)
 
 
 def test_400은_영구_실패다():
@@ -4884,10 +5017,24 @@ def test_연결_실패는_일시_실패다():
     assert isinstance(mapped, Transient)
 
 
+def test_타임아웃도_일시_실패다():
+    """APITimeoutError는 APIConnectionError의 하위다. 사슬에서 잡혀야 한다."""
+    assert issubclass(anthropic.APITimeoutError, anthropic.APIConnectionError)
+
+    mapped = classify_sdk_error(anthropic.APITimeoutError(request=_request()))
+    assert isinstance(mapped, Transient)
+
+
 def test_SDK_예외가_아니면_그대로_돌려준다():
     """코드 버그(TypeError 등)를 Transient로 만들면 재시도로 가려진다."""
     original = TypeError("코드 버그")
     assert classify_sdk_error(original) is original
+
+
+def test_분류_결과는_던지지_않고_돌려준다():
+    """호출부가 `raise ... from error`로 원래 예외를 체인에 남길 수 있어야 한다."""
+    result = classify_sdk_error(_status_error(anthropic.AuthenticationError, 401))
+    assert isinstance(result, Exception)      # 반환값이다. 예외가 나지 않았다
 
 
 # --- 스키마 재시도 ---
@@ -4953,6 +5100,19 @@ def test_영구_실패는_재시도하지_않는다():
     assert len(calls) == 1
 
 
+def test_거부는_재시도하지_않는다():
+    """RefusedError는 Permanent의 하위다. 같은 입력은 또 거부된다."""
+    calls = []
+
+    def refused():
+        calls.append(1)
+        raise RefusedError("정책 거부")
+
+    with pytest.raises(RefusedError):
+        retry_on_schema(refused)
+    assert len(calls) == 1
+
+
 def test_거부는_영구_실패로_분류된다():
     """같은 입력을 다시 보내도 또 거부된다."""
     assert issubclass(RefusedError, Permanent)
@@ -4965,9 +5125,13 @@ def test_스키마_실패는_일시_실패로_분류된다():
 # --- 가짜 구현 ---
 
 def test_가짜_LLM이_인터페이스를_만족한다():
-    fake: LLM = FakeLLM(responses=[Answer(value=7)])
-    result, tokens = fake.parse(prompt="아무거나", output_format=Answer, effort="low")
+    fake = FakeLLM(responses=[Answer(value=7)])
 
+    # LLM이 runtime_checkable이라 실제로 확인된다. 타입 주석만 달면
+    # 런타임에는 아무것도 검사되지 않는다.
+    assert isinstance(fake, LLM)
+
+    result, tokens = fake.parse(prompt="아무거나", output_format=Answer, effort="low")
     assert result.value == 7
     assert tokens > 0
 
@@ -4987,9 +5151,18 @@ def test_가짜_LLM이_응답을_순서대로_돌려준다():
     second, _ = fake.parse(prompt="b", output_format=Answer, effort="low")
 
     assert (first.value, second.value) == (1, 2)
+
+
+def test_가짜_LLM이_응답이_떨어지면_알려준다():
+    """조용히 None을 돌려주면 그 다음 단계에서 엉뚱한 에러가 난다."""
+    fake = FakeLLM(responses=[Answer(value=1)])
+    fake.parse(prompt="a", output_format=Answer, effort="low")
+
+    with pytest.raises(AssertionError, match="준비된 응답이 없다"):
+        fake.parse(prompt="b", output_format=Answer, effort="low")
 ```
 
-- [ ] **Step 2: 실패를 확인**
+- [x] **Step 2: 실패를 확인**
 
 ```bash
 pytest tests/test_llm.py
@@ -4997,7 +5170,7 @@ pytest tests/test_llm.py
 
 Expected: FAIL — `ModuleNotFoundError: No module named 'pipeline.lib.llm'`
 
-- [ ] **Step 3: 최소 구현 작성**
+- [x] **Step 3: 최소 구현 작성**
 
 `pipeline/lib/llm.py`:
 
@@ -5013,8 +5186,9 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'pipeline.lib.llm'`
 - 그 외 → 분류만 하고 올린다.
 """
 
-from typing import Callable, Literal, Protocol, TypeVar
+from typing import Callable, Literal, Protocol, TypeVar, runtime_checkable
 
+import anthropic
 from pydantic import BaseModel
 
 from pipeline.lib.http import classify_status
@@ -5022,9 +5196,15 @@ from pipeline.lib.retry import Permanent, Transient
 
 # 스펙 결정: 선별·요약 모두 Opus. Max 플랜 크레딧으로 비용 제약이 없으므로
 # 품질 기준으로만 고른다. 바꾸려면 이 한 줄만 고친다.
+#
+# 날짜 접미사를 붙이지 않는다. 'claude-opus-5-5-20260401' 같은 ID는 존재하지
+# 않는다(test_모델_ID에_날짜_접미사가_없다가 지킨다).
 MODEL = "claude-opus-5-5"
 
 # 거부(refusal)가 났을 때 서버 측에서 다른 모델로 자동 재시도하게 한다.
+# fallbacks="default"는 거부 범주에 따라 서버가 라우팅하므로 모델 목록을
+# 직접 관리하지 않아도 된다. 이 문자열이 SDK의 허용 목록에 있는지는
+# test_FALLBACK_BETA가_SDK의_허용_목록에_있다가 확인한다.
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
 # SDK의 전송 계층 재시도 횟수. 기본값은 2이고, 명시해 두면 "여기가 전송
@@ -5033,6 +5213,10 @@ SDK_MAX_RETRIES = 3
 
 # 스키마 검증 실패에 대한 내 쪽 시도 횟수(최초 1회 + 재시도 1회).
 SCHEMA_ATTEMPTS = 2
+
+# 비스트리밍 요청의 기본 출력 상한. 이보다 크게 잡으려면 스트리밍으로
+# 바꿔야 한다 — SDK HTTP 타임아웃에 걸린다.
+DEFAULT_MAX_TOKENS = 16000
 
 Effort = Literal["low", "medium", "high", "xhigh", "max"]
 TOut = TypeVar("TOut", bound=BaseModel)
@@ -5047,14 +5231,22 @@ class SchemaError(Transient):
     """구조화된 출력이 비었거나 스키마를 못 맞췄다. 한 번 더 시도할 가치가 있다."""
 
 
+@runtime_checkable
 class LLM(Protocol):
+    """파이프라인이 기대하는 LLM의 모양.
+
+    runtime_checkable이라 `isinstance(fake, LLM)`로 실제 확인할 수 있다
+    (메서드 이름만 본다 — 서명은 보지 않는다). 타입 주석만 달면 런타임에는
+    아무것도 검사되지 않는다.
+    """
+
     def parse(
         self,
         *,
         prompt: str,
         output_format: type[TOut],
         effort: Effort,
-        max_tokens: int = 16000,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
     ) -> tuple[TOut, int]:
         """구조화된 출력을 받는다. (파싱된 결과, 입력 토큰 수)를 돌려준다."""
         ...
@@ -5066,8 +5258,6 @@ def classify_sdk_error(error: Exception) -> Exception:
     돌려주는 쪽으로 만든 이유는 호출부에서 `raise ... from error`로 원래
     예외를 체인으로 보존하기 위함이다.
     """
-    import anthropic
-
     # 아래 다섯 클래스는 모두 APIStatusError의 하위다. 구체적인 것부터
     # 검사해야 한다 — 순서를 바꾸면 전부 마지막 분기로 빨려 들어간다.
     if isinstance(error, anthropic.AuthenticationError):
@@ -5107,6 +5297,7 @@ def classify_sdk_error(error: Exception) -> Exception:
         return Transient(f"예상치 못한 응답: {error}")
     if isinstance(error, anthropic.APIConnectionError):
         # APIStatusError의 하위가 아니라 형제다. 위 분기에서 걸리지 않는다.
+        # APITimeoutError가 이쪽의 하위라서 여기서 함께 잡힌다.
         return Transient(
             f"Claude API 연결 실패. SDK 재시도 후에도 실패했다: {error}"
         )
@@ -5140,8 +5331,9 @@ class AnthropicLLM:
     """LLM 프로토콜의 Claude API 구현.
 
     SDK 호출 자체는 단위 테스트하지 않는다 — 모킹하면 '내가 쓴 모킹이 맞는가'만
-    검증하게 된다. 분류와 재시도는 위의 순수 함수로 빼서 테스트했고, 실제
-    동작은 scripts/smoke_llm.py로 1회 확인한다.
+    검증하게 된다. 분류와 재시도는 위의 순수 함수로 빼서 테스트했고, SDK가
+    받아들이는 인자·문자열은 계약 테스트로 고정했고, 실제 동작은
+    scripts/smoke_llm.py로 1회 확인한다.
     """
 
     def __init__(
@@ -5150,8 +5342,6 @@ class AnthropicLLM:
         model: str = MODEL,
         max_retries: int = SDK_MAX_RETRIES,
     ) -> None:
-        import anthropic
-
         # max_retries를 명시한다. SDK가 429/5xx/연결 오류를 이 횟수만큼
         # 지수 백오프로 재시도한다.
         self._client = anthropic.Anthropic(api_key=api_key, max_retries=max_retries)
@@ -5163,7 +5353,7 @@ class AnthropicLLM:
         prompt: str,
         output_format: type[TOut],
         effort: Effort,
-        max_tokens: int = 16000,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
     ) -> tuple[TOut, int]:
         return retry_on_schema(
             lambda: self._parse_once(
@@ -5183,6 +5373,13 @@ class AnthropicLLM:
         max_tokens: int,
     ) -> tuple[TOut, int]:
         try:
+            # beta.messages.parse를 쓴다. 비-beta messages.parse에는
+            # betas·fallbacks 인자가 없어서 거부 폴백을 넘길 수 없다
+            # (test_parse에_필요한_인자가_모두_있다가 고정한다).
+            #
+            # thinking은 **넘기지 않는다.** Opus 5.5는 사고가 항상 켜져 있고
+            # {"type": "disabled"}나 budget_tokens는 어떤 effort에서도 400이다.
+            # 깊이 조절은 output_config의 effort로만 한다.
             response = self._client.beta.messages.parse(
                 model=self._model,
                 max_tokens=max_tokens,
@@ -5191,11 +5388,14 @@ class AnthropicLLM:
                 # 모델 목록을 직접 관리하지 않아도 된다.
                 betas=[FALLBACK_BETA],
                 fallbacks="default",
-                # effort는 추론 깊이와 토큰 지출을 조절한다.
+                # effort는 추론 깊이와 토큰 지출을 조절한다. Opus 5.5의
+                # 기본값은 medium이지만 단계마다 명시해 넘긴다 —
                 # 채점에는 low, 요약에는 medium을 쓴다.
                 output_config={"effort": effort},
-                # output_format에 pydantic 모델을 넘기면 응답이 그 스키마를
-                # 반드시 따르고, parsed_output으로 검증된 객체가 나온다.
+                # output_format은 **parse 헬퍼 자신의 인자**다. messages.create의
+                # 폐기된 output_format과 다르다(create에서는 output_config.format을
+                # 쓴다). parse에 pydantic 모델 클래스를 넘기면 응답이 그 스키마를
+                # 따르고 parsed_output으로 검증된 객체가 나온다.
                 output_format=output_format,
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -5203,7 +5403,8 @@ class AnthropicLLM:
             raise classify_sdk_error(error) from error
 
         # 거부는 예외가 아니라 HTTP 200 + stop_reason으로 온다.
-        # content를 읽기 전에 반드시 확인한다.
+        # content를 읽기 전에 반드시 확인한다. stop_details는 거부일 때만
+        # 채워지고 그 외에는 None이므로 순서가 중요하다.
         if response.stop_reason == "refusal":
             category = getattr(response.stop_details, "category", None)
             raise RefusedError(
@@ -5211,6 +5412,8 @@ class AnthropicLLM:
                 f"같은 입력은 다시 보내도 거부된다."
             )
 
+        # parsed_output은 content 블록을 훑는 프로퍼티다. 스키마를 못 맞췄으면
+        # None이 나온다.
         parsed = response.parsed_output
         if parsed is None:
             raise SchemaError("구조화된 출력이 비어 있다")
@@ -5218,13 +5421,26 @@ class AnthropicLLM:
         return parsed, response.usage.input_tokens
 ```
 
-> **설명** — `classify_sdk_error`가 예외를 **던지지 않고 돌려주는** 설계가 낯설 수 있다. 호출부에서 `raise classify_sdk_error(error) from error`라고 쓰면 원래 SDK 예외가 트레이스백에 함께 남는다. 함수 안에서 던지면 그 체인이 끊긴다.
+> **설명** — `classify_sdk_error`가 예외를 **던지지 않고 돌려주는** 설계가
+> 낯설 수 있다. 호출부에서 `raise classify_sdk_error(error) from error`라고
+> 쓰면 원래 SDK 예외가 트레이스백에 함께 남는다. 함수 안에서 던지면 그
+> 체인이 끊긴다.
 >
-> `isinstance` 사슬의 **순서가 정답을 바꾼다.** `AuthenticationError`·`NotFoundError`·`RateLimitError` 등은 모두 `APIStatusError`의 하위이므로, `APIStatusError` 검사를 위로 올리면 모든 에러가 거기서 잡혀 401과 500이 같은 분류가 된다.
+> `isinstance` 사슬의 **순서가 정답을 바꾼다.**
+> `AuthenticationError`·`NotFoundError`·`RateLimitError` 등은 모두
+> `APIStatusError`의 하위이므로, `APIStatusError` 검사를 위로 올리면 모든
+> 에러가 거기서 잡혀 401과 500이 같은 분류가 된다. **실측으로 확인했다:**
+> `APIConnectionError`만 형제이고 나머지는 전부 하위다.
 >
-> **구문법 대조** — `type[TOut]`은 "클래스 자체"를 받는 타입이다(인스턴스가 아니라 `ScoreSheet`라는 클래스를 넘긴다). 구형 코드에서는 `Type[TOut]`으로 썼다. `tuple[TOut, int]`도 구형에서는 `Tuple[TOut, int]`였다.
+> `@runtime_checkable`을 붙인 Protocol은 `isinstance`로 검사할 수 있다.
+> 단 **메서드 이름만** 본다 — 서명은 보지 않는다. 그래도 타입 주석보다는
+> 낫다(주석은 런타임에 아무것도 하지 않는다).
+>
+> **구문법 대조** — `type[TOut]`은 "클래스 자체"를 받는 타입이다(인스턴스가
+> 아니라 `ScoreSheet`라는 클래스를 넘긴다). 구형 코드에서는 `Type[TOut]`으로
+> 썼다. `tuple[TOut, int]`도 구형에서는 `Tuple[TOut, int]`였다.
 
-- [ ] **Step 4: 가짜 LLM을 `tests/fakes.py`에 추가**
+- [x] **Step 4: 가짜 LLM을 `tests/fakes.py`에 추가**
 
 ```python
 class FakeLLM:
@@ -5246,15 +5462,15 @@ class FakeLLM:
         return self._responses.pop(0), self._input_tokens
 ```
 
-- [ ] **Step 5: 통과를 확인**
+- [x] **Step 5: 통과를 확인**
 
 ```bash
 pytest tests/test_llm.py
 ```
 
-Expected: `18 passed`
+Expected: `28 passed`. 전체 `180 passed`.
 
-- [ ] **Step 6: 실제 API 연결 확인 스크립트 작성**
+- [x] **Step 6: 실제 API 연결 확인 스크립트 작성**
 
 `scripts/smoke_llm.py`:
 
@@ -5263,11 +5479,19 @@ Expected: `18 passed`
 
 실행: python scripts/smoke_llm.py
 크레딧을 아주 조금 쓴다.
+
+단위 테스트는 SDK를 호출하지 않는다(FakeLLM을 쓴다). 그래서 "실제로
+붙는가"는 이 스크립트만 확인할 수 있다.
 """
 
 from pydantic import BaseModel
 
-from pipeline.lib.llm import MODEL, SDK_MAX_RETRIES, AnthropicLLM
+from pipeline.lib.llm import (
+    FALLBACK_BETA,
+    MODEL,
+    SDK_MAX_RETRIES,
+    AnthropicLLM,
+)
 from pipeline.lib.retry import Permanent, Transient
 from pipeline.lib.secrets import require
 
@@ -5286,6 +5510,11 @@ def main() -> None:
         "제목: 결제 서버 P99 지연을 400ms에서 40ms로 줄인 과정"
     )
 
+    print(f"모델: {MODEL}")
+    print(f"SDK 전송 재시도: {SDK_MAX_RETRIES}회")
+    print(f"거부 시 서버 측 폴백: 켜짐 ({FALLBACK_BETA}, fallbacks=\"default\")")
+    print()
+
     try:
         verdict, input_tokens = llm.parse(
             prompt=prompt, output_format=Verdict, effort="low", max_tokens=2000
@@ -5299,11 +5528,18 @@ def main() -> None:
         print(f"[일시 문제] {error}")
         raise SystemExit(1)
 
-    print(f"모델: {MODEL}  (SDK 재시도 {SDK_MAX_RETRIES}회)")
     print(f"입력 토큰: {input_tokens}")
     print(f"점수: {verdict.score}")
     print(f"이유: {verdict.reason}")
     print()
+
+    # 스키마를 실제로 지켰는지 확인한다. parse가 돌려준 객체는 pydantic이
+    # 검증한 것이므로 타입은 보장되지만, 값의 범위는 모델이 지켜야 한다.
+    if not 0 <= verdict.score <= 100:
+        print(f"[경고] 점수가 0~100을 벗어났다: {verdict.score}")
+        print("선별 프롬프트에서 범위를 더 강하게 못 박아야 한다.")
+        raise SystemExit(1)
+
     print("성공. 구조화된 출력이 스키마대로 돌아왔다.")
 
 
@@ -5311,17 +5547,34 @@ if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 7: 실제로 실행해 확인**
+- [x] **Step 7: 실제로 실행해 확인**
 
 ```bash
 python scripts/smoke_llm.py
 ```
 
-Expected: 점수(아마 80 이상)와 이유가 출력되고 "성공".
+**실측 (2026-11-12):**
+
+```
+모델: claude-opus-5-5
+SDK 전송 재시도: 3회
+거부 시 서버 측 폴백: 켜짐 (server-side-fallback-2026-07-01, fallbacks="default")
+
+입력 토큰: 338
+점수: 85
+이유: 결제 서버라는 실무 도메인에서 P99 지연을 10배 줄인 구체적 성능 최적화
+      사례로 보여 백엔드 개발자가 바로 참고할 만한 실전 지식일 가능성이 높지만,
+      제목만으로는 적용 기술이나 범용성을 판단하기 어렵다.
+
+성공. 구조화된 출력이 스키마대로 돌아왔다.
+```
+
+4.4초, 종료 코드 0. **한국어 출력이 프롬프트만으로 자연스럽게 나왔다** —
+요약 단계에서 번역을 위한 추가 장치가 필요하지 않다는 첫 증거다.
 
 `[설정 문제]`가 나오면 메시지가 원인을 알려준다 — 401이면 키, 404면 모델 ID다.
 
-- [ ] **Step 8: 커밋**
+- [x] **Step 8: 커밋**
 
 ```bash
 git add pipeline/lib/llm.py tests/fakes.py tests/test_llm.py scripts/smoke_llm.py

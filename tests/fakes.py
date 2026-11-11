@@ -64,3 +64,22 @@ class FakeRemoteStore:
 
     def save_articles(self, *, briefing_date: str, summaries: list) -> None:
         self.saved.append({"briefing_date": briefing_date, "summaries": summaries})
+
+
+class FakeLLM:
+    """미리 준비한 응답을 순서대로 돌려준다.
+
+    HTTP 모킹이 필요 없고, 받은 프롬프트를 기록하므로 프롬프트 조립을
+    테스트할 수 있다.
+    """
+
+    def __init__(self, responses: list, input_tokens: int = 1000) -> None:
+        self._responses = list(responses)
+        self._input_tokens = input_tokens
+        self.prompts: list[str] = []
+
+    def parse(self, *, prompt: str, output_format, effort, max_tokens: int = 16000):
+        self.prompts.append(prompt)
+        if not self._responses:
+            raise AssertionError("FakeLLM에 준비된 응답이 없다. responses를 더 넣는다.")
+        return self._responses.pop(0), self._input_tokens

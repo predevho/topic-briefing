@@ -51,7 +51,11 @@
 |---|---|---|---|---|---|
 | S1 | 관심사 프로필로 LLM이 채점한다 | 5.2 | `config/interests.md` + `rank.build_prompt` | `test_프롬프트에_관심사_프로필이_들어간다` | ✅ |
 | S2 | 한 번의 호출로 전체를 채점한다 (교차 판단을 위해) | 5.2 | `rank` | `test_수집_항목이_없으면_LLM을_호출하지_않는다` (호출 횟수 추적) | ✅ |
-| S3 | 구조화된 출력으로 스키마를 강제한다 | 5.2 | `lib/llm` `output_format` | Task 15 Step 7 — `smoke_llm.py` 실행 | 🔍 |
+| S3 | 구조화된 출력으로 스키마를 강제한다 | 5.2 | `lib/llm` — `beta.messages.parse(output_format=...)` | **2026-11-12 실측 통과** — `smoke_llm.py`가 `Verdict(score, reason)` 스키마로 받았다(85점, 338토큰, 4.4초) | ✅ |
+| S17 | SDK가 허용하는 문자열·인자만 넘긴다 | 5.1 | `lib/llm` 상수 | `test_FALLBACK_BETA가_SDK의_허용_목록에_있다`, `test_fallbacks_default가_SDK의_허용값이다`, `test_Effort가_SDK의_단계와_같다`, `test_parse에_필요한_인자가_모두_있다`, `test_모델_ID에_날짜_접미사가_없다` — SDK가 바뀌면 07:20이 아니라 테스트에서 안다 | ✅ |
+| S18 | 전송 재시도를 이중으로 걸지 않는다 | 8.2 | SDK `max_retries` + `retry_on_schema` | `test_전송_계층_일시_실패는_재시도하지_않는다` — 이중이면 한 호출이 최악 6번이 된다 | ✅ |
+| S19 | 정책 거부 시 서버 측 폴백을 쓴다 | 8.2 | `lib/llm` `betas=[FALLBACK_BETA]` + `fallbacks="default"` | `test_거부는_재시도하지_않는다`, `test_거부는_영구_실패로_분류된다` — 폴백도 실패하면 같은 입력은 또 거부된다 | ✅ |
+| S20 | Opus 5.5에 `thinking`을 넘기지 않는다 | 5.1 | `lib/llm._parse_once` 주석 | 사고가 항상 켜져 있고 `disabled`·`budget_tokens`는 어떤 effort에서도 400이다. 깊이는 `effort`로만 조절 | ✅ |
 | S4 | 선별·요약 모두 `claude-opus-5-5` | 5.1 | `lib/llm.MODEL` | `test_404는_모델_ID를_안내한다` (상수 참조) | ✅ |
 | S5 | 본문 추출 실패 시 RSS 발췌로 폴백, 중단 없음 | 8.2 | `enrich._fetch_body` | `test_본문_추출_실패시_RSS_발췌로_폴백한다` | ✅ |
 | S6 | 영구 실패는 재시도 없이 즉시 폴백한다 | 8.2 | 같음 | `test_영구_실패는_재시도하지_않고_즉시_폴백한다` | ✅ |
