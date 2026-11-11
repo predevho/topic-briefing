@@ -14,19 +14,34 @@ sources:
   # =========================================================
   # 국내 IT 매체: 컬럼·오피니언
   # =========================================================
-  - name: 전자신문_오피니언
-    url: https://rss.etnews.com/Section902.xml
+  # 전자신문은 오피니언 아래가 칼럼·사설로 또 나뉜다. 둘을 따로 받는다.
+  # 상위 오피니언 피드(11.xml)는 50건 중 14건이 [인사]·[부음]이라 쓰지 않는다.
+  # (처음엔 Section902.xml을 "오피니언"이라 적어 뒀는데 실제로는 "속보"였다.
+  #  30건을 받아 보니 3분기 실적·채용·코스피 마감이었다.)
+  - name: 전자신문_칼럼
+    url: https://rss.etnews.com/11011.xml
     kind: rss
     weight: 1.0
     lang: ko
     enabled: true
 
+  - name: 전자신문_사설
+    url: https://rss.etnews.com/11013.xml
+    kind: rss
+    weight: 1.0
+    lang: ko
+    enabled: true
+
+  # 끔 — 칼럼·오피니언 전용 피드가 없다(rss 목록 페이지도 404). 일반 피드
+  # 하나뿐이고, 30건을 받아 보니 ESG 등급·분기 실적·게임 시즌·백제 왕궁까지
+  # 섞여 들어왔다. 관심사 밖이 거의 전부인데 하루 30건이라 선별 비용이 가장 크다.
+  # 칼럼 피드가 생기면 다시 켠다.
   - name: ZDNet코리아
     url: https://feeds.feedburner.com/zdkorea
     kind: rss
     weight: 0.9
     lang: ko
-    enabled: true
+    enabled: false
 
   - name: 바이라인네트워크
     url: https://byline.network/feed/
@@ -35,12 +50,15 @@ sources:
     lang: ko
     enabled: true
 
+  # 끔 — 더 이상 IT 매체 피드가 아니다. 같은 도메인의 다른 섹션
+  # (/rss/S1N4.xml)이 "파인데일리 - 예술"을 돌려준다. 받아 본 4건도
+  # 롯데렌탈 의무공개매수·SK하이닉스·미국 CPI로 일반 경제·금융이었다.
   - name: 블로터
     url: https://www.bloter.net/rss/allArticle.xml
     kind: rss
     weight: 0.9
     lang: ko
-    enabled: true
+    enabled: false
 
   # =========================================================
   # 국내 기업 기술블로그 — 관심사 정중앙
