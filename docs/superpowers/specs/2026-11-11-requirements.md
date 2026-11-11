@@ -123,7 +123,11 @@
 | R14 | 앞 단계 산출물이 없으면 친절히 안내한다 | 3.1 | `LocalStore.read` | `test_없는_파일을_읽으면_친절한_에러가_난다` | ✅ |
 | R15 | 환경변수가 없으면 즉시 죽는다 | 3.2 | `lib/secrets.require` | `test_없으면_즉시_죽는다`, `test_빈_문자열도_없는_것으로_취급한다` | ✅ |
 | R16 | Python 3.12 (SDK가 3.10+ 요구, 3.9는 EOL) | 5.1 | `pyproject.toml` | Task 1 Step 5 — `pip install` 성공 | 🔍 |
-| R17 | 소스 이름 중복을 거부한다 (집계 키이므로) | 4.1 | `lib/config.load_sources` | `test_소스_이름이_중복되면_거부한다` | ✅ |
+| R17 | 소스 이름 중복을 거부한다 (집계 키이므로) | 4.1 | `lib/config.load_sources` — 꺼진 소스까지 포함해 검사 | `test_소스_이름이_중복되면_거부한다`, `test_꺼진_소스도_중복_검사에_들어간다` | ✅ |
+| R20 | 소스 주소 중복을 거부한다 (출처 집계가 흔들리므로) | 4.1 | `lib/config.load_sources` | `test_소스_주소가_중복되면_거부한다` | ✅ |
+| R21 | url 스킴 오타를 로딩에서 막는다 (수집에서 조용히 죽는 대신) | 4.1 | `lib/config.Source` field_validator | `test_url이_http로_시작하지_않으면_거부한다` | ✅ |
+| R22 | 켜진 소스가 없으면 거부한다 | 4.1 | `lib/config.load_sources` | `test_소스가_하나도_없으면_거부한다`, `test_전부_꺼져_있으면_거부한다` | ✅ |
+| R23 | 관심사 프로필이 비어 있으면 거부한다 (LLM이 제 기준으로 채점하므로) | 5.2 | `lib/config.load_interests` | `test_관심사_프로필이_비어_있으면_거부한다` | ✅ |
 | R18 | 시드 수집은 1회성이고 되돌릴 수 없다 | 5.5 | `seed.py` | Task 14 Step 5·6 — 실행 후 별도 백업 | 🔍 |
 | R19 | 프롬프트 튜닝 시 입력이 고정된다 | 5.5 | `evaluate.sample_items` 고정 시드 | `test_표본_추출이_재현_가능하다` | ✅ |
 

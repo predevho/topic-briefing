@@ -3070,7 +3070,22 @@ git commit -m "feat: 소스 목록과 관심사 프로필, 피드 생존 확인 
 - Create: `pipeline/lib/config.py`
 - Create: `tests/test_config.py`
 
-- [ ] **Step 1: 실패하는 테스트 작성**
+> **계획에서 늘린 부분** — 처음 계획은 테스트 6개였다. 계획을 다시 읽으면서
+> 구멍 셋을 찾아 6개를 더했다(총 12개).
+>
+> 1. **`load_interests`에 테스트가 없었다.** 구현에는 "비어 있으면 거부"가
+>    있는데 그걸 확인하는 테스트가 없었다. 빈 프로필로 채점하면 LLM이 제
+>    기준으로 점수를 주고 **그 사실이 출력에 드러나지 않는다.**
+> 2. **주소 중복을 보지 않았다.** 이름 중복만 막았다. 같은 피드를 두 이름으로
+>    등록하면 같은 글을 두 번 받고, 중복 제거가 걸러주더라도 어느 소스에서
+>    왔는지가 임의로 정해져 `source_counts`가 흔들린다.
+> 3. **url이 그냥 `str`이었다.** `htp://` 같은 스킴 오타가 로딩을 통과하고
+>    수집에서 `Permanent`가 된다. 그 소스만 조용히 죽고, 증상은 "며칠째 0건"이다.
+>
+> 그리고 **중복 검사를 꺼진 소스까지 포함해서** 돈다. 끈 소스를 다시 켤 때
+> 이름이 겹치는 걸 그때 발견하면 늦다.
+
+- [x] **Step 1: 실패하는 테스트 작성**
 
 `tests/test_config.py`:
 
@@ -3078,7 +3093,7 @@ git commit -m "feat: 소스 목록과 관심사 프로필, 피드 생존 확인 
 import pytest
 from pydantic import ValidationError
 
-from pipeline.lib.config import Source, load_sources
+from pipeline.lib.config import Source, load_interests, load_sources
 
 YAML_OK = """
 sources:
@@ -3126,6 +3141,14 @@ def test_weight는_0보다_커야_한다():
         Source(name="s", url="https://e.com", kind="rss", weight=0, lang="ko")
 
 
+def test_url이_http로_시작하지_않으면_거부한다():
+    """스킴 오타는 수집 때 Permanent가 되어 그 소스만 조용히 죽는다.
+    증상이 "며칠째 0건"이라 알아차리기까지 오래 걸리므로 로딩에서 막는다.
+    """
+    with pytest.raises(ValidationError):
+        Source(name="s", url="htp://e.com/r", kind="rss", weight=1.0, lang="ko")
+
+
 def test_소스_이름이_중복되면_거부한다(tmp_path):
     """source_counts의 키가 되므로 중복되면 집계가 조용히 틀린다."""
     path = tmp_path / "sources.yaml"
@@ -3139,14 +3162,74 @@ def test_소스_이름이_중복되면_거부한다(tmp_path):
         load_sources(path)
 
 
+def test_소스_주소가_중복되면_거부한다(tmp_path):
+    """같은 피드를 두 번 등록하면 같은 글을 두 번 받는다. 중복 제거가
+    걸러주더라도 어느 소스에서 왔는지가 임의로 정해져 집계가 흔들린다.
+    """
+    path = tmp_path / "sources.yaml"
+    path.write_text(
+        "sources:\n"
+        "  - {name: 이름하나, url: 'https://a.com/r', kind: rss, weight: 1.0, lang: ko}\n"
+        "  - {name: 이름둘, url: 'https://a.com/r', kind: rss, weight: 1.0, lang: ko}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="중복"):
+        load_sources(path)
+
+
+def test_꺼진_소스도_중복_검사에_들어간다(tmp_path):
+    """끈 소스를 켤 때 이름이 겹치는 걸 그때 발견하면 늦다."""
+    path = tmp_path / "sources.yaml"
+    path.write_text(
+        "sources:\n"
+        "  - {name: 같은이름, url: 'https://a.com/r', kind: rss, weight: 1.0, lang: ko}\n"
+        "  - {name: 같은이름, url: 'https://b.com/r', kind: rss, weight: 1.0, lang: ko,"
+        " enabled: false}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="중복"):
+        load_sources(path)
+
+
 def test_소스가_하나도_없으면_거부한다(tmp_path):
     path = tmp_path / "sources.yaml"
     path.write_text("sources: []\n", encoding="utf-8")
     with pytest.raises(ValueError, match="비어"):
         load_sources(path)
+
+
+def test_전부_꺼져_있으면_거부한다(tmp_path):
+    """sources는 차 있지만 켜진 게 없으면 수집할 게 없다."""
+    path = tmp_path / "sources.yaml"
+    path.write_text(
+        "sources:\n"
+        "  - {name: s, url: 'https://a.com/r', kind: rss, weight: 1.0, lang: ko,"
+        " enabled: false}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="비어"):
+        load_sources(path)
+
+
+def test_관심사_프로필을_그대로_읽는다(tmp_path):
+    path = tmp_path / "interests.md"
+    path.write_text("# 관심사\n\n백엔드와 AI.\n", encoding="utf-8")
+
+    assert load_interests(path) == "# 관심사\n\n백엔드와 AI."
+
+
+def test_관심사_프로필이_비어_있으면_거부한다(tmp_path):
+    """빈 프로필로 채점하면 LLM이 제 기준으로 점수를 주고, 그 사실이
+    출력에 드러나지 않는다. 조용히 틀리는 쪽이라 로딩에서 막는다.
+    """
+    path = tmp_path / "interests.md"
+    path.write_text("   \n\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="비어"):
+        load_interests(path)
 ```
 
-- [ ] **Step 2: 실패를 확인**
+- [x] **Step 2: 실패를 확인**
 
 ```bash
 pytest tests/test_config.py
@@ -3154,18 +3237,24 @@ pytest tests/test_config.py
 
 Expected: FAIL — `ModuleNotFoundError: No module named 'pipeline.lib.config'`
 
-- [ ] **Step 3: 최소 구현 작성**
+- [x] **Step 3: 최소 구현 작성**
 
 `pipeline/lib/config.py`:
 
 ```python
-"""소스 설정 로딩."""
+"""소스 설정 로딩.
+
+수집(collect)·선별(rank)·요약(summarize)이 모두 이 모듈로 설정을 읽는다.
+설정이 틀렸으면 **파이프라인이 시작하기 전에** 터뜨린다. 07:20에 무인으로
+도는 작업이라, 설정 오류가 "그 소스만 며칠째 0건"으로 나타나면 알아차리기까지
+오래 걸린다.
+"""
 
 from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 DEFAULT_SOURCES_PATH = Path("config/sources.yaml")
 DEFAULT_INTERESTS_PATH = Path("config/interests.md")
@@ -3181,6 +3270,27 @@ class Source(BaseModel):
     lang: Literal["ko", "en"]
     enabled: bool = True
 
+    @field_validator("url")
+    @classmethod
+    def _http로_시작해야_한다(cls, value: str) -> str:
+        # pydantic의 HttpUrl을 쓰지 않는 이유: 주소를 정규화해서 되돌려준다
+        # (끝에 / 를 붙이는 등). sources.yaml의 주소는 check_feeds.py로 하나하나
+        # 확인한 것이라, 로더가 조용히 바꾸면 확인한 의미가 없어진다.
+        # 여기서는 형식만 보고 글자는 그대로 넘긴다.
+        if not value.startswith(("http://", "https://")):
+            raise ValueError(f"url이 http(s)로 시작하지 않는다: {value!r}")
+        return value
+
+
+def _중복(값들: list[str]) -> list[str]:
+    보인것: set[str] = set()
+    겹친것: set[str] = set()
+    for 값 in 값들:
+        if 값 in 보인것:
+            겹친것.add(값)
+        보인것.add(값)
+    return sorted(겹친것)
+
 
 def load_sources(path: Path | None = None) -> list[Source]:
     """켜진 소스만 돌려준다."""
@@ -3189,12 +3299,18 @@ def load_sources(path: Path | None = None) -> list[Source]:
 
     all_sources = [Source.model_validate(row) for row in data.get("sources") or []]
 
-    names = [s.name for s in all_sources]
-    duplicates = {name for name in names if names.count(name) > 1}
-    if duplicates:
+    # 중복 검사는 꺼진 소스까지 포함한다. 끈 소스를 다시 켤 때 이름이
+    # 겹치는 걸 그때 발견하면 늦다.
+    if 겹친이름 := _중복([s.name for s in all_sources]):
         raise ValueError(
-            f"소스 이름이 중복됐다: {', '.join(sorted(duplicates))}. "
-            f"이름은 집계 키로 쓰이므로 유일해야 한다."
+            f"소스 이름이 중복됐다: {', '.join(겹친이름)}. "
+            f"이름은 집계 키(runs.source_counts)로 쓰이므로 유일해야 한다."
+        )
+
+    if 겹친주소 := _중복([s.url for s in all_sources]):
+        raise ValueError(
+            f"소스 주소가 중복됐다: {', '.join(겹친주소)}. "
+            f"같은 피드를 두 번 받으면 어느 소스에서 왔는지가 임의로 정해진다."
         )
 
     enabled = [s for s in all_sources if s.enabled]
@@ -3213,17 +3329,33 @@ def load_interests(path: Path | None = None) -> str:
     return text
 ```
 
-> **설명** — `data.get("sources") or []`에서 `or`를 쓴 이유는, YAML에 `sources:`만 적고 비워두면 `None`이 되기 때문이다. `get("sources", [])`는 키가 **없을 때만** 기본값을 주므로 `None`을 막지 못한다. `Field(gt=0)`은 "0보다 큼"(greater than)이다.
+> **설명** — `data.get("sources") or []`에서 `or`를 쓴 이유는, YAML에 `sources:`만
+> 적고 비워두면 `None`이 되기 때문이다. `get("sources", [])`는 키가 **없을 때만**
+> 기본값을 주므로 `None`을 막지 못한다. `Field(gt=0)`은 "0보다 큼"(greater than)이다.
+>
+> `if 겹친이름 := _중복(...)` 의 `:=`는 **대입 표현식**(왈러스 연산자, 3.8+)이다.
+> 대입과 조건 검사를 한 줄에 한다. 없으면 `겹친이름 = _중복(...)`을 먼저 쓰고
+> 다음 줄에서 `if 겹친이름:`을 써야 한다.
+>
+> `@field_validator("url")`은 pydantic이 그 필드를 검증할 때 부르는 훅이다.
+> `@classmethod`가 함께 붙어야 한다. 안에서 `ValueError`를 던지면 pydantic이
+> `ValidationError`로 감싸 주므로, 호출하는 쪽은 예외 종류를 하나만 보면 된다.
+>
+> **`HttpUrl`을 쓰지 않은 이유** — pydantic에는 주소 검증용 `HttpUrl`이 있다.
+> 쓰지 않았다. 검증만 하지 않고 **주소를 정규화해서 되돌려준다**(끝에 `/`를
+> 붙이는 등). `sources.yaml`의 주소는 Task 11에서 `check_feeds.py`로 하나하나
+> 확인한 것이라, 로더가 조용히 바꿔 버리면 확인한 의미가 없어진다. 형식만 보고
+> 글자는 그대로 넘긴다.
 
-- [ ] **Step 4: 통과를 확인**
+- [x] **Step 4: 통과를 확인**
 
 ```bash
 pytest tests/test_config.py
 ```
 
-Expected: `6 passed`
+Expected: `12 passed`
 
-- [ ] **Step 5: 실제 설정 파일이 로딩되는지 확인**
+- [x] **Step 5: 실제 설정 파일이 로딩되는지 확인**
 
 ```bash
 python -c "
@@ -3234,13 +3366,14 @@ print(f'관심사 프로필 {len(load_interests())}자')
 "
 ```
 
-Expected: 소스 개수와 이름 목록, 관심사 프로필 길이가 출력된다.
+**실측 (2026-11-11):** 소스 48개(국내 18 · 해외 30), 가중치 0.9~1.3,
+관심사 프로필 1275자. 실제 파일에서도 이름·주소 중복 없이 통과했다.
 
-- [ ] **Step 6: 커밋**
+- [x] **Step 6: 커밋**
 
 ```bash
 git add pipeline/lib/config.py tests/test_config.py
-git commit -m "feat: 소스 설정 로더 (이름 중복·빈 목록 거부)"
+git commit -m "feat: 소스 설정 로더 (이름·주소 중복, 스킴 오타, 빈 프로필 거부)"
 ```
 
 ---
