@@ -4372,13 +4372,36 @@ git commit -m "feat: 수집 단계 — 윈도우 필터, 소스 장애 격리, �
 
 ## Task 14: 시드 수집
 
-**되돌릴 수 없는 작업이다.** 대부분의 RSS 피드는 최근 10~50건만 제공하므로, 지금 긁지 않으면 그 데이터는 영구히 얻을 수 없다. 이후 선별 프롬프트 튜닝의 재료가 된다.
+**되돌릴 수 없는 작업이다.** 대부분의 RSS 피드는 최근 10~50건만 제공하므로,
+지금 긁지 않으면 그 데이터는 영구히 얻을 수 없다. 이후 선별 프롬프트 튜닝의
+재료가 된다.
 
 **Files:**
 - Create: `pipeline/seed.py`
 - Create: `tests/test_seed.py`
 
-- [ ] **Step 1: 실패하는 테스트 작성**
+> **계획에서 고친 것** (테스트 3개 → 10개)
+>
+> **1. 계획에 없던 가장 위험한 구멍 — 덮어쓰기.** 계획의 `main()`은
+> `LocalStore(date=SEED_DIR).write("raw", bundle)`를 그냥 호출한다. 한 달 뒤에
+> 무심코 `python -m pipeline.seed`를 다시 돌리면, 그때 피드는 이미 과거를
+> 버렸으므로 **더 적은 데이터로 원본을 덮어쓴다.** 되돌릴 수 없고 증상도 없다 —
+> 파일은 그대로 있고 안에 든 것만 줄어든다. 계획의 대비책은 Step 6의 수동
+> 백업뿐이었는데, 백업을 안 했으면 끝이다.
+>
+> `ensure_writable()`을 넣어 **이미 시드가 있으면 거부**한다. 메시지에
+> `--force`를 적어 둔다 — 막기만 하고 빠져나갈 방법을 안 알려주면 사용자가
+> 파일을 손으로 지운다.
+>
+> **2. 테스트의 `fetch`가 bytes를 돌려줬다.** `fetch=lambda url: data`는
+> `collect`가 기대하는 `FetchResult`가 아니라서 `result.moved_from`에서
+> `AttributeError`가 난다. 계획대로면 세 번째 테스트가 실패했다.
+>
+> **3. `run_seed()`로 분리했다.** 계획의 `main()`은 `load_sources()`,
+> `datetime.now()`, 네트워크를 다 안고 있어서 테스트할 수 없었다. 수집·저장을
+> `run_seed`로 빼고 `main`은 배선과 출력만 맡는다.
+
+- [x] **Step 1: 실패하는 테스트 작성**
 
 `tests/test_seed.py`:
 
@@ -4386,11 +4409,42 @@ git commit -m "feat: 수집 단계 — 윈도우 필터, 소스 장애 격리, �
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from pipeline.lib.config import Source
-from pipeline.seed import SEED_DIR, seed_window
+from pipeline.lib.http import FetchResult
+from pipeline.lib.store import LocalStore
+from pipeline.seed import (
+    IGNORE_HISTORY,
+    SEED_DIR,
+    ensure_writable,
+    run_seed,
+    seed_window,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
+
+def _source() -> Source:
+    return Source(name="s", url="https://e.com/r", kind="rss", weight=1.0, lang="ko")
+
+
+def _fetch(filename: str = "feed_two_items.xml"):
+    data = (FIXTURES / filename).read_bytes()
+
+    def fetch(url: str) -> FetchResult:
+        # collect는 FetchResult를 기대한다. bytes를 그대로 돌려주면
+        # result.moved_from에서 AttributeError가 난다.
+        return FetchResult(content=data, final_url=url, moved_from=None)
+
+    return fetch
+
+
+def _store(tmp_path: Path) -> LocalStore:
+    return LocalStore(date=SEED_DIR, root=tmp_path)
+
+
+# --- 윈도우 ---
 
 def test_시드_윈도우가_아주_넓다():
     """피드가 주는 전부를 받으려면 윈도우가 과거를 충분히 덮어야 한다."""
@@ -4406,27 +4460,92 @@ def test_시드는_별도_디렉터리를_쓴다():
     assert SEED_DIR == "_seed"
 
 
-def test_오래된_항목도_수집된다():
+def test_오래된_항목도_수집된다(tmp_path):
     """fixture의 2025년 글이 들어와야 한다 — 운영 수집에서는 걸러진 항목."""
-    from pipeline.collect import collect
-
-    data = (FIXTURES / "feed_two_items.xml").read_bytes()
-    now = datetime(2026, 11, 10, 22, 20, tzinfo=timezone.utc)
-    start, end = seed_window(now=now)
-
-    bundle = collect(
-        sources=[Source(name="s", url="https://e.com/r", kind="rss",
-                        weight=1.0, lang="ko")],
-        window_start=start,
-        window_end=end,
-        fetch=lambda url: data,
-        known_urls=lambda urls: set(),
+    bundle = run_seed(
+        sources=[_source()],
+        now=datetime(2026, 11, 10, 22, 20, tzinfo=timezone.utc),
+        fetch=_fetch(),
+        store=_store(tmp_path),
     )
 
     assert len(bundle.items) == 2
+
+
+def test_발행_이력을_보지_않는다():
+    """운영 수집은 이미 발행한 URL을 뺀다. 시드는 튜닝 재료이므로
+    발행 여부와 무관하게 전부 받아야 한다.
+    """
+    assert IGNORE_HISTORY(["https://a.com/1", "https://b.com/2"]) == set()
+
+
+# --- 덮어쓰기 방지 ---
+
+def test_이미_있는_시드는_덮어쓰지_않는다(tmp_path):
+    """이게 이 태스크에서 가장 위험한 지점이다.
+
+    한 달 뒤에 무심코 다시 돌리면, 그때 피드는 이미 과거를 버렸으므로
+    **더 적은 데이터로 원본을 덮어쓴다.** 되돌릴 수 없는 손실이고
+    증상도 없다 — 파일은 그대로 있고 안에 든 것만 줄어든다.
+    """
+    store = _store(tmp_path)
+    run_seed(sources=[_source()], now=datetime(2026, 11, 10, tzinfo=timezone.utc),
+             fetch=_fetch(), store=store)
+
+    with pytest.raises(SystemExit, match="이미 있다"):
+        run_seed(sources=[_source()], now=datetime(2026, 12, 10, tzinfo=timezone.utc),
+                 fetch=_fetch(), store=store)
+
+
+def test_force를_주면_덮어쓴다(tmp_path):
+    """막아 두더라도 빠져나갈 길은 있어야 한다. 다만 기본값이 아니다."""
+    store = _store(tmp_path)
+    run_seed(sources=[_source()], now=datetime(2026, 11, 10, tzinfo=timezone.utc),
+             fetch=_fetch(), store=store)
+
+    bundle = run_seed(sources=[_source()], now=datetime(2026, 12, 10, tzinfo=timezone.utc),
+                      fetch=_fetch(), store=store, force=True)
+    assert len(bundle.items) == 2
+
+
+def test_시드가_없으면_그냥_쓴다(tmp_path):
+    ensure_writable(_store(tmp_path), force=False)      # 예외가 나지 않는다
+
+
+def test_거부_메시지가_force를_알려준다(tmp_path):
+    """막기만 하고 빠져나갈 방법을 안 알려주면 사용자가 파일을 손으로 지운다."""
+    store = _store(tmp_path)
+    run_seed(sources=[_source()], now=datetime(2026, 11, 10, tzinfo=timezone.utc),
+             fetch=_fetch(), store=store)
+
+    with pytest.raises(SystemExit, match="--force"):
+        ensure_writable(store, force=False)
+
+
+# --- 저장 ---
+
+def test_시드를_파일로_쓴다(tmp_path):
+    store = _store(tmp_path)
+    run_seed(sources=[_source()], now=datetime(2026, 11, 10, tzinfo=timezone.utc),
+             fetch=_fetch(), store=store)
+
+    assert (tmp_path / SEED_DIR / "raw.json").exists()
+
+
+def test_항목이_없어도_파일은_쓴다(tmp_path):
+    """0건이어도 "언제 시도했는지"는 남아야 한다. 다만 다음 실행이
+    이걸 보고 거부하므로, 0건이면 사용자가 force로 다시 돌린다.
+    """
+    store = _store(tmp_path)
+    bundle = run_seed(sources=[_source()],
+                      now=datetime(2026, 11, 10, tzinfo=timezone.utc),
+                      fetch=_fetch("feed_empty.xml"), store=store)
+
+    assert bundle.items == []
+    assert store.exists("raw")
 ```
 
-- [ ] **Step 2: 실패를 확인**
+- [x] **Step 2: 실패를 확인**
 
 ```bash
 pytest tests/test_seed.py
@@ -4434,95 +4553,223 @@ pytest tests/test_seed.py
 
 Expected: FAIL — `ModuleNotFoundError: No module named 'pipeline.seed'`
 
-- [ ] **Step 3: 최소 구현 작성**
+- [x] **Step 3: 최소 구현 작성**
 
 `pipeline/seed.py`:
 
 ```python
 """시드 수집 (1회성): 각 소스가 제공하는 전체 항목을 긁어 저장한다.
 
-운영 수집과 다른 점은 윈도우뿐이다. 수집 로직은 collect를 재사용한다.
+운영 수집과 다른 점은 둘뿐이다 — 윈도우가 넓고, 발행 이력을 보지 않는다.
+수집 로직은 collect를 그대로 재사용한다.
 
 실행: python -m pipeline.seed
 
-이 데이터는 선별 프롬프트 튜닝(pipeline.evaluate)의 재료다. RSS는 과거를
-충분히 제공하지 않으므로, 지금 긁지 않으면 다시 얻을 수 없다.
+이 데이터는 선별 프롬프트 튜닝(pipeline.evaluate)의 재료다. 대부분의 RSS는
+최근 10~50건만 제공하므로, **지금 긁지 않으면 다시 얻을 수 없다.**
+
+같은 이유로 이 모듈은 **이미 있는 시드를 덮어쓰지 않는다.** 한 달 뒤에
+무심코 다시 돌리면 그때 피드는 이미 과거를 버렸으므로 더 적은 데이터로
+원본을 덮어쓴다. 파일은 그대로 있고 안에 든 것만 줄어드니 증상도 없다.
 """
 
+import sys
+import time
 from datetime import datetime, timedelta, timezone
+from typing import Callable
 
-from pipeline.collect import collect, http_fetch
-from pipeline.lib.config import load_sources
+from pipeline.collect import FetchFn, SleepFn, collect
+from pipeline.lib.config import Source, load_sources
+from pipeline.lib.http import fetch as http_fetch
 from pipeline.lib.store import LocalStore
+from pipeline.models import RawBundle
 
 # 운영 날짜 디렉터리(2026-11-10)와 섞이지 않게 별도 이름을 쓴다.
 SEED_DIR = "_seed"
 
 # 피드가 주는 전부를 받기 위한 넉넉한 과거 범위.
+#
+# 더 넓힐 이유가 없다. 되돌릴 수 없는 것은 "오래된 글"이 아니라 **피드의
+# 잘림**이다 — 10건만 주는 피드는 내일 11번째를 버린다. 400일은 어떤 피드가
+# 담고 있는 범위보다 넓다. 반대로 과도하게 넓히면(10년) 2019년 글이 튜닝
+# 표본에 섞여 들어와, 지금 들어올 글을 대표하지 못하는 재료가 된다.
 SEED_LOOKBACK_DAYS = 400
+
+
+def IGNORE_HISTORY(urls: list[str]) -> set[str]:  # noqa: N802 — 상수처럼 쓰는 주입값
+    """시드는 발행 이력을 보지 않는다.
+
+    운영 수집은 이미 발행한 URL을 뺀다(중복 발송 방지). 시드는 튜닝
+    재료이므로 발행 여부와 무관하게 전부 받아야 한다.
+    """
+    return set()
 
 
 def seed_window(*, now: datetime) -> tuple[datetime, datetime]:
     return now - timedelta(days=SEED_LOOKBACK_DAYS), now
 
 
-def main() -> None:
-    now = datetime.now(timezone.utc)
-    window_start, window_end = seed_window(now=now)
+def ensure_writable(store: LocalStore, *, force: bool) -> None:
+    """이미 시드가 있으면 거부한다.
 
+    막기만 하고 빠져나갈 방법을 알려주지 않으면 사용자가 파일을 손으로
+    지운다. 그래서 메시지에 `--force`를 적는다.
+    """
+    if store.exists("raw") and not force:
+        raise SystemExit(
+            "시드가 이미 있다. 덮어쓰지 않는다.\n"
+            f"  {SEED_DIR}/raw.json\n"
+            "\n"
+            "지금 다시 받으면 피드가 그동안 버린 과거가 빠진 채로 원본을\n"
+            "덮어쓴다. 파일은 그대로 있고 안에 든 것만 줄어들어 알아차릴\n"
+            "수도 없다.\n"
+            "\n"
+            "정말 다시 받아야 하면 기존 파일을 먼저 다른 이름으로 복사하고\n"
+            "`python -m pipeline.seed --force`로 실행한다."
+        )
+
+
+def run_seed(
+    *,
+    sources: list[Source],
+    now: datetime,
+    store: LocalStore,
+    fetch: FetchFn = http_fetch,
+    known_urls: Callable[[list[str]], set[str]] = IGNORE_HISTORY,
+    sleep: SleepFn = time.sleep,
+    force: bool = False,
+) -> RawBundle:
+    """시드를 수집해 저장한다. 저장 전에 덮어쓰기를 막는다."""
+    ensure_writable(store, force=force)
+
+    window_start, window_end = seed_window(now=now)
     bundle = collect(
-        sources=load_sources(),
+        sources=sources,
         window_start=window_start,
         window_end=window_end,
-        fetch=http_fetch,
-        # 시드는 발행 이력을 보지 않는다. 전부 받아야 한다.
-        known_urls=lambda urls: set(),
+        fetch=fetch,
+        known_urls=known_urls,
+        sleep=sleep,
+    )
+    store.write("raw", bundle)
+    return bundle
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = sys.argv[1:] if argv is None else argv
+    force = "--force" in args
+
+    store = LocalStore(date=SEED_DIR)
+    bundle = run_seed(
+        sources=load_sources(),
+        now=datetime.now(timezone.utc),
+        store=store,
+        force=force,
     )
 
-    path = LocalStore(date=SEED_DIR).write("raw", bundle)
-
-    print(f"시드 수집 {len(bundle.items)}건 → {path}")
+    print(f"시드 수집 {len(bundle.items)}건 → {SEED_DIR}/raw.json")
+    print(f"  윈도우: {bundle.window_start} ~ {bundle.window_end}")
     for name, count in sorted(bundle.source_counts.items(), key=lambda kv: -kv[1]):
         print(f"  {count:4d}건  {name}")
+
+    marks = {"config": "설정", "transient": "일시", "moved": "이전"}
     for error in bundle.errors:
-        print(f"  [실패] {error.source}: {error.message}")
+        print(f"  [{marks[error.kind]}] {error.source}: {error.message}")
+
     print()
     print("이 파일은 선별 프롬프트 튜닝에 쓴다. 지우지 않는다.")
+    print("다시 만들 수 없으므로 저장소 밖에 복사해 둔다.")
 
 
 if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 4: 통과를 확인**
+> **설명** — `raise SystemExit(메시지)`는 종료 코드 1로 프로세스를 끝내면서
+> 메시지를 stderr에 출력한다. `sys.exit()`가 내부적으로 던지는 것과 같은
+> 예외이고, `pytest.raises(SystemExit)`로 테스트할 수 있다. `RuntimeError`와
+> 달리 **스택 트레이스가 찍히지 않아** 사용자가 읽을 안내문에 적합하다.
+>
+> `IGNORE_HISTORY`를 함수로 두고 기본 인자로 주입한 이유는 **테스트 가능성**이다.
+> `known_urls=lambda urls: set()`을 `run_seed` 안에 박으면 "시드는 발행 이력을
+> 보지 않는다"는 규칙을 밖에서 확인할 수 없다.
+>
+> **`SEED_LOOKBACK_DAYS`를 400일로 둔 이유** — 더 넓힐 이유가 없다. 되돌릴 수
+> 없는 것은 "오래된 글"이 아니라 **피드의 잘림**이다. 10건만 주는 피드는 내일
+> 11번째를 버린다. 400일은 어떤 피드가 담고 있는 범위보다 넓다(실측: 가장 오래된
+> 항목도 400일 안이었다). 반대로 과도하게 넓히면 2019년 글이 튜닝 표본에 섞여,
+> 지금 들어올 글을 대표하지 못하는 재료가 된다.
+
+- [x] **Step 4: 통과를 확인**
 
 ```bash
 pytest tests/test_seed.py
 ```
 
-Expected: `3 passed`
+Expected: `10 passed`. 전체 `152 passed`.
 
-- [ ] **Step 5: 시드를 실제로 수집한다**
+- [x] **Step 5: 시드를 실제로 수집한다**
 
 ```bash
 python -m pipeline.seed
 ```
 
-Expected: 소스별 건수가 출력되고 총합이 수백 건. 소스가 11개면 대략 200~600건.
+**실측 (2026-11-12): 1923건, 33초, 에러 0건.** 윈도우
+`2025-10-07 ~ 2026-11-11`. 50건 미만 기준을 한참 넘겼다.
 
-**수집량이 50건 미만이면 멈추고 원인을 찾는다** — 대부분 `sources.yaml`의 주소 문제이고, `python scripts/check_feeds.py`로 확인한다.
+- [x] **Step 6: 시드 파일을 git에서 제외하되 백업한다**
 
-- [ ] **Step 6: 시드 파일을 git에서 제외하되 백업한다**
-
-`data/`는 `.gitignore`에 있으므로 커밋되지 않는다. 그런데 **이 파일은 다시 만들 수 없으므로** 별도로 복사해 둔다.
+`data/`는 `.gitignore`에 있으므로 커밋되지 않는다. 그런데 **이 파일은 다시
+만들 수 없으므로** 별도로 복사해 둔다.
 
 ```bash
 mkdir -p ~/briefing-seed-backup
 cp data/_seed/raw.json ~/briefing-seed-backup/raw-$(date +%Y%m%d).json
-ls -lh ~/briefing-seed-backup/
+shasum -a 256 data/_seed/raw.json ~/briefing-seed-backup/raw-$(date +%Y%m%d).json
 ```
 
-- [ ] **Step 7: 커밋**
+**실측:** 2.9MB, 체크섬 일치 확인. `~/briefing-seed-backup/raw-20261112.json`.
+
+- [x] **Step 7: 시드로만 알 수 있는 것 — 소스별 실제 발행 간격**
+
+시드를 받고 나서야 **각 소스가 실제로 얼마나 자주 쓰는지**를 볼 수 있었다.
+`check_feeds.py`는 이걸 모른다 — 200이 오고 항목이 있으면 통과시킨다.
+
+**발행이 멈춘 소스 2개 → 껐다:**
+
+| 소스 | 마지막 발행 | check_feeds 결과 |
+|---|---|---|
+| 쿠팡_기술블로그 | 2024-10-14 (**13개월**) | 통과 — 200에 10건 들어 있다 |
+| Chip_Huyen | 2025-01-16 (**22개월**) | 통과 — 200에 10건 들어 있다 |
+
+**느리지만 살아 있는 소스 5개 → 남겼다.** 끄는 대신 측정값을 `sources.yaml`
+주석에 적었다:
+
+| 소스 | 마지막 발행 | 400일간 |
+|---|---:|---:|
+| 스포카 기술블로그 | 244일 전 | 1건 |
+| 하이퍼커넥트 기술블로그 | 203일 전 | 5건 |
+| Lil'Log | 130일 전 | 2건 |
+| Slack Engineering | 119일 전 | 8건 |
+| 쏘카 기술블로그 | 108일 전 | 9건 |
+
+> **이 측정이 설계를 하나 바꿨다.** spec 8.4의 소스 침묵 경고는 "3일 연속
+> 0건"이었다. 그러면 **위 다섯은 영구히 경고를 띄운다.** 같은 절에 "진짜 비용은
+> 알림 피로"라고 적어 놓고 매일 뜨는 경고를 설계한 셈이다. Lil'Log가 400일에
+> 2편인 것은 고장이 아니라 그 저자의 평소 속도이고, 그 2편이 우리가 가장
+> 원하는 글이다. spec 8.4를 **소스별 `quiet_days`** 기준으로 고쳤다
+> (계획 3의 `lib/guard.py`가 읽는다).
+
+**최종: 가동 45개(국내 16 · 해외 29), 9개 끔.**
+
+> **Task 17(선별 품질 평가)에 넘기는 메모 — 표본이 한쪽으로 쏠려 있다.**
+>
+> 시드 1923건 중 **OpenAI_Blog가 680건(35%)**, Hugging_Face_Blog가 231건(12%)이다.
+> 둘이 전체의 거의 절반이다. `evaluate`가 고정 시드로 무작위 표본을 뽑으면
+> 표본의 절반이 이 두 소스가 된다 — 운영 수집의 구성(4일 윈도우에서 OpenAI는
+> 10건, 전체의 4%)과 전혀 다르다. **소스별 상한을 두거나 층화 표본을 써야 한다.**
+
+- [x] **Step 8: 커밋**
 
 ```bash
 git add pipeline/seed.py tests/test_seed.py
