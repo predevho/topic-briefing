@@ -420,9 +420,31 @@ import pytest
 from pipeline.lib.timeutil import (
     KST,
     MAX_WINDOW_HOURS,
+    SEND_CRON_UTC,
+    SEND_HOUR_UTC,
+    SEND_MINUTE_UTC,
     compute_window,
     to_utc_iso,
 )
+
+WEEKDAY_NAMES = "월화수목금토일"
+
+
+def _kst_weekdays_for_cron_days(first_utc_day: int) -> list[str]:
+    """UTC로 연속 5일 발송했을 때의 KST 요일을 돌려준다.
+
+    2026-11-08이 일요일이므로, first_utc_day=8이면 cron 요일 0-4(일~목)에
+    해당한다.
+    """
+    return [
+        WEEKDAY_NAMES[
+            datetime(
+                2026, 11, first_utc_day + offset,
+                SEND_HOUR_UTC, SEND_MINUTE_UTC, tzinfo=timezone.utc,
+            ).astimezone(KST).weekday()
+        ]
+        for offset in range(5)
+    ]
 
 
 # --- 시각 정규화 ---
@@ -504,6 +526,31 @@ def test_윈도우_경계가_타임존_없는_값을_거부한다():
 
 def test_KST가_UTC_플러스_9시간이다():
     assert KST.utcoffset(None) == timedelta(hours=9)
+
+
+# --- 발송 요일 ---
+
+def test_발송_cron이_KST_월금에_해당한다():
+    """이 테스트가 없으면 요일이 한 칸 밀린 것을 수동 관찰로만 알 수 있다.
+
+    증상이 "일주일에 한 번 이상한 날에 온다"라서 알아차리기까지 오래 걸린다.
+    """
+    assert SEND_CRON_UTC == "20 22 * * 0-4"
+
+    # cron 0-4 = UTC 일~목. 2026-11-08이 일요일이다.
+    assert _kst_weekdays_for_cron_days(8) == ["월", "화", "수", "목", "금"]
+
+
+def test_cron_요일을_하나_밀면_월요일이_빠지고_토요일에_발송된다():
+    """위 테스트가 실제로 무엇을 막는지 보여준다.
+
+    cron을 1-5(UTC 월~금)로 쓰면 KST로는 화~토가 된다. 월요일은 주말
+    해외 콘텐츠를 72시간 윈도우로 받는 날이라 가장 손실이 크다.
+    """
+    shifted = _kst_weekdays_for_cron_days(9)   # UTC 월요일부터
+
+    assert shifted == ["화", "수", "목", "금", "토"]
+    assert "월" not in shifted
 ```
 
 - [ ] **Step 2: 실패를 확인**
@@ -534,6 +581,17 @@ KST = timezone(timedelta(hours=9))
 
 # 장애 복구 시 수집량·토큰 폭증을 막는 상한.
 MAX_WINDOW_HOURS = 96
+
+# 계획 3의 Actions 워크플로가 쓰는 발송 시각과 cron.
+# 여기 두는 이유: 이것이 맞는지 테스트로 고정해야 한다. 틀리기 쉬운 이유가
+# 두 겹이기 때문이다.
+#   1. UTC 22:20 + 9시간은 "익일" 07:20이다 → KST 요일이 하루 앞선다
+#   2. cron의 요일은 0 = 일요일인데 datetime.weekday()는 0 = 월요일이다
+# 한 칸 밀리면 토요일에 발송되고 월요일이 빠진다 — 월요일은 주말 해외
+# 콘텐츠를 72시간 윈도우로 받는 날이라 하필 가장 중요한 날이 사라진다.
+SEND_HOUR_UTC = 22
+SEND_MINUTE_UTC = 20
+SEND_CRON_UTC = "20 22 * * 0-4"   # KST 월~금 07:20
 
 
 def to_utc_iso(value: str | None) -> str | None:
@@ -608,7 +666,7 @@ def compute_window(
 pytest tests/test_timeutil.py
 ```
 
-Expected: `12 passed`
+Expected: `14 passed`
 
 - [ ] **Step 5: 커밋**
 
@@ -2510,6 +2568,37 @@ from pipeline.lib.secrets import require
 from pipeline.lib.store import SupabaseStore
 
 
+# 실제 키 대신 이 문장을 키 자리에 넣는다. 예외 메시지에 이게 나타나면
+# 실제 service_key도 같은 자리에 나타난다는 뜻이다.
+SENTINEL_KEY = "sk-sentinel-must-not-appear-in-error-messages"
+
+
+def check_key_does_not_leak() -> bool:
+    """잘못된 키로 호출해 예외 메시지에 키가 들어가는지 확인한다.
+
+    왜 확인해야 하나: 리포지토리가 퍼블릭이면 **Actions 로그도 누구나
+    볼 수 있다.** SupabaseStore가 올리는 예외에 Authorization 헤더나
+    키가 섞여 있으면 service_key가 그 로그에 남는다.
+    """
+    bad = SupabaseStore(require("SUPABASE_URL"), SENTINEL_KEY)
+
+    try:
+        bad.last_sent_at()
+    except Exception as error:  # noqa: BLE001 — 메시지를 보는 것이 목적이다
+        message = f"{type(error).__name__}: {error}"
+        print(f"   예외: {message[:160]}")
+        if SENTINEL_KEY in message:
+            print("   ★ 키가 예외 메시지에 들어간다.")
+            print("     SupabaseStore의 각 메서드를 try/except로 감싸고,")
+            print("     키를 제거한 메시지로 다시 올려야 한다.")
+            return False
+        print("   → 키는 새지 않았다.")
+        return True
+
+    print("   ★ 잘못된 키인데 호출이 성공했다. 키 검증 경로를 확인한다.")
+    return False
+
+
 def main() -> None:
     store = SupabaseStore(require("SUPABASE_URL"), require("SUPABASE_SERVICE_KEY"))
 
@@ -2539,6 +2628,10 @@ def main() -> None:
     print("4) 최근 헤드라인 조회 테스트...")
     print(f"   → {len(store.recent_headlines(days=14))}건")
 
+    print("5) 예외 메시지에 비밀값이 새는지 확인...")
+    if not check_key_does_not_leak():
+        raise SystemExit(1)
+
     print()
     print("성공. 테스트로 넣은 runs 행은 Supabase 대시보드에서 지운다:")
     print("  delete from public.runs where source_counts ? 'smoke_test';")
@@ -2556,7 +2649,9 @@ if __name__ == "__main__":
 mkdir -p scripts && python scripts/smoke_supabase.py
 ```
 
-Expected: 네 단계가 모두 출력되고 마지막에 "성공". 2번에서 기록한 시각이 조회되어야 한다.
+Expected: 다섯 단계가 모두 출력되고 마지막에 "성공". 2번에서 기록한 시각이 조회되어야 하고, **5번이 "키는 새지 않았다"로 끝나야 한다.**
+
+5번이 `★ 키가 예외 메시지에 들어간다`로 끝나면 **멈추고 고친다.** 리포지토리가 퍼블릭이므로 Actions 로그도 공개된다 — 그 로그에 `SUPABASE_SERVICE_KEY`가 남으면 DB 전체가 열린다.
 
 확인 후 Supabase SQL Editor에서 테스트 행을 지운다:
 
@@ -6881,6 +6976,8 @@ git commit -m "docs: README — 실행 방법과 튜닝 절차"
 - [ ] `ranked.json`의 URL을 없는 주소로 바꾸고 `enrich`를 돌리면 **재시도 없이** 발췌로 폴백되고, 그 이유가 경고에 나온다
 - [ ] 센더를 빈 목록으로 주면 `notify`가 거부한다 (조용히 아무 데도 안 보내는 것 방지)
 - [ ] `runs` 테이블의 `errors`에 `kind`가 들어 있다
+- [ ] `smoke_supabase.py`의 5단계가 "키는 새지 않았다"로 끝난다
+- [ ] `pytest tests/test_timeutil.py`의 발송 요일 테스트 2개가 통과한다 (cron 한 칸 밀림 방지)
 
 ---
 
