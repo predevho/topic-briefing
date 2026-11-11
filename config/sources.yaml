@@ -1,0 +1,415 @@
+# 수집 소스.
+#
+# weight: LLM 점수에 곱하는 가중치. 1.0이 기준.
+#   기업 기술블로그처럼 관심사 정중앙인 소스는 1.2~1.3,
+#   일반 매체 속보성 기사가 섞이는 소스는 0.8~0.9로 둔다.
+# lang: ko | en. 해외 소스는 요약 시 한국어로 번역한다(spec 5.4).
+#   수집·점수·적재 경로는 국내 소스와 완전히 같다. 분기는 요약 프롬프트에만 있다.
+# enabled: false로 두면 수집에서 제외된다(삭제하지 않고 끌 수 있게).
+#
+# 이 목록은 `python scripts/check_feeds.py`로 실제 확인한 것만 enabled: true다.
+# 주소가 바뀌는 일이 흔하므로, 0건이 며칠 이어지는 소스는 다시 돌려본다.
+
+sources:
+  # =========================================================
+  # 애그리게이터 — 남이 이미 골라준 신호를 그대로 받는다.
+  # 개별 블로그를 다 등록하는 대신, 사람들이 투표로 올린 글을 받는 쪽이
+  # 넓이와 품질을 동시에 가져간다. 출처가 제각각이어서 본문 확보는
+  # enrich 단계에서 trafilatura가 맡는다.
+  # =========================================================
+  - name: GeekNews
+    url: https://news.hada.io/rss/news
+    kind: rss
+    weight: 1.2
+    lang: ko
+    enabled: true
+
+  - name: Hacker_News_Best
+    url: https://hnrss.org/best?points=200
+    kind: rss
+    weight: 1.2
+    lang: en
+    enabled: true
+
+  - name: Lobsters
+    url: https://lobste.rs/rss
+    kind: rss
+    weight: 1.0
+    lang: en
+    enabled: true
+
+  # =========================================================
+  # 국내 IT 매체: 컬럼·오피니언
+  # =========================================================
+  - name: 전자신문_오피니언
+    url: https://rss.etnews.com/Section902.xml
+    kind: rss
+    weight: 1.0
+    lang: ko
+    enabled: true
+
+  - name: ZDNet코리아
+    url: https://feeds.feedburner.com/zdkorea
+    kind: rss
+    weight: 0.9
+    lang: ko
+    enabled: true
+
+  - name: 바이라인네트워크
+    url: https://byline.network/feed/
+    kind: rss
+    weight: 0.9
+    lang: ko
+    enabled: true
+
+  - name: 블로터
+    url: https://www.bloter.net/rss/allArticle.xml
+    kind: rss
+    weight: 0.9
+    lang: ko
+    enabled: true
+
+  # =========================================================
+  # 국내 기업 기술블로그 — 관심사 정중앙
+  # =========================================================
+  - name: 토스_기술블로그
+    url: https://toss.tech/rss.xml
+    kind: rss
+    weight: 1.3
+    lang: ko
+    enabled: true
+
+  - name: 카카오_기술블로그
+    url: https://tech.kakao.com/feed
+    kind: rss
+    weight: 1.3
+    lang: ko
+    enabled: true
+
+  # 피드가 비어 있다 — 200에 유효한 RSS지만 <item>이 0개다(블로그엔 글이 있다).
+  # 우리 쪽에서 고칠 수 없으니 끄고, 주소는 남겨 둔다. 저쪽이 고치면 check_feeds가 잡는다.
+  - name: 카카오페이_기술블로그
+    url: https://tech.kakaopay.com/rss.xml
+    kind: rss
+    weight: 1.3
+    lang: ko
+    enabled: false
+
+  - name: 우아한형제들_기술블로그
+    url: https://techblog.woowahan.com/feed/
+    kind: rss
+    weight: 1.3
+    lang: ko
+    enabled: true
+
+  - name: 네이버_D2
+    url: https://d2.naver.com/d2.atom
+    kind: rss
+    weight: 1.3
+    lang: ko
+    enabled: true
+
+  - name: LY_기술블로그
+    url: https://techblog.lycorp.co.jp/ko/feed/index.xml
+    kind: rss
+    weight: 1.2
+    lang: ko
+    enabled: true
+
+  - name: 당근_기술블로그
+    url: https://medium.com/feed/daangn
+    kind: rss
+    weight: 1.3
+    lang: ko
+    enabled: true
+
+  - name: 쿠팡_기술블로그
+    url: https://medium.com/feed/coupang-engineering
+    kind: rss
+    weight: 1.3
+    lang: ko
+    enabled: true
+
+  - name: 뱅크샐러드_기술블로그
+    url: https://corp.banksalad.com/blog/rss.xml
+    kind: rss
+    weight: 1.2
+    lang: ko
+    enabled: true
+
+  - name: 하이퍼커넥트_기술블로그
+    url: https://hyperconnect.github.io/feed.xml
+    kind: rss
+    weight: 1.2
+    lang: ko
+    enabled: true
+
+  - name: 데브시스터즈_기술블로그
+    url: https://tech.devsisters.com/rss.xml
+    kind: rss
+    weight: 1.2
+    lang: ko
+    enabled: true
+
+  # 403. 피드가 자동 접근을 거부한다. UA를 바꿔 우회하지 않고 끈다.
+  - name: 컬리_기술블로그
+    url: https://helloworld.kurly.com/feed.xml
+    kind: rss
+    weight: 1.2
+    lang: ko
+    enabled: false
+
+  - name: 쏘카_기술블로그
+    url: https://tech.socar.kr/rss.xml
+    kind: rss
+    weight: 1.2
+    lang: ko
+    enabled: true
+
+  - name: 인프런_기술블로그
+    url: https://tech.inflab.com/rss.xml
+    kind: rss
+    weight: 1.2
+    lang: ko
+    enabled: true
+
+  # 403. 위와 같은 이유로 끈다.
+  - name: 리디_기술블로그
+    url: https://ridicorp.com/feed/
+    kind: rss
+    weight: 1.2
+    lang: ko
+    enabled: false
+
+  - name: 스포카_기술블로그
+    url: https://spoqa.github.io/rss
+    kind: rss
+    weight: 1.1
+    lang: ko
+    enabled: true
+
+  # =========================================================
+  # 해외 기업 엔지니어링 블로그 — 규모에서 나온 실전 기록
+  # =========================================================
+  - name: Cloudflare_Blog
+    url: https://blog.cloudflare.com/rss/
+    kind: rss
+    weight: 1.2
+    lang: en
+    enabled: true
+
+  - name: AWS_Architecture_Blog
+    url: https://aws.amazon.com/blogs/architecture/feed/
+    kind: rss
+    weight: 1.1
+    lang: en
+    enabled: true
+
+  - name: Netflix_Tech_Blog
+    url: https://netflixtechblog.com/feed
+    kind: rss
+    weight: 1.2
+    lang: en
+    enabled: true
+
+  # RSS를 제공하지 않는다(페이지 head에 feed 선언이 없다). 주소를 남겨 두고 끈다.
+  - name: Uber_Engineering
+    url: https://www.uber.com/blog/engineering/rss/
+    kind: rss
+    weight: 1.2
+    lang: en
+    enabled: false
+
+  - name: Meta_Engineering
+    url: https://engineering.fb.com/feed/
+    kind: rss
+    weight: 1.2
+    lang: en
+    enabled: true
+
+  - name: GitHub_Blog
+    url: https://github.blog/feed/
+    kind: rss
+    weight: 1.1
+    lang: en
+    enabled: true
+
+  - name: Dropbox_Tech
+    url: https://dropbox.tech/feed
+    kind: rss
+    weight: 1.2
+    lang: en
+    enabled: true
+
+  - name: Slack_Engineering
+    url: https://slack.engineering/feed/
+    kind: rss
+    weight: 1.2
+    lang: en
+    enabled: true
+
+  - name: Shopify_Engineering
+    url: https://shopify.engineering/blog.atom
+    kind: rss
+    weight: 1.2
+    lang: en
+    enabled: true
+
+  - name: Canva_Engineering
+    url: https://www.canva.dev/blog/engineering/feed.xml
+    kind: rss
+    weight: 1.1
+    lang: en
+    enabled: true
+
+  - name: Airbnb_Engineering
+    url: https://medium.com/feed/airbnb-engineering
+    kind: rss
+    weight: 1.2
+    lang: en
+    enabled: true
+
+  - name: Pinterest_Engineering
+    url: https://medium.com/feed/pinterest-engineering
+    kind: rss
+    weight: 1.1
+    lang: en
+    enabled: true
+
+  - name: Grab_Engineering
+    url: https://engineering.grab.com/feed.xml
+    kind: rss
+    weight: 1.1
+    lang: en
+    enabled: true
+
+  - name: Discord_Engineering
+    url: https://discord.com/blog/rss.xml
+    kind: rss
+    weight: 1.1
+    lang: en
+    enabled: true
+
+  # =========================================================
+  # 해외 AI — 기업 공지
+  # 발표 소식이 많아 가중치를 높이지 않는다. 선별이 걸러야 한다.
+  # =========================================================
+  # RSS를 제공하지 않는다. Anthropic 글은 GeekNews·Hacker News에 거의 항상
+  # 올라오므로 애그리게이터로 커버된다.
+  - name: Anthropic_News
+    url: https://www.anthropic.com/rss.xml
+    kind: rss
+    weight: 1.2
+    lang: en
+    enabled: false
+
+  - name: OpenAI_Blog
+    url: https://openai.com/blog/rss.xml
+    kind: rss
+    weight: 1.0
+    lang: en
+    enabled: true
+
+  - name: Google_Research_Blog
+    url: https://research.google/blog/rss/
+    kind: rss
+    weight: 1.1
+    lang: en
+    enabled: true
+
+  - name: Google_DeepMind_Blog
+    url: https://deepmind.google/blog/rss.xml
+    kind: rss
+    weight: 1.1
+    lang: en
+    enabled: true
+
+  - name: Hugging_Face_Blog
+    url: https://huggingface.co/blog/feed.xml
+    kind: rss
+    weight: 1.1
+    lang: en
+    enabled: true
+
+  # =========================================================
+  # 해외 AI — 개인 컬럼. 숫자와 실패 경험이 가장 많이 나오는 쪽.
+  # =========================================================
+  - name: Simon_Willison
+    url: https://simonwillison.net/atom/everything/
+    kind: rss
+    weight: 1.3
+    lang: en
+    enabled: true
+
+  - name: Latent_Space
+    url: https://latent.space/feed
+    kind: rss
+    weight: 1.2
+    lang: en
+    enabled: true
+
+  - name: Sebastian_Raschka
+    url: https://magazine.sebastianraschka.com/feed
+    kind: rss
+    weight: 1.2
+    lang: en
+    enabled: true
+
+  - name: Lil_Log
+    url: https://lilianweng.github.io/index.xml
+    kind: rss
+    weight: 1.2
+    lang: en
+    enabled: true
+
+  - name: Chip_Huyen
+    url: https://huyenchip.com/feed.xml
+    kind: rss
+    weight: 1.2
+    lang: en
+    enabled: true
+
+  # =========================================================
+  # 인프라·DB·아키텍처
+  # =========================================================
+  - name: InfoQ
+    url: https://feed.infoq.com/
+    kind: rss
+    weight: 0.9
+    lang: en
+    enabled: true
+
+  - name: The_New_Stack
+    url: https://thenewstack.io/feed/
+    kind: rss
+    weight: 0.9
+    lang: en
+    enabled: true
+
+  - name: Kubernetes_Blog
+    url: https://kubernetes.io/feed.xml
+    kind: rss
+    weight: 1.0
+    lang: en
+    enabled: true
+
+  - name: PostgreSQL_Planet
+    url: https://planet.postgresql.org/rss20.xml
+    kind: rss
+    weight: 1.0
+    lang: en
+    enabled: true
+
+  - name: Martin_Fowler
+    url: https://martinfowler.com/feed.atom
+    kind: rss
+    weight: 1.2
+    lang: en
+    enabled: true
+
+  - name: ByteByteGo
+    url: https://blog.bytebytego.com/feed
+    kind: rss
+    weight: 1.0
+    lang: en
+    enabled: true

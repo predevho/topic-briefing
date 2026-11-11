@@ -2836,102 +2836,35 @@ git commit -m "feat: Supabase 저장소 + 테스트용 가짜 구현"
 - Create: `config/interests.md`
 - Create: `scripts/check_feeds.py`
 
-- [ ] **Step 1: 후보 소스 목록 작성**
+- [x] **Step 1: 후보 소스 목록 작성**
 
-`config/sources.yaml`:
+`config/sources.yaml`. 처음 계획에는 후보 11개를 적어 뒀지만, **추측한 11개보다
+넓게 던지고 실측으로 거르는 쪽이 정확했다.** 후보를 53개로 늘려 전부 때려 봤다.
 
-```yaml
-# 수집 소스.
-#
-# weight: LLM 점수에 곱하는 가중치. 1.0이 기준.
-#   기업 기술블로그처럼 관심사 정중앙인 소스는 1.2~1.3,
-#   일반 매체 속보성 기사가 섞이는 소스는 0.8~0.9로 둔다.
-# lang: ko | en. 해외 소스는 요약 시 한국어로 번역한다.
-# enabled: false로 두면 수집에서 제외된다(삭제하지 않고 끌 수 있게).
+- 애그리게이터 3 (GeekNews, Hacker News Best, Lobsters)
+- 국내 매체 컬럼 4
+- 국내 기업 기술블로그 16
+- 해외 기업 엔지니어링 블로그 14
+- 해외 AI (기업 공지 + 개인 컬럼) 10
+- 인프라·DB·아키텍처 6
 
-sources:
-  # --- 국내 IT 매체: 컬럼·오피니언 ---
-  - name: 전자신문_오피니언
-    url: https://rss.etnews.com/Section902.xml
-    kind: rss
-    weight: 1.0
-    lang: ko
-    enabled: true
+**애그리게이터를 넣은 이유:** GeekNews에 올라오는 원문 사이트를 하나씩 등록하는
+대신 GeekNews 피드 자체를 받는다. 사람들이 이미 투표로 걸러 준 목록이어서
+넓이와 품질을 같이 가져가고, 소스 목록 관리가 늘어나지 않는다. 출처가
+제각각이어도 본문은 enrich 단계의 trafilatura가 맡으므로 추가 분기가 없다.
+Hacker News·Lobsters도 같은 이유다.
 
-  - name: ZDNet코리아_칼럼
-    url: https://feeds.feedburner.com/zdkorea
-    kind: rss
-    weight: 0.9
-    lang: ko
-    enabled: true
+**해외 소스 적재 경로:** 국내 소스와 완전히 같다. `lang: en`은 요약 프롬프트에만
+영향을 주고(spec 5.4 — 요약은 한국어), 수집·점수·중복 판정·`articles` 적재는
+동일한 코드를 지난다. 원문은 `article_bodies`에 원래 언어로 남는다. 즉
+**번역을 위한 별도 단계나 테이블이 없다.**
 
-  # --- 국내 기업 기술블로그: 관심사 정중앙 ---
-  - name: 토스_기술블로그
-    url: https://toss.tech/rss.xml
-    kind: rss
-    weight: 1.3
-    lang: ko
-    enabled: true
+**GeekNews 피드 주소:** 공식 공지에 두 개가 있다 —
+최신 글 전체는 `https://news.hada.io/rss/news`, 긱뉴스 블로그 업데이트는
+`https://news.hada.io/rss/blog`. 우리가 쓰는 쪽은 앞의 것이다.
+(제3자 블로그에 돌아다니는 feedburner 주소는 공식 문서에 없다.)
 
-  - name: 카카오_기술블로그
-    url: https://tech.kakao.com/feed/
-    kind: rss
-    weight: 1.3
-    lang: ko
-    enabled: true
-
-  - name: 우아한형제들_기술블로그
-    url: https://techblog.woowahan.com/feed/
-    kind: rss
-    weight: 1.3
-    lang: ko
-    enabled: true
-
-  - name: 라인_기술블로그
-    url: https://engineering.linecorp.com/ko/feed/
-    kind: rss
-    weight: 1.2
-    lang: ko
-    enabled: true
-
-  # --- 해외: 남이 검증한 것 우대 ---
-  - name: Hacker_News_Best
-    url: https://hnrss.org/best?points=200
-    kind: rss
-    weight: 1.2
-    lang: en
-    enabled: true
-
-  - name: AWS_Architecture_Blog
-    url: https://aws.amazon.com/blogs/architecture/feed/
-    kind: rss
-    weight: 1.1
-    lang: en
-    enabled: true
-
-  - name: Cloudflare_Blog
-    url: https://blog.cloudflare.com/rss/
-    kind: rss
-    weight: 1.1
-    lang: en
-    enabled: true
-
-  - name: OpenAI_Blog
-    url: https://openai.com/blog/rss.xml
-    kind: rss
-    weight: 1.1
-    lang: en
-    enabled: true
-
-  - name: Anthropic_News
-    url: https://www.anthropic.com/rss.xml
-    kind: rss
-    weight: 1.2
-    lang: en
-    enabled: true
-```
-
-- [ ] **Step 2: 피드 생존 확인 스크립트 작성**
+- [x] **Step 2: 피드 생존 확인 스크립트 작성**
 
 위 URL은 후보이고 **실제로 살아있는지 확인해야 한다.** 매체 개편으로 주소가 바뀌는 일이 흔하다.
 
@@ -2952,6 +2885,10 @@ import yaml
 from pipeline.lib.http import fetch
 from pipeline.lib.retry import Permanent, Transient
 
+# 후보 목록은 수십 개라서 소스당 20초(DEFAULT_TIMEOUT)면 전체가 너무 길어진다.
+# 이 스크립트는 "살아있나"만 보므로 짧게 끊고, 끊긴 것은 [일시]로 다시 돌린다.
+CHECK_TIMEOUT = 10.0
+
 
 def main() -> int:
     config = yaml.safe_load(Path("config/sources.yaml").read_text(encoding="utf-8"))
@@ -2966,7 +2903,7 @@ def main() -> int:
         name, url = source["name"], source["url"]
 
         try:
-            result = fetch(url)
+            result = fetch(url, timeout=CHECK_TIMEOUT)
         except Permanent as error:
             # 404/403/주소 오타. 고쳐야 한다.
             print(f"[설정] {name}  {error}")
@@ -3014,17 +2951,53 @@ if __name__ == "__main__":
 >
 > 이 스크립트가 `lib/http.fetch`를 쓰는 덕분에 **"고쳐야 할 소스"와 "지금만 그럴 수 있는 소스"가 출력에서 분리된다.** 전부 `[실패]`로 뭉개 놓으면, 503 하나 때문에 멀쩡한 주소를 지우게 된다.
 
-- [ ] **Step 3: 피드를 실제로 확인하고 `sources.yaml`을 고친다**
+- [x] **Step 3: 피드를 실제로 확인하고 `sources.yaml`을 고친다**
 
 ```bash
 python scripts/check_feeds.py
 ```
 
-`[설정]`과 `[ 0건]`으로 나온 소스는 주소를 고치거나 `enabled: false`로 끈다. **`[설정]`·`[ 0건]`·`↳ 영구 이전됨`이 하나도 없을 때까지 반복한다.**
+`[설정]`과 `[ 0건]`으로 나온 소스는 주소를 고치거나 `enabled: false`로 끈다.
+**`[설정]`·`[ 0건]`·`↳ 영구 이전됨`이 하나도 없을 때까지 반복한다.**
 
 `[일시]`는 잠시 후 다시 실행해본다. 두세 번 연속 나오면 설정 문제로 보고 주소를 확인한다.
 
-- [ ] **Step 4: 관심사 프로필 작성**
+**1차 실행 결과 (2026-11-11): 후보 53개 중 42개 정상, 11개 문제.**
+추측으로 적었던 주소의 20%가 틀렸다. 이 단계를 건너뛰었으면 시드 수집에서
+조용히 비어 있는 소스를 안고 출발했을 것이다.
+
+영구 이전(301/308) — 최종 주소를 그대로 받았다:
+
+| 소스 | 바뀐 주소 |
+|---|---|
+| 카카오 기술블로그 | `https://tech.kakao.com/feed` |
+| 뱅크샐러드 | `https://corp.banksalad.com/blog/rss.xml` |
+| Latent Space | `https://latent.space/feed` |
+
+주소가 달라진 것 — `head`의 feed 선언과 후보 주소를 직접 때려 찾았다:
+
+| 소스 | 증상 | 바꾼 주소 |
+|---|---|---|
+| 블로터 | 404 | `https://www.bloter.net/rss/allArticle.xml` |
+| 쏘카 | 404 (도메인이 `tech.socar.kr`로 이전) | `https://tech.socar.kr/rss.xml` |
+| Discord | 404 | `https://discord.com/blog/rss.xml` |
+
+껐다(`enabled: false`) — 주소는 남겨 둬서 나중에 다시 확인할 수 있게 했다:
+
+| 소스 | 이유 |
+|---|---|
+| 컬리, 리디 | **403.** 피드가 자동 접근을 거부한다. UA를 브라우저로 위장해 우회하지 않는다. |
+| Uber Engineering | RSS를 제공하지 않는다(블로그 `head`에 feed 선언이 없다). |
+| Anthropic News | RSS를 제공하지 않는다. Anthropic 글은 GeekNews·HN에 거의 항상 올라와 애그리게이터로 커버된다. |
+| 카카오페이 | **200에 유효한 RSS인데 `<item>`이 0개다**(블로그엔 글이 있다). 저쪽 버그라 우리가 고칠 수 없다. |
+
+> **403을 우회하지 않는 이유** — UA를 브라우저로 바꾸면 대개 뚫린다. 하지만
+> 403은 "자동 수집을 원하지 않는다"는 사이트의 의사 표시다. 뚫고 들어가면
+> 차단이 강화되거나 IP가 막히고, 그때는 전체 수집이 멈춘다. 끄는 쪽이 싸다.
+
+**최종: 48개 소스 가동(국내 18 · 해외 30), 5개 끔.** `모든 피드 정상.`으로 종료 코드 0.
+
+- [x] **Step 4: 관심사 프로필 작성**
 
 `config/interests.md` — 이 파일 전체가 선별 프롬프트에 들어간다. 추상적인 단어보다 **구체적인 예시**가 훨씬 잘 작동한다.
 
@@ -3056,6 +3029,22 @@ python scripts/check_feeds.py
 - **내용 없는 동향 기사.** "AI가 중요해지고 있다" 류.
 - 이미 충분히 아는 주제의 반복 (예: Docker 기초, REST 입문)
 - 프런트엔드 프레임워크 세부 비교, 디자인 트렌드, 암호화폐 시세
+
+## 언어는 기준이 아니다
+
+소스의 절반 이상이 해외 글이다. **영어로 썼다는 이유로 점수를 올리거나
+내리지 않는다.** 요약 단계에서 한국어로 번역되므로, 선별에서는 내용만 본다.
+
+단, 해외 글 중 **국내에 이미 번역·정리되어 돌아다니는 발표 소식**(새 모델 출시
+같은 것)은 중복으로 보고 내린다. 국내에 없는 **깊은 분석과 실전 기록**이
+해외 소스를 넣은 이유다.
+
+## 애그리게이터에서 온 글
+
+GeekNews·Hacker News·Lobsters는 사람들이 이미 투표로 걸러 준 목록이다.
+**출처가 개인 블로그여도 불리하게 보지 않는다.** 올라왔다는 사실 자체가 신호다.
+다만 애그리게이터에는 관심사 밖의 글(하드웨어, 수학, 역사, 정치)도 섞여
+들어오므로, **이 프로필에 맞는지는 평소와 똑같이 따진다.**
 
 ## 중복 처리
 
