@@ -163,6 +163,12 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8.3.0"]
 
+# setuptools는 flat 레이아웃에서 최상위 디렉터리를 자동으로 패키지 후보로
+# 본다. tests는 자동 제외되지만 config와 supabase(SQL 파일용)는 아니라서
+# "최상위 패키지가 여러 개"로 설치가 거부된다. 찾을 범위를 명시해 막는다.
+[tool.setuptools.packages.find]
+include = ["pipeline*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # -q: 간결한 출력. --strict-markers: 오타난 마커를 에러로
@@ -170,6 +176,10 @@ addopts = "-q --strict-markers"
 ```
 
 > **설명** — `pyproject.toml`은 Python 프로젝트의 표준 설정 파일이다. `[project]`에 의존성을, `[tool.<도구명>]`에 각 도구 설정을 담는다. `>=`로 최소 버전만 지정하면 설치 시 최신 호환 버전이 들어온다.
+>
+> **`[tool.setuptools.packages.find]`가 없으면 Step 5가 실패한다.** setuptools는 "flat 레이아웃"(패키지가 저장소 루트에 바로 있는 구조)에서 최상위 디렉터리를 훑어 패키지 후보로 삼는다. `tests`·`docs`·`examples`는 자동 제외 목록에 있지만 **`config`와 `supabase`는 없다.** 그래서 후보가 셋이 되고, setuptools는 어느 것을 패키징할지 추측하지 않고 거부한다 — `Multiple top-level packages discovered in a flat-layout`. `include = ["pipeline*"]`은 "pipeline으로 시작하는 것만 찾아라"는 뜻이고, `pipeline`과 `pipeline.lib`가 여기 걸린다.
+>
+> 참고로 `supabase/` 디렉터리 이름이 `supabase` 라이브러리와 겹치지만 **가려지지 않는다.** 그 디렉터리에는 `__init__.py`가 없어 네임스페이스 패키지가 되고, **Python은 sys.path 순서와 무관하게 정규 패키지(`__init__.py`가 있는 것)를 우선한다.** 누군가 거기에 `__init__.py`를 넣으면 그때부터 가려진다.
 
 - [ ] **Step 2: `.env.example` 작성**
 
