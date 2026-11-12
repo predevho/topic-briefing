@@ -4,66 +4,114 @@
 
 **Goal:** 매일의 브리핑을 폰에서 읽을 수 있는 공개 페이지를 만들고, 좋아요·클릭·메모를 모아 계획 3의 학습 신호를 쌓기 시작한다.
 
-**Architecture:** 한 번 빌드한 SPA가 런타임에 날짜별 JSON을 불러온다. 파이프라인은 `docs/data/*.json`만 떨어뜨리므로 **프론트엔드가 망가져도 브리핑 전송은 멈추지 않는다**(스펙 6.4의 결정적 이유). 상호작용은 브라우저에서 Supabase anon 키로 직접 기록한다.
+**Architecture:** 한 번 빌드한 SPA가 런타임에 **Supabase를 직접 조회한다.** 파이프라인은 DB에만 쓰므로 페이지와 완전히 분리되고(스펙 6.4의 결정적 이유), 리포지토리에는 매일 아무것도 커밋되지 않는다. 읽기는 익명 공개, 좋아요·메모는 로그인한 사용자만.
 
-**Tech Stack:** Vite + React + TypeScript + Tailwind CSS, Supabase JS 클라이언트, GitHub Pages (`docs/` 서빙)
+**Tech Stack:** Vite + React + TypeScript + Tailwind CSS, Supabase JS 클라이언트 (조회 + Auth), GitHub Pages (`docs/` 서빙)
 
 ---
 
-## 시작하기 전에 — 이 계획의 전제
+## 개정 이력 (2026-11-13)
 
-### 결정 사항 (2026-11-12)
+초판(2026-11-12)에서 다섯 가지가 바뀌었다. **초판을 읽은 상태라면 이 절만 읽고 넘어가면 된다.**
+
+| 바뀐 것 | 초판 | 개정판 | 이유 |
+|---|---|---|---|
+| 데이터 경로 | `render`가 `docs/data/*.json`을 생성 → 페이지가 fetch | **페이지가 Supabase를 직접 조회** | 공개 리포에 기사 데이터를 매일 영구 축적하지 않는다. 읽기·쓰기 클라이언트가 하나로 모인다 |
+| `pipeline/render.py` | Task 2 (약 490줄) | **삭제** | 위의 결과 |
+| 인증 | 없음 (`localStorage` 좋아요) | **읽기 공개 + 쓰기 로그인** | 좋아요 토글·기기 간 동일 표시가 가능해지고, 낯선 사람의 신호 오염이 닫힌다 |
+| 리포지토리 공개 | Task 1에서 전환 | **완료** (2026-11-13) | `docs/공개-전-점검.md` 참조 |
+| `docs/`의 설계 문서 | 그대로 둠 | **`design/`으로 옮긴다** (Task 1) | `docs/`가 웹 루트라 설계·계획 문서가 웹에서 열렸다 |
+
+초판에서 **그대로 남은 것**: 목업에서 확정한 색·글꼴·카드 구조(A 톤), Task 4(디자인 토큰), Task 6(카드), Task 7(오늘 화면), Task 8(아카이브), Task 9(라우팅). 네 태스크는 `fetchDay`·`fetchArchive`·`fetchLatest`·`NotFound`와 `Day`·`Archive` 타입만 쓰므로 **구현이 바뀌어도 한 글자도 바뀌지 않는다.** 그게 Task 5를 그 이름으로 유지하는 이유다.
+
+---
+
+## 결정 사항
 
 | 항목 | 결정 | 근거 |
 |---|---|---|
-| 배포 | **리포를 공개로 전환 + GitHub Pages** | 스펙 7.2의 원안. 무료 플랜은 비공개 리포에서 Pages를 제공하지 않는다 |
-| 다크 모드 | **라이트 모드만** | 쓰면서 필요하면 나중에 추가. 지금 CSS를 두 벌 만들지 않는다 |
+| 데이터 조회 | **브라우저가 Supabase 직접 조회** | 아래 "제약 1" |
+| 배포 | **GitHub Pages, `docs/` 서빙** | 매일 push할 것이 없으므로 배포는 코드가 바뀔 때만 일어난다. 외부 서비스가 필요 없다 |
+| 리포지토리 | **공개** (2026-11-13 전환 완료) | 스펙 7.2의 원안 |
+| 인증 | **읽기 익명 공개 + 쓰기 로그인** | 아래 "제약 3" |
+| 다크 모드 | **라이트 모드만** | 쓰면서 필요하면 추가. 지금 CSS를 두 벌 만들지 않는다 |
 | 톤 | **A 톤** (조용한 읽기 도구) | 목업 아트보드 7개에서 확정 |
+| 사용자별 브리핑 | **하지 않는다** | 설계 2.1 — "비용이 아니라 근거가 없기 때문이다. 외부 사용자가 실제로 무엇에 반응하는지를 보고 정해야 한다." 사용자가 0명인 지금 설계하면 틀린다 |
 
-### 계획 1에서 확인한 제약 — 이 계획이 반드시 지켜야 하는 것
+---
 
-**1. `render`는 `briefing.json`이 아니라 Supabase `articles`를 읽는다.**
+## 계획 1에서 확인한 제약 — 이 계획이 반드시 지켜야 하는 것
 
-세 가지 이유가 겹친다.
+### 1. 페이지는 Supabase `articles`를 직접 조회한다
 
-- **`article_id`가 필요하다.** 페이지가 `reactions`·`clicks`에 삽입할 때 FK로 쓴다.
-  `SupabaseStore.save_articles`는 `None`을 돌려주므로 id가 파이프라인 안에 남지 않는다.
-- **`articles` 테이블에 본문 컬럼이 아예 없다.** 본문은 `article_bodies`에 따로 있다.
-  그래서 `articles`만 읽으면 **요구사항 D3(본문 미커밋)이 구조적으로 보장된다** —
-  실수로 넣을 경로가 없다.
-- `articles`가 페이지에 필요한 것을 모두 갖고 있다: `id`, `briefing_date`, `url`,
-  `source`, `published_at`, `headline`, `bullets`, `why_it_matters`, `topic`, `score`, `reason`.
+`articles`가 페이지에 필요한 것을 모두 갖고 있다: `id`, `briefing_date`, `url`, `source`, `published_at`, `headline`, `bullets`, `why_it_matters`, `topic`, `score`.
 
-0건인 날 화면에 필요한 수치는 `runs`에서 읽는다 — `collected_count`,
-`considered_count`, `max_score`, `source_counts`.
+**`articles` 테이블에 본문 컬럼이 아예 없다.** 본문은 `article_bodies`에 따로 있고 anon에 권한이 없다(`verify_anon_access.sh`로 실측). 그래서 **요구사항 D3·D2가 구조적으로 보장된다** — 페이지로 본문이 갈 경로가 없다.
 
-**2. anon 권한이 목업의 상호작용과 어긋난다.** 계획 1의 `supabase/schema.sql` 실측:
+**스펙 6.4와의 관계.** 6.4는 "매일 SPA 전체를 다시 빌드한다"와 "SPA는 한 번 빌드하고 런타임에 불러온다"를 비교해 후자를 택했다. 결정적 이유는 **파이프라인과 프론트엔드의 분리**였다 — "매일 빌드하면 오늘 브리핑을 보내는 일이 React 빌드가 성공하는 일에 묶여서, `package.json` 의존성 하나가 깨지면 카톡이 오지 않는다." 직접 조회는 그 분리를 **더 강하게** 지킨다: 파이프라인이 DB에 쓰면 끝이고, 페이지 쪽에서 일어나는 일이 없다. 6.4가 경로를 `docs/data/`로 적은 것은 당시 "Supabase 직접 조회"를 선택지로 올리지 않았기 때문이고, 그 비교는 이 개정판에서 했다.
 
-| 테이블 | anon 권한 | 목업이 가정한 것 | 차이 |
-|---|---|---|---|
-| `articles` | SELECT | 읽기 | 맞음 |
-| `reactions` | **INSERT만** | 토글 (채운 하트 ↔ 빈 하트) | **읽기·삭제 불가** |
-| `clicks` | **INSERT만** | 기록만 | 맞음 |
-| `notes` | SELECT + INSERT | 제자리 수정, 태그 × 버튼 | **수정·삭제 불가** |
+### 2. 0건인 날은 `runs`가 유일한 출처다 — `briefing_date` 컬럼이 필요하다
 
-**권한을 늘리지 않고 해결한다.** anon에 DELETE를 주면 URL을 아는 누구나
-좋아요를 지울 수 있고, 스펙 7.2는 "본문 차단과 색인 차단은 되돌리기 어려우므로
-그쪽에 노력을 쓴다"고 정했다. 그 판단과 일관되게 간다.
+0건인 날은 `articles` 행이 **하나도 없다**(`summarize`의 `SCORE_THRESHOLD = 60`을 넘은 글만 저장된다). 그래서 `articles`만 조회하면:
 
-- **좋아요**: DB는 **추가 전용**(이벤트). 눌렀는지 여부는 **`localStorage`**가
-  기기별로 기억한다. 같은 글을 두 번 눌러도 이벤트가 두 개 쌓이는데, 스펙 7.2가
-  "신호 오염이 생기면 Phase 2에서 바로 드러나 그때 대응"으로 이미 수용했다.
-- **메모**: 추가 전용. 읽을 때 **그 글의 가장 최근 행**을 쓴다(`notes`에 SELECT가
-  있다). 저장은 매번 새 행이고, 태그 삭제는 "삭제한 태그를 뺀 새 행"이다.
-- `localStorage`는 사생활이 아니라 **편의**다. 지워져도 화면이 깨지지 않게
-  `try/catch`로 감싸고, 없으면 "안 누른 상태"로 그린다.
+- 그 날짜가 아카이브에 **아예 나타나지 않는다**
+- `/2026-11-13`을 직접 열면 "그 날짜의 브리핑이 없습니다"가 떠서 **파이프라인이 안 돈 것과 구별되지 않는다**
 
-**3. Vite의 `emptyOutDir`를 반드시 끈다.** 빌드 결과를 `docs/`에 넣는데
-`docs/superpowers/`(설계·계획 문서)와 `docs/data/`(영구 보관 JSON)가 같이 있다.
-기본값대로 두면 **빌드가 그 둘을 지운다.**
+요구사항 D8이 `runs.considered_count`·`max_score`를 기록해 둔 것이 정확히 이것을 위해서다(ERD 4.2). 그런데 **`runs`에 날짜 컬럼이 없다** — `window_start`/`window_end`/`sent_at`만 있고, 브리핑 날짜는 KST 변환으로만 얻는다. 브라우저 쿼리에 타임존 변환을 넣으면 인덱스를 못 타고, 경계에서 조용히 틀린다.
 
-**4. `.nojekyll`이 필요하다.** GitHub Pages는 Jekyll로 처리하면서 `_`로 시작하는
-파일을 무시한다. Vite 산출물에 그런 이름이 생길 수 있다.
+**그래서 Task 2가 `runs.briefing_date`를 추가한다. 이것은 계획 1의 완료된 스키마와 `notify`를 고치는 일이다** — 이 계획에서 유일하게 계획 1을 건드리는 부분이고, 의도적이다. 대안(수치 없이 "글이 없습니다"만 띄우기)은 D8이 데이터를 남긴 이유를 버리는 것이고, 더 나쁘게는 Task 7이 이미 `day.collected ?? 0`으로 폴백하므로 **"수집 0건"이라고 거짓말하는 화면**이 된다.
+
+### 3. 인증 — 읽기는 익명 공개, 쓰기는 로그인
+
+설계 2.1이 로그인을 반대한 근거는 이것이었다.
+
+> 1인이 자기 사이트에 로그인하는 것은 순손실이다. 아침에 카톡 링크를 탭했는데 로그인 화면이 뜨면 그 시스템은 쓰이지 않는다.
+
+**읽기와 쓰기를 나누면 이 근거가 사라진다.** 아침에 카톡 링크를 탭하면 로그인 화면 없이 바로 읽힌다. 좋아요·메모를 누를 때만 로그인하고, 그것도 기기당 최초 1회다(Supabase 세션이 자동 갱신된다).
+
+이것이 설계 2.1이 그린 형태와 같다 — "정보는 모두에게 공개하고, 알림은 로그인한 권한자에게만."
+
+**얻는 것.** `auth.uid() = user_id` RLS는 남의 행을 보이지 않게 하므로 SELECT·DELETE를 안전하게 줄 수 있다.
+
+| | 초판 (익명) | 개정판 (인증) |
+|---|---|---|
+| 좋아요 토글 | 불가 → `localStorage` | **목업대로 토글** |
+| 기기 간 동일 표시 | 안 됨 | **됨** |
+| 신호 오염 | 낯선 사람 클릭이 섞임 (스펙 7.2가 수용) | **원천 차단** — anon INSERT 정책을 없앤다 |
+| 보안 근거 | "아무도 모르는 URL" | **RLS** |
+
+마지막 줄이 ERD 3.2.1이 걱정한 것을 닫는다 — "Phase 2가 '내 좋아요'로 큐레이션을 학습하는데, 지금은 누구나 좋아요를 누를 수 있어 낯선 사람의 클릭이 내 기준을 바꾼다."
+
+**메모는 추가 전용을 유지한다.** UPDATE를 주지 않는다 — 추가 전용이 화면에서 제자리 수정과 구별되지 않으면서 수정 이력을 남긴다. 읽을 때 그 글의 가장 최근 행을 쓴다.
+
+**`user_id` 컬럼은 이미 있다.** `reactions`·`clicks`·`notes`에 `user_id uuid references auth.users(id)`와 인덱스가 들어가 있고, anon INSERT 정책이 `with check (user_id is null)`로 좁혀져 있다(위장 삽입 차단). 설계 2.1이 "나중에 추가하면 중간, 지금 하면 낮음 → 이것만 지금 했다"로 미리 처리한 항목이다. **마이그레이션이 없다.**
+
+### 4. `reason` 컬럼이 지금 이미 노출돼 있다
+
+`articles.reason`은 LLM의 판단 근거다. 페이지에 쓰지 않는다. 그런데 **anon에 테이블 통째로 `grant select`가 걸려 있어서 API로 `?select=reason`을 부르면 읽힌다.** 초판의 `PAGE_FIELDS` 화이트리스트는 화면 표시만 막고 있었다.
+
+Task 2가 **컬럼 단위 grant**로 닫는다. Postgres가 컬럼 단위 `grant select (…)`를 지원하므로 뷰를 만들 필요가 없다. 이것은 직접 조회로 가면서 생기는 비용이 아니라 **지금 있는 노출을 막는 것**이고, 어느 방식을 택해도 해야 한다.
+
+### 5. `docs/`가 웹 루트다 — 설계 문서를 옮긴다
+
+GitHub Pages 브랜치 배포는 루트를 `/` 또는 `/docs`만 허용한다. 그런데 `docs/`에 설계·계획 문서가 들어 있어서, 브리핑 URL을 아는 사람이 **웹에서 그것들을 열 수 있다.**
+
+```
+https://predevho.github.io/topic-briefing/superpowers/specs/2026-11-11-erd.md
+https://predevho.github.io/topic-briefing/공개-전-점검.md
+```
+
+`robots.txt`는 크롤링을 막지 크롤러 아닌 접근을 막지 못한다. Task 1이 `design/`으로 옮긴다.
+
+### 6. Vite의 `emptyOutDir`를 반드시 끈다
+
+빌드 결과가 `docs/`로 들어가는데 거기에 `docs/.nojekyll`·`docs/robots.txt`·`docs/404.html`이 같이 있다. 기본값(`true`)이면 **빌드가 그것들을 지우고** 사이트가 조용히 깨진다. 설계 문서를 옮긴 뒤에도 이 세 파일 때문에 여전히 `false`가 필요하다.
+
+### 7. `.nojekyll`이 필요하다
+
+GitHub Pages는 Jekyll로 처리하면서 `_`로 시작하는 파일을 무시한다. Vite 산출물에 그런 이름이 생길 수 있다.
+
+---
 
 ### 목업에서 확정한 값 — 그대로 쓴다
 
@@ -109,25 +157,32 @@ div 메타               11.5px / Inter / #6B6862 — 출처 · 점수 · [좋�
 
 | 파일 | 책임 |
 |---|---|
-| `pipeline/render.py` | Supabase → `docs/data/YYYY-MM-DD.json`, `docs/data/index.json` |
-| `tests/test_render.py` | 위의 테스트 |
+| `supabase/migrations/2026-11-13-page-direct-read.sql` | 컬럼 단위 grant, `runs.briefing_date`, 인증 RLS |
+| `supabase/schema.sql` | 위를 반영한 현재 스키마 (새 프로젝트가 같은 결과를 얻는다) |
+| `supabase/verify_permissions.sql` | 권한 점검 질의 갱신 |
+| `pipeline/lib/store.py` | `record_run`에 `briefing_date` 추가 |
+| `pipeline/notify.py` | 위를 넘긴다 (이미 스코프에 있다) |
 | `web/package.json` | 프론트엔드 의존성 |
 | `web/vite.config.ts` | `base`, `outDir: ../docs`, `emptyOutDir: false` |
-| `web/tailwind.config.ts` | A 톤 색·글꼴 토큰 |
 | `web/index.html` | `noindex` 메타, 글꼴 링크 |
 | `web/src/main.tsx` | 엔트리 |
-| `web/src/App.tsx` | 라우팅 (`/`, `/:date`) |
-| `web/src/lib/types.ts` | JSON 스키마의 TypeScript 타입 |
-| `web/src/lib/data.ts` | JSON 불러오기 |
-| `web/src/lib/supabase.ts` | anon 클라이언트 + 상호작용 기록 |
-| `web/src/lib/liked.ts` | `localStorage` 좋아요 상태 |
+| `web/src/App.tsx` | 라우팅 (`/`, `/:date`, `/archive`) |
+| `web/src/lib/types.ts` | 페이지가 쓰는 타입 |
+| `web/src/lib/supabase.ts` | 클라이언트 하나 (조회 + Auth + 상호작용) |
+| `web/src/lib/data.ts` | `fetchLatest` / `fetchDay` / `fetchArchive` |
+| `web/src/lib/auth.ts` | 세션 훅과 로그인·로그아웃 |
 | `web/src/components/Card.tsx` | 글 한 건 |
+| `web/src/components/LikeButton.tsx` | 좋아요 토글 |
+| `web/src/components/Note.tsx` | 메모·태그 |
+| `web/src/components/SignIn.tsx` | 로그인 (쓰기를 누를 때만 뜬다) |
 | `web/src/components/Today.tsx` | 오늘 화면 (0건 포함) |
 | `web/src/components/Archive.tsx` | 날짜 아카이브 |
-| `web/src/components/Note.tsx` | 메모·태그 |
 | `docs/robots.txt` | 색인 차단 |
 | `docs/.nojekyll` | Jekyll 처리 끄기 |
 | `docs/404.html` | SPA 라우팅 폴백 |
+| `design/` | **설계·계획 문서** (Task 1에서 `docs/`에서 옮긴다) |
+
+**삭제되는 것:** `pipeline/render.py`, `tests/test_render.py`, `docs/data/`, `web/src/lib/liked.ts` — 초판에 있었고 이 개정판에서는 만들지 않는다.
 
 ---
 
@@ -136,602 +191,398 @@ div 메타               11.5px / Inter / #6B6862 — 출처 · 점수 · [좋�
 | 요구사항 | 내용 | 태스크 |
 |---|---|---|
 | O9 | 웹페이지: 오늘자 + 날짜별 아카이브 | Task 7 (오늘), Task 8 (아카이브) |
-| O10 | 모바일 1열 / 태블릿 이상 2열 | Task 7 (`md:grid-cols-2`), Task 13 Step 4 (실제 확인) |
-| O11 | SPA + JSON 런타임 로딩 (파이프라인과 프론트 분리) | Task 2 (`render`), Task 5 (`data.ts`), **Task 14 Step 1이 분리를 검증한다** |
+| O10 | 모바일 1열 / 태블릿 이상 2열 | Task 7 (`md:grid-cols-2`), Task 14 Step 4 (실제 확인) |
+| O11 | 파이프라인과 프론트엔드 분리 | **Task 5** — 페이지가 Supabase를 직접 조회하므로 파이프라인은 DB에만 쓴다. **Task 15 Step 1이 분리를 검증한다** (빌드·커밋 없이 DB에 행을 넣어 새 날짜가 보이는지) |
 | O12 | GitHub Pages SPA 라우팅 (`404.html` 폴백) | Task 9 |
-| O13 | 좋아요·클릭·메모 저장 | Task 10 (좋아요·클릭), Task 11 (메모·태그) |
-| O14 | accent는 상호작용에만 | Task 4 (토큰 주석) — 쓰는 곳은 `LikeButton`, 메모 저장 버튼, 메모 열기 버튼, 에러 화면의 링크뿐이다 |
-| D3 | 본문은 리포지토리에 커밋되지 않는다 | Task 2 (`PAGE_FIELDS` 화이트리스트 + `test_본문과_판단근거는_담지_않는다`) |
-| D4 | 검색 색인 차단 (`robots.txt` + `noindex`) | Task 4 (메타 태그), Task 12 (`robots.txt`) |
+| O13 | 좋아요·클릭·메모 저장 | Task 11 (좋아요·클릭), Task 12 (메모·태그) |
+| O14 | accent는 상호작용에만 | Task 4 (토큰 주석) — 쓰는 곳은 `LikeButton`, 메모 저장·열기 버튼, 로그인 버튼, 에러 화면의 링크뿐 |
+| D2 | 본문은 공개되지 않는다 | **구조적**: `article_bodies`에 anon·authenticated 권한이 없다. Task 2 Step 6이 재검증한다 |
+| D3 | 본문은 리포지토리에 커밋되지 않는다 | **구조적으로 더 강해졌다**: 리포지토리에 기사 데이터를 **아무것도** 커밋하지 않는다. `docs/data/`가 없다 |
+| D4 | 검색 색인 차단 (`robots.txt` + `noindex`) | Task 3 (메타 태그), Task 13 (`robots.txt`) |
+| D8 | 0건인 날의 후보 수·최고 점수를 남긴다 | **Task 2**가 `runs.briefing_date`를 추가해 페이지가 이 데이터에 도달하게 한다. Task 7이 표시한다 |
+
+> **요구사항 문서를 함께 갱신한다.** O11의 문구가 "SPA + JSON 런타임 로딩"이고 검증이 "JSON만 커밋해 새 날짜가 보이는지"다. 의도(파이프라인과 프론트 분리)는 그대로지만 수단이 바뀌었으므로 `design/superpowers/specs/2026-11-11-requirements.md`의 O11·O13·D3 행을 Task 15 Step 5에서 고친다.
 
 ---
 
-## 실행 순서 주의 — Task 6과 10의 의존
+## 실행 순서 주의 — Task 6과 11의 의존
 
-`Card.tsx`(Task 6)가 `LikeButton`(Task 10)을 임포트한다. **Task 6만 끝낸
-상태에서는 `npm run build`가 실패한다.**
+`Card.tsx`(Task 6)가 `LikeButton`(Task 11)과 `Note`(Task 12)를 임포트한다. **Task 6만 끝낸 상태에서는 `npm run build`가 실패한다.**
 
-카드를 먼저 쓴 이유는 그게 `LikeButton`이 무엇을 받아야 하는지를 정하기
-때문이다(`articleId`, `className`). 각 커밋이 빌드되기를 원하면 **Task 10의
-Step 1~4를 Task 6보다 먼저** 하면 된다 — 그 둘 사이에 다른 의존은 없다.
+카드를 먼저 쓴 이유는 그게 두 컴포넌트가 무엇을 받아야 하는지를 정하기 때문이다(`articleId`, `className`). 각 커밋이 빌드되기를 원하면 **Task 11과 12를 Task 6보다 먼저** 하면 된다 — 그 사이에 다른 의존은 없다. 다만 Task 11·12는 Task 10(인증)을 필요로 하므로, 그 경우 순서는 **10 → 11 → 12 → 6 → 7 → 8 → 9**가 된다.
 
-나머지 태스크는 순서대로 하면 각 커밋이 빌드된다.
+나머지 태스크는 번호대로 하면 각 커밋이 빌드된다.
 
 ---
 
-## Task 1: 리포지토리 공개 전환
+## Task 1: 설계 문서를 `docs/` 밖으로 옮긴다
 
-Pages가 무료 플랜에서 비공개 리포를 지원하지 않으므로 **이것이 선행 조건**이다.
-`docs/공개-전-점검.md`의 판단 항목을 먼저 정리한다.
+`docs/`가 GitHub Pages의 웹 루트가 되므로, 거기 있는 설계·계획 문서는 **브리핑 URL을 아는 사람에게 웹에서 열린다.** 배포 전에 옮긴다.
 
 **Files:**
-- Modify: `docs/공개-전-점검.md`
-- Modify: `config/sources.yaml` (문구만)
+- Move: `docs/superpowers/` → `design/superpowers/`
+- Move: `docs/공개-전-점검.md` → `design/공개-전-점검.md`
+- Modify: `README.md`, `design/superpowers/specs/2026-11-10-it-column-automation-design.md`, `design/공개-전-점검.md` (경로 참조)
 
-- [ ] **Step 1: 판단 항목 2번을 읽고 결정한다**
-
-`docs/공개-전-점검.md`의 "2. 본인이 판단할 것"에 두 항목이 있다.
-
-**(a) `config/interests.md` — 개인 프로필 49줄.** 그대로 둘지, 일반화할지 정한다.
-그대로 두는 쪽을 권한다 — 이 파일이 선별 품질의 핵심이고, 예시가 빈약하면
-리포를 받은 사람이 재현할 수 없다. 내용은 기술 관심사 서술이라 공개 이력서 수준이다.
-
-**(b) 실명 매체·기업에 대한 판단 문구.** 아래 문장들은 전부 측정 근거가 붙어
-있지만 **평가가 섞인 것만** 사실 서술로 바꾼다.
+- [ ] **Step 1: 옮긴다**
 
 ```bash
-grep -n "중단으로 본다\|더 이상 IT 매체 피드가 아니다" config/sources.yaml
+cd "$(git rev-parse --show-toplevel)"
+mkdir -p design
+git mv docs/superpowers design/superpowers
+git mv docs/공개-전-점검.md design/공개-전-점검.md
 ```
 
-바꿀 것:
-
-```yaml
-# 전
-  # 끔 — 최신 글이 2024-10-14 — 13개월 무발행. 느린 발행이 아니라 중단으로 본다.
-# 후
-  # 끔 — 최신 글이 2024-10-14 (13개월 전). 다시 올라오면 켠다.
-```
-
-```yaml
-# 전
-  # 끔 — 더 이상 IT 매체 피드가 아니다. 같은 도메인의 다른 섹션
-# 후
-  # 끔 — 같은 도메인의 다른 섹션(/rss/S1N4.xml)이 "파인데일리 - 예술"을
-  #      돌려준다. 받아 본 4건도 일반 경제·금융이었다.
-```
-
-- [ ] **Step 2: 내용 검사를 다시 돌린다**
+- [ ] **Step 2: `docs/`에 남은 것을 확인한다**
 
 ```bash
-git ls-files -z | xargs -0 grep -nE \
-  '/Users/|/private/tmp/claude-|[a-z0-9]{15,}\.supabase\.co|sb_secret_[A-Za-z0-9]|sk-ant-[A-Za-z0-9]|eyJ[A-Za-z0-9_-]{20,}'
+git ls-files docs/
 ```
 
-Expected: `scripts/smoke_supabase.py`와 계획 문서의 `sb_secret_sentinel_...` 2건만
-나온다. **그 밖에 하나라도 나오면 멈춘다.**
+Expected: **아무것도 나오지 않는다.** 아직 빌드 산출물이 없으므로 `docs/`는 비어 있어야 한다. 무언가 남아 있으면 그것이 웹에 공개될 파일이므로 지금 판단한다.
+
+- [ ] **Step 3: 경로 참조를 고친다**
 
 ```bash
-git log --all --format="%ae %ce" | sort -u
+cd "$(git rev-parse --show-toplevel)"
+git ls-files -z | xargs -0 grep -ln 'docs/superpowers\|docs/공개-전-점검'
 ```
 
-Expected: `242947563+predevho@users.noreply.github.com`만 나온다.
-
-- [ ] **Step 3: 커밋**
+나온 파일에서 `docs/superpowers` → `design/superpowers`, `docs/공개-전-점검` → `design/공개-전-점검`으로 바꾼다.
 
 ```bash
-git add config/sources.yaml docs/공개-전-점검.md
-git commit -m "docs: 공개 전환 준비 — 소스 주석을 사실 서술로"
-git push origin main
+git ls-files -z | xargs -0 perl -pi -e 's{docs/superpowers}{design/superpowers}g; s{docs/공개-전-점검}{design/공개-전-점검}g'
 ```
 
-- [ ] **Step 4: 공개로 전환**
+> `perl -pi`를 쓰는 이유: BSD `sed -i`는 빈 확장자 인자를 요구해 플랫폼마다 다르고, 한글 경로가 섞이면 zsh에서 따옴표 처리가 까다롭다.
+
+- [ ] **Step 4: 남은 참조가 없는지 확인한다**
 
 ```bash
-gh repo edit predevho/topic-briefing --visibility public --accept-visibility-change-consequences
-gh repo view predevho/topic-briefing --json visibility -q .visibility
+git ls-files -z | xargs -0 grep -n 'docs/superpowers\|docs/공개-전-점검'
 ```
 
-Expected: `PUBLIC`
+Expected: 아무것도 나오지 않는다.
 
-- [ ] **Step 5: 점검 문서를 갱신하고 커밋**
+- [ ] **Step 5: 점검 문서에 이 조치를 기록한다**
 
-`docs/공개-전-점검.md`의 머리말을 "이 리포지토리는 **공개**다. 아래는 공개 당시의
-점검 기록이다."로 바꾸고, 2번 항목에 내린 결정을 적는다.
+`design/공개-전-점검.md`의 "3. 검토했고 공개해도 되는 것" 표에 한 줄 추가한다.
+
+```markdown
+| 설계·계획 문서 | `design/`에 있다. **`docs/`는 웹 루트이므로 그쪽에 두면 브리핑 URL을 아는 사람이 웹에서 열 수 있다**(2026-11-13 Task 1에서 옮겼다). 리포지토리가 공개이므로 GitHub에서는 보이지만, 그것은 의도한 공개다 |
+```
+
+- [ ] **Step 6: 테스트와 커밋**
 
 ```bash
-git add docs/공개-전-점검.md
-git commit -m "docs: 공개 전환 완료 기록"
+cd "$(git rev-parse --show-toplevel)"
+.venv/bin/python -m pytest -q
+```
+
+Expected: 396 passed. **문서만 옮겼으므로 하나도 깨지지 않아야 한다.** 깨지면 테스트가 문서 경로를 참조하고 있다는 뜻이므로 그것을 고친다.
+
+```bash
+git add -A
+git commit -m "refactor: 설계 문서를 design/으로 — docs/는 웹 루트다"
 git push origin main
 ```
 
 ---
 
-## Task 2: `render` — Supabase에서 날짜별 JSON을 떨어뜨린다
+## Task 2: 스키마 — 컬럼 단위 grant, `runs.briefing_date`, 인증 RLS
+
+이 태스크가 **계획 1의 완료된 스키마와 `record_run`을 고친다.** 이 계획에서 유일하게 그렇게 하는 부분이고, 이유는 "제약 2"와 "제약 4"에 있다.
 
 **Files:**
-- Create: `pipeline/render.py`
-- Create: `tests/test_render.py`
-- Modify: `tests/fakes.py` (`FakeRemoteStore`에 조회 메서드 추가)
+- Create: `supabase/migrations/2026-11-13-page-direct-read.sql`
+- Modify: `supabase/schema.sql`
+- Modify: `supabase/verify_permissions.sql`
+- Modify: `pipeline/lib/store.py`, `pipeline/notify.py`, `scripts/smoke_supabase.py`
+- Modify: `tests/fakes.py`, `tests/test_remote_store.py`
+- Test: `tests/test_remote_store.py`
 
-> **왜 `briefing.json`을 읽지 않는가** — 이 계획 맨 앞 "계획 1에서 확인한 제약"의
-> 1번이다. `article_id`가 필요하고, `articles` 테이블에 본문 컬럼이 없어서
-> 요구사항 D3이 구조적으로 보장된다.
+- [ ] **Step 1: 실패하는 테스트를 쓴다 — `briefing_date`를 받는다**
 
-- [ ] **Step 1: 저장소 프로토콜에 조회 메서드를 더하는 테스트**
-
-`tests/test_render.py`:
-
-```python
-import json
-
-import pytest
-
-from pipeline.render import (
-    DATA_DIR,
-    build_day,
-    build_index,
-    write_day,
-    write_index,
-)
-
-ARTICLES = [
-    {
-        "id": 7,
-        "briefing_date": "2026-11-12",
-        "url": "https://toss.tech/article/agent-platform-foundation",
-        "source": "토스_기술블로그",
-        "published_at": "2026-11-10T05:30:00+00:00",
-        "headline": "망분리 환경 Agent Platform 설계",
-        "bullets": ["하네스마다 격리했다.", "인증 프록시가 키를 주입한다."],
-        "why_it_matters": "프로세스 수준 격리의 설계 기준이 된다.",
-        "topic": "AI",
-        "score": 100,
-        "reason": "관심사 정중앙",
-    },
-    {
-        "id": 8,
-        "briefing_date": "2026-11-12",
-        "url": "https://blog.cloudflare.com/choosing-quepaxa",
-        "source": "Cloudflare_Blog",
-        "published_at": "2026-11-11T01:00:00+00:00",
-        "headline": "Cloudflare가 QuePaxa를 택한 이유",
-        "bullets": ["리더 기반 합의는 WAN에서 멈춘다."],
-        "why_it_matters": "가용성 한계와 대안을 이해하게 된다.",
-        "topic": "backend",
-        "score": 98,
-        "reason": "원리 분석",
-    },
-]
-
-RUN = {
-    "window_start": "2026-11-07T16:20:25+00:00",
-    "window_end": "2026-11-11T16:20:25+00:00",
-    "collected_count": 240,
-    "considered_count": 10,
-    "max_score": 100,
-    "published_count": 2,
-    "source_counts": {"토스_기술블로그": 3, "조용한소스": 0},
-}
-
-
-# --- 하루치 JSON ---
-
-def test_글을_점수_내림차순으로_담는다():
-    day = build_day(date="2026-11-12", articles=ARTICLES, run=RUN)
-    assert [a["score"] for a in day["articles"]] == [100, 98]
-
-
-def test_페이지가_필요한_필드를_담는다():
-    day = build_day(date="2026-11-12", articles=ARTICLES, run=RUN)
-    first = day["articles"][0]
-
-    for key in ("id", "headline", "bullets", "why_it_matters",
-                "source", "url", "published_at", "topic", "score"):
-        assert key in first, key
-
-
-def test_article_id를_담는다():
-    """페이지가 reactions·clicks에 삽입할 때 FK로 쓴다. 없으면 좋아요가 안 된다."""
-    day = build_day(date="2026-11-12", articles=ARTICLES, run=RUN)
-    assert day["articles"][0]["id"] == 7
-
-
-def test_본문과_판단근거는_담지_않는다():
-    """D3 — 본문은 리포지토리에 커밋되지 않는다. reason은 화면에 쓰지 않는다."""
-    day = build_day(date="2026-11-12", articles=ARTICLES, run=RUN)
-    첫째 = day["articles"][0]
-
-    assert "body" not in 첫째
-    assert "excerpt" not in 첫째
-    assert "reason" not in 첫째
-
-
-def test_0건인_날에_필요한_수치를_담는다():
-    """화면이 "후보 10건 / 최고 100점 / 기준 60점"을 보여준다."""
-    day = build_day(date="2026-11-12", articles=[], run=RUN)
-
-    assert day["collected"] == 240
-    assert day["considered"] == 10
-    assert day["max_score"] == 100
-    assert day["threshold"] == 60
-
-
-def test_임계값은_summarize에서_가져온다():
-    """두 곳에 하드코딩하면 어긋난다."""
-    from pipeline.summarize import SCORE_THRESHOLD
-
-    day = build_day(date="2026-11-12", articles=[], run=RUN)
-    assert day["threshold"] == SCORE_THRESHOLD
-
-
-def test_소스별_건수를_담는다():
-    """0건인 날 화면이 "토스 0건 · 3일 연속"을 보여주는 재료다."""
-    day = build_day(date="2026-11-12", articles=[], run=RUN)
-    assert day["source_counts"]["조용한소스"] == 0
-
-
-def test_날짜를_담는다():
-    day = build_day(date="2026-11-12", articles=ARTICLES, run=RUN)
-    assert day["date"] == "2026-11-12"
-
-
-def test_실행_기록이_없으면_수치를_None으로_둔다():
-    """글은 있는데 runs 조회가 비는 경우. 0으로 두면 "수집 0건"이라 거짓말한다."""
-    day = build_day(date="2026-11-12", articles=ARTICLES, run=None)
-
-    assert day["collected"] is None
-    assert day["max_score"] is None
-    assert day["source_counts"] == {}
-
-
-# --- 아카이브 목록 ---
-
-def test_아카이브를_최신순으로_담는다():
-    index = build_index([
-        {"briefing_date": "2026-11-10", "count": 5, "lead": "앞의 글"},
-        {"briefing_date": "2026-11-12", "count": 2, "lead": "뒤의 글"},
-    ])
-    assert [d["date"] for d in index["dates"]] == ["2026-11-12", "2026-11-10"]
-
-
-def test_아카이브에_건수와_대표_헤드라인을_담는다():
-    """목록이 "11/10  MCP 스펙 2.0 외 4건  5건" 형태다."""
-    index = build_index([
-        {"briefing_date": "2026-11-12", "count": 2, "lead": "망분리 환경 Agent Platform 설계"},
-    ])
-    first = index["dates"][0]
-
-    assert first["count"] == 2
-    assert first["lead"] == "망분리 환경 Agent Platform 설계"
-
-
-def test_0건인_날도_아카이브에_넣는다():
-    """목업의 "11/06  기준을 넘긴 글 없음  0건" 줄이다. articles만 보면 빠진다."""
-    index = build_index([
-        {"briefing_date": "2026-11-06", "count": 0, "lead": None},
-    ])
-    assert index["dates"][0]["count"] == 0
-    assert index["dates"][0]["lead"] is None
-
-
-def test_아카이브_총계를_담는다():
-    """목업 머리말이 "발행 시작 후 19일 · 총 71건"이다."""
-    index = build_index([
-        {"briefing_date": "2026-11-12", "count": 2, "lead": "a"},
-        {"briefing_date": "2026-11-10", "count": 5, "lead": "b"},
-    ])
-    assert index["days"] == 2
-    assert index["total"] == 7
-
-
-def test_빈_아카이브도_만들어진다():
-    index = build_index([])
-    assert index == {"dates": [], "days": 0, "total": 0}
-
-
-# --- 파일로 쓰기 ---
-
-def test_하루치를_날짜_파일명으로_쓴다(tmp_path):
-    path = write_day(build_day(date="2026-11-12", articles=ARTICLES, run=RUN),
-                     root=tmp_path)
-
-    assert path.name == "2026-11-12.json"
-    assert json.loads(path.read_text(encoding="utf-8"))["date"] == "2026-11-12"
-
-
-def test_한글이_그대로_저장된다(tmp_path):
-    """ensure_ascii가 켜지면 \\uXXXX가 되어 눈으로 디버깅할 수 없다."""
-    path = write_day(build_day(date="2026-11-12", articles=ARTICLES, run=RUN),
-                     root=tmp_path)
-    assert "망분리" in path.read_text(encoding="utf-8")
-
-
-def test_아카이브를_index_json으로_쓴다(tmp_path):
-    path = write_index(build_index([]), root=tmp_path)
-    assert path.name == "index.json"
-
-
-def test_기본_경로가_docs_data다():
-    """GitHub Pages가 docs/를 서빙한다. 스펙 7.5의 영구 보관 위치다."""
-    assert DATA_DIR.as_posix().endswith("docs/data")
-```
-
-- [ ] **Step 2: 실패를 확인**
-
-Run: `.venv/bin/python -m pytest tests/test_render.py`
-Expected: FAIL — `ModuleNotFoundError: No module named 'pipeline.render'`
-
-- [ ] **Step 3: `RemoteStore`에 조회 메서드를 더한다**
-
-`pipeline/lib/store.py`의 `RemoteStore` Protocol에 추가:
+`tests/test_remote_store.py`에 추가한다.
 
 ```python
-    def articles_for(self, briefing_date: str) -> list[dict]:
-        """그 날짜에 발행한 글. render가 쓴다 — 본문은 다른 테이블이라 안 온다."""
-        ...
+def test_실행_이력에_브리핑_날짜를_남긴다():
+    """0건인 날은 articles 행이 없으므로 runs가 그 날짜의 유일한 기록이다.
+    날짜 컬럼이 없으면 페이지가 "파이프라인이 안 돌았다"와 구별할 수 없다.
+    """
+    fake = FakeRemoteStore()
 
-    def run_for(self, briefing_date: str) -> dict | None:
-        """그 날짜의 전송 성공 실행 기록. 0건인 날 화면의 수치를 준다."""
-        ...
-
-    def archive_days(self) -> list[dict]:
-        """전송한 모든 날짜와 건수·대표 헤드라인. 0건인 날도 포함한다."""
-        ...
-```
-
-`SupabaseStore`에 구현:
-
-```python
-    def articles_for(self, briefing_date: str) -> list[dict]:
-        return (
-            self._db.table("articles")
-            .select("id,briefing_date,url,source,published_at,headline,"
-                    "bullets,why_it_matters,topic,score")
-            .eq("briefing_date", briefing_date)
-            .order("score", desc=True)
-            .execute()
-            .data
-        )
-
-    def run_for(self, briefing_date: str) -> dict | None:
-        # 하루에 여러 번 보낼 수 있으므로(--force) 마지막 성공을 쓴다.
-        rows = (
-            self._db.table("runs")
-            .select("window_start,window_end,collected_count,considered_count,"
-                    "max_score,published_count,source_counts")
-            .eq("status", "sent")
-            .gte("sent_at", f"{briefing_date}T00:00:00+09:00")
-            .lt("sent_at", f"{briefing_date}T23:59:59.999+09:00")
-            .order("sent_at", desc=True)
-            .limit(1)
-            .execute()
-            .data
-        )
-        return rows[0] if rows else None
-
-    def archive_days(self) -> list[dict]:
-        """전송한 날짜 목록. articles만 보면 0건인 날이 빠진다."""
-        runs = (
-            self._db.table("runs")
-            .select("sent_at,published_count")
-            .eq("status", "sent")
-            .order("sent_at", desc=True)
-            .execute()
-            .data
-        )
-        arts = (
-            self._db.table("articles")
-            .select("briefing_date,headline,score")
-            .order("score", desc=True)
-            .execute()
-            .data
-        )
-
-        # 날짜별 대표 헤드라인 = 그 날 최고 점수의 헤드라인.
-        # score 내림차순으로 받았으므로 처음 만난 것이 최고다.
-        lead: dict[str, str] = {}
-        count: dict[str, int] = {}
-        for a in arts:
-            d = a["briefing_date"]
-            lead.setdefault(d, a["headline"])
-            count[d] = count.get(d, 0) + 1
-
-        # sent_at(UTC)에서 KST 날짜를 만든다. briefing_date와 같은 기준이다.
-        날짜들: list[str] = []
-        for r in runs:
-            d = datetime.fromisoformat(r["sent_at"]).astimezone(KST).date().isoformat()
-            if d not in 날짜들:
-                날짜들.append(d)
-
-        return [
-            {"briefing_date": d, "count": count.get(d, 0), "lead": lead.get(d)}
-            for d in 날짜들
-        ]
-```
-
-`store.py` 상단에 `from pipeline.lib.timeutil import KST`를 더한다
-(`datetime`은 이미 임포트돼 있다).
-
-`tests/fakes.py`의 `FakeRemoteStore`에 추가:
-
-```python
-    def articles_for(self, briefing_date: str) -> list[dict]:
-        return [a for a in self.articles_rows
-                if a["briefing_date"] == briefing_date]
-
-    def run_for(self, briefing_date: str) -> dict | None:
-        return self.run_row
-
-    def archive_days(self) -> list[dict]:
-        return list(self.archive_rows)
-```
-
-`FakeRemoteStore.__init__`에 세 줄 더한다:
-
-```python
-        self.articles_rows: list[dict] = []
-        self.run_row: dict | None = None
-        self.archive_rows: list[dict] = []
-```
-
-- [ ] **Step 4: `pipeline/render.py` 작성**
-
-```python
-"""05 렌더: Supabase에서 날짜별 JSON을 떨어뜨린다 (계획 2).
-
-**`briefing.json`을 읽지 않고 Supabase `articles`를 읽는다.** 이유가 셋이다.
-
-- 페이지가 `reactions`·`clicks`에 삽입할 때 쓰는 `article_id`가 필요하다.
-  `save_articles`는 id를 돌려주지 않으므로 파이프라인 안에 남지 않는다.
-- `articles` 테이블에는 **본문 컬럼이 아예 없다**(본문은 `article_bodies`).
-  그래서 요구사항 D3(본문 미커밋)이 구조적으로 보장된다 — 넣을 경로가 없다.
-- `articles`가 페이지에 필요한 것을 모두 갖고 있다.
-
-산출물은 `docs/data/`에 들어가고 **커밋한다**(스펙 7.5: 영구 보관).
-GitHub Pages가 `docs/`를 서빙한다.
-
-실행:
-  python -m pipeline.render                  # 오늘자 + 아카이브 목록
-  python -m pipeline.render --date 2026-11-10 # 특정 날짜 다시 만들기
-"""
-
-import argparse
-import json
-from datetime import datetime, timezone
-from pathlib import Path
-
-from pipeline.lib.secrets import require
-from pipeline.lib.store import RemoteStore, SupabaseStore
-from pipeline.lib.timeutil import KST
-from pipeline.summarize import SCORE_THRESHOLD
-
-# GitHub Pages가 서빙하는 위치. 빌드 산출물과 같은 디렉터리를 쓴다.
-DATA_DIR = Path("docs/data")
-
-# 페이지에 내보내는 필드. **여기에 없는 것은 나가지 않는다** —
-# body·excerpt·reason이 실수로 끼어드는 것을 막는 화이트리스트다.
-PAGE_FIELDS = (
-    "id", "headline", "bullets", "why_it_matters",
-    "source", "url", "published_at", "topic", "score",
-)
-
-
-def build_day(*, date: str, articles: list[dict], run: dict | None) -> dict:
-    """하루치 페이지 데이터."""
-    고른것 = [
-        {k: a[k] for k in PAGE_FIELDS}
-        for a in sorted(articles, key=lambda a: a["score"], reverse=True)
-    ]
-    return {
-        "date": date,
-        "articles": 고른것,
-        # 0건인 날 화면이 "후보 N건 / 최고 M점 / 기준 60점"을 보여준다.
-        # 기록이 없으면 None으로 둔다 — 0으로 두면 "수집 0건"이라 거짓말한다.
-        "collected": run["collected_count"] if run else None,
-        "considered": run["considered_count"] if run else None,
-        "max_score": run["max_score"] if run else None,
-        "threshold": SCORE_THRESHOLD,
-        "source_counts": run["source_counts"] if run else {},
-    }
-
-
-def build_index(days: list[dict]) -> dict:
-    """아카이브 목록. 0건인 날도 들어간다."""
-    정렬 = sorted(days, key=lambda d: d["briefing_date"], reverse=True)
-    return {
-        "dates": [
-            {"date": d["briefing_date"], "count": d["count"], "lead": d.get("lead")}
-            for d in 정렬
-        ],
-        "days": len(정렬),
-        "total": sum(d["count"] for d in 정렬),
-    }
-
-
-def _write(name: str, payload: dict, root: Path | None) -> Path:
-    directory = root or DATA_DIR
-    directory.mkdir(parents=True, exist_ok=True)
-    path = directory / name
-    # ensure_ascii=False여야 한글이 그대로 저장된다. 기본값이면 \uXXXX가 되어
-    # 커밋 diff를 눈으로 읽을 수 없다.
-    path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
+    fake.record_run(
+        briefing_date="2026-11-13",
+        window_start=datetime(2026, 11, 12, 22, 20, tzinfo=timezone.utc),
+        window_end=datetime(2026, 11, 13, 22, 20, tzinfo=timezone.utc),
+        status="sent",
+        sent_at=datetime(2026, 11, 13, 22, 20, tzinfo=timezone.utc),
+        collected_count=240,
+        considered_count=10,
+        max_score=52,
+        published_count=0,
+        source_counts={"토스_기술블로그": 3},
+        input_tokens=42135,
+        errors=[],
     )
-    return path
 
-
-def write_day(day: dict, *, root: Path | None = None) -> Path:
-    return _write(f"{day['date']}.json", day, root)
-
-
-def write_index(index: dict, *, root: Path | None = None) -> Path:
-    return _write("index.json", index, root)
-
-
-def render(*, remote: RemoteStore, date: str, root: Path | None = None) -> tuple[Path, Path]:
-    day = build_day(
-        date=date,
-        articles=remote.articles_for(date),
-        run=remote.run_for(date),
-    )
-    index = build_index(remote.archive_days())
-    return write_day(day, root=root), write_index(index, root=root)
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="페이지 데이터 생성")
-    parser.add_argument("--date", help="기본값은 오늘(KST)")
-    args = parser.parse_args()
-
-    date = args.date or datetime.now(timezone.utc).astimezone(KST).date().isoformat()
-    remote = SupabaseStore(require("SUPABASE_URL"), require("SUPABASE_SECRET_KEY"))
-
-    day_path, index_path = render(remote=remote, date=date)
-    day = json.loads(day_path.read_text(encoding="utf-8"))
-    index = json.loads(index_path.read_text(encoding="utf-8"))
-
-    print(f"{date}: 글 {len(day['articles'])}건 → {day_path}")
-    print(f"아카이브: {index['days']}일 · 총 {index['total']}건 → {index_path}")
-    if not day["articles"]:
-        print(f"  0건인 날이다. 후보 {day['considered']}건 · "
-              f"최고 {day['max_score']}점 · 기준 {day['threshold']}점")
-
-
-if __name__ == "__main__":
-    main()
+    assert fake.runs[0]["briefing_date"] == "2026-11-13"
 ```
 
-- [ ] **Step 5: 통과를 확인**
-
-Run: `.venv/bin/python -m pytest tests/test_render.py`
-Expected: `18 passed`
-
-Run: `.venv/bin/python -m pytest`
-Expected: 전부 통과
-
-- [ ] **Step 6: 실제로 돌려 본다**
+- [ ] **Step 2: 실패를 확인한다**
 
 ```bash
-.venv/bin/python -m pipeline.render
+cd "$(git rev-parse --show-toplevel)"
+.venv/bin/python -m pytest tests/test_remote_store.py::test_실행_이력에_브리핑_날짜를_남긴다 -v
 ```
 
-Expected: `docs/data/2026-11-12.json`과 `docs/data/index.json`이 생기고, 글 7건이
-들어간다(계획 1에서 발행한 것).
+Expected: FAIL — `TypeError: record_run() got an unexpected keyword argument 'briefing_date'`
 
-**본문이 안 들어갔는지 반드시 확인한다:**
+- [ ] **Step 3: `record_run`에 `briefing_date`를 더한다**
 
-```bash
-grep -c "body\|excerpt\|reason" docs/data/2026-11-12.json
+`pipeline/lib/store.py`의 **두 곳**(`RemoteStore` 프로토콜과 `SupabaseStore` 구현)에서 `record_run`의 시그니처 첫 키워드로 넣는다.
+
+```python
+    def record_run(
+        self,
+        *,
+        # 0건인 날은 articles 행이 없다. 이 컬럼이 그 날짜의 유일한 기록이다.
+        briefing_date: str,
+        window_start: datetime,
+        window_end: datetime,
+        status: str,                 # "sent" | "failed"
+        sent_at: datetime | None,    # failed면 None
+        collected_count: int,
+        considered_count: int,
+        max_score: int | None,
+        published_count: int,
+        source_counts: dict[str, int],
+        input_tokens: int | None,
+        errors: list[dict],
+    ) -> None:
 ```
 
-Expected: `0`
+`SupabaseStore` 구현의 삽입 페이로드에도 넣는다.
 
-- [ ] **Step 7: 커밋**
+```python
+            "briefing_date": briefing_date,
+```
+
+- [ ] **Step 4: 호출하는 네 곳을 고친다**
 
 ```bash
-git add pipeline/render.py tests/test_render.py pipeline/lib/store.py tests/fakes.py docs/data/
-git commit -m "feat: 페이지 데이터 생성 — articles에서 읽어 본문 유출 경로를 없앴다"
+cd "$(git rev-parse --show-toplevel)"
+grep -rn 'record_run' pipeline/ scripts/ tests/
+```
+
+- `pipeline/notify.py:60` — `briefing_date`가 **이미 함수 스코프에 있다**(43행). `briefing_date=briefing_date,`를 더하면 끝이다.
+- `scripts/smoke_supabase.py:61` — 스모크 스크립트. 날짜 문자열을 넘긴다.
+- `tests/fakes.py:36` — 가짜 구현. 시그니처를 맞추고 `briefing_date`를 기록한다.
+- `tests/test_remote_store.py:29,50` — 기존 호출 두 곳에 인자를 더한다.
+
+- [ ] **Step 5: 통과를 확인한다**
+
+```bash
+.venv/bin/python -m pytest -q
+```
+
+Expected: 397 passed (기존 396 + 새 1건)
+
+- [ ] **Step 6: 마이그레이션 SQL**
+
+`supabase/migrations/2026-11-13-page-direct-read.sql`:
+
+```sql
+-- 페이지가 Supabase를 직접 조회하도록 권한을 다시 그린다 (계획 2).
+--
+-- 바뀌는 것 세 가지:
+--   1) runs.briefing_date — 0건인 날을 날짜로 찾을 키
+--   2) articles/runs에 **컬럼 단위** SELECT — reason과 errors를 내보내지 않는다
+--   3) 쓰기는 authenticated만 — anon의 reactions/notes 쓰기를 거둔다
+--
+-- 멱등하게 쓴다. 여러 번 돌려도 같은 결과여야 한다.
+
+-- ---------------------------------------------------------------
+-- 1) runs.briefing_date
+-- ---------------------------------------------------------------
+
+alter table public.runs add column if not exists briefing_date date;
+
+-- 기존 행 채우기. sent_at이 없으면(failed) window_end를 쓴다.
+-- KST로 변환하는 이유: 브리핑 날짜는 사람이 읽는 날짜다.
+update public.runs
+   set briefing_date = (coalesce(sent_at, window_end) at time zone 'Asia/Seoul')::date
+ where briefing_date is null;
+
+alter table public.runs alter column briefing_date set not null;
+
+-- 아카이브가 최신순으로 읽으므로 desc.
+create index if not exists runs_briefing_date_idx
+  on public.runs (briefing_date desc);
+
+-- ---------------------------------------------------------------
+-- 2) 컬럼 단위 SELECT
+-- ---------------------------------------------------------------
+
+-- articles: reason(LLM 판단 근거)을 뺀다. 지금은 테이블 통째로 grant돼 있어
+-- ?select=reason으로 읽힌다 — 화면에 안 그려도 API는 열려 있었다.
+revoke select on public.articles from anon;
+
+grant select (id, briefing_date, url, source, published_at,
+              headline, bullets, why_it_matters, topic, score)
+  on public.articles to anon;
+
+-- 로그인한 뒤에도 페이지를 읽는다. authenticated는 anon과 **다른 역할**이므로
+-- 따로 주지 않으면 로그인하자마자 화면이 빈다.
+grant select (id, briefing_date, url, source, published_at,
+              headline, bullets, why_it_matters, topic, score)
+  on public.articles to authenticated;
+
+create policy articles_auth_read on public.articles
+  for select to authenticated using (true);
+
+-- runs: 0건인 날의 수치만. errors(내부 오류 메시지)·input_tokens·window_*·id는
+-- 주지 않는다.
+grant select (briefing_date, status, collected_count, considered_count,
+              max_score, published_count, source_counts)
+  on public.runs to anon, authenticated;
+
+create policy runs_public_read on public.runs
+  for select to anon using (status = 'sent');
+
+create policy runs_auth_read on public.runs
+  for select to authenticated using (status = 'sent');
+
+-- briefing_index: 아카이브 화면용. **날짜당 한 행**을 준다.
+--
+-- 이게 없으면 아카이브가 기사 전체를 받아 브라우저에서 집계해야 하고,
+-- PostgREST의 기본 상한(1000행)에 조용히 걸린다. 날짜당 한 행이면 5년이
+-- 지나도 2천 행 아래다.
+--
+-- security_invoker = true: 뷰가 **호출자의 권한으로** 돈다. 그래서 위에서
+-- 준 컬럼 grant와 RLS가 그대로 적용된다. false(기본값, definer)로 두면
+-- RLS를 우회하므로 쓰지 않는다.
+create or replace view public.briefing_index
+  with (security_invoker = true) as
+select
+  briefing_date,
+  count(*)::int                                     as count,
+  -- 그 날짜의 최고 점수 헤드라인. 아카이브가 "<lead> 외 N건"으로 그린다.
+  (array_agg(headline order by score desc))[1]      as lead
+from public.articles
+group by briefing_date;
+
+grant select on public.briefing_index to anon, authenticated;
+
+-- ---------------------------------------------------------------
+-- 3) 쓰기는 로그인한 사용자만
+-- ---------------------------------------------------------------
+
+-- reactions: anon INSERT를 거둔다. ERD 3.2.1이 걱정한 "낯선 사람의 클릭이
+-- 내 기준을 바꾼다"가 여기서 닫힌다.
+drop policy if exists reactions_public_insert on public.reactions;
+revoke insert on public.reactions from anon;
+
+grant select, insert, delete on public.reactions to authenticated;
+
+-- (select auth.uid())로 감싸는 이유: 행마다 재평가되지 않고 한 번만 계산된다.
+create policy reactions_own_read on public.reactions
+  for select to authenticated using ((select auth.uid()) = user_id);
+create policy reactions_own_insert on public.reactions
+  for insert to authenticated with check ((select auth.uid()) = user_id);
+-- DELETE는 먼저 SELECT로 행을 찾는다. 위의 read 정책이 그것을 받친다.
+create policy reactions_own_delete on public.reactions
+  for delete to authenticated using ((select auth.uid()) = user_id);
+
+-- notes: 추가 전용을 유지한다. UPDATE·DELETE를 주지 않으므로 수정 이력이 남고,
+-- 화면에서는 가장 최근 행을 읽어 제자리 수정처럼 보인다.
+drop policy if exists notes_public_read on public.notes;
+drop policy if exists notes_public_insert on public.notes;
+revoke select, insert on public.notes from anon;
+
+grant select, insert on public.notes to authenticated;
+
+create policy notes_own_read on public.notes
+  for select to authenticated using ((select auth.uid()) = user_id);
+create policy notes_own_insert on public.notes
+  for insert to authenticated with check ((select auth.uid()) = user_id);
+
+-- clicks: 로그인 전에도 눌린다. anon INSERT(user_id is null)를 유지하고
+-- 로그인 사용자도 자기 id로 넣게 한다.
+grant insert on public.clicks to authenticated;
+create policy clicks_own_insert on public.clicks
+  for insert to authenticated with check ((select auth.uid()) = user_id);
+```
+
+- [ ] **Step 7: Supabase에 적용한다**
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+# MCP의 execute_sql이나 대시보드 SQL 편집기에 붙여 넣는다.
+# supabase CLI가 연결돼 있으면:
+#   supabase db query < supabase/migrations/2026-11-13-page-direct-read.sql
+cat supabase/migrations/2026-11-13-page-direct-read.sql
+```
+
+적용 뒤 어드바이저를 돌린다.
+
+```bash
+supabase db advisors   # CLI v2.81.3+. 없으면 MCP get_advisors
+```
+
+Expected: 새로운 보안 경고가 없다.
+
+- [ ] **Step 8: `schema.sql`을 현재 상태로 맞춘다**
+
+마이그레이션은 델타이고 `schema.sql`은 **새 프로젝트가 같은 결과를 얻는 원본**이다. 둘이 어긋나면 나중에 재현이 안 된다.
+
+1. `runs` 테이블 정의에 `briefing_date date not null`을 넣는다
+2. `runs_briefing_date_idx` 인덱스를 넣는다
+3. grant·policy 절을 마이그레이션의 최종 상태로 교체한다
+4. 머리말의 경계 설명을 고친다
+
+```sql
+--   articles        — 요약·링크. anon/authenticated **컬럼 단위** 읽기 (reason 제외)
+--   article_bodies  — 기사 본문. anon·authenticated 접근 전면 차단
+--   runs            — 실행 이력. **컬럼 단위** 읽기 (errors·input_tokens 제외)
+--   reactions       — authenticated만. 자기 행만 읽기·삽입·삭제
+--   clicks          — anon 삽입(user_id null) + authenticated 자기 행 삽입
+--   notes           — authenticated만. 자기 행만 읽기·삽입 (추가 전용)
+--   kakao_auth      — 토큰. 접근 차단 (계획 3)
+```
+
+- [ ] **Step 9: 권한을 실측한다**
+
+`scripts/verify_anon_access.sh`가 "본문이 anon에게 막히는지"를 확인한다(요구사항 D2). 이번 변경으로 확인할 것이 늘었다. 스크립트에 세 가지를 더한다.
+
+```bash
+# anon이 reason을 읽을 수 없어야 한다 (컬럼 단위 grant)
+curl -s "$SUPABASE_URL/rest/v1/articles?select=reason&limit=1" \
+  -H "apikey: $KEY" -H "Authorization: Bearer $KEY" | tee /dev/stderr | grep -q '42501\|permission denied' \
+  && echo "✓ reason 차단" || { echo "✗ reason이 읽힌다"; exit 1; }
+
+# anon이 runs의 errors를 읽을 수 없어야 한다
+curl -s "$SUPABASE_URL/rest/v1/runs?select=errors&limit=1" \
+  -H "apikey: $KEY" -H "Authorization: Bearer $KEY" | grep -q '42501\|permission denied' \
+  && echo "✓ runs.errors 차단" || { echo "✗ runs.errors가 읽힌다"; exit 1; }
+
+# anon이 reactions에 삽입할 수 없어야 한다
+curl -s -X POST "$SUPABASE_URL/rest/v1/reactions" \
+  -H "apikey: $KEY" -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: application/json" -d '{"article_id": 1}' \
+  | grep -q '42501\|permission denied' \
+  && echo "✓ anon 좋아요 차단" || { echo "✗ anon이 좋아요를 넣는다"; exit 1; }
+```
+
+- [ ] **Step 10: 커밋**
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+.venv/bin/python -m pytest -q
+git add supabase/ pipeline/ scripts/ tests/
+git commit -m "feat: 페이지 직접 조회용 권한 — 컬럼 grant, runs.briefing_date, 인증 RLS"
+git push origin main
 ```
 
 ---
@@ -740,20 +591,13 @@ git commit -m "feat: 페이지 데이터 생성 — articles에서 읽어 본문
 
 **Files:**
 - Create: `web/` (Vite 스캐폴드)
-- Create: `web/vite.config.ts`
+- Create: `web/vite.config.ts`, `web/.env.local`, `web/.env.example`
 - Create: `docs/.nojekyll`
-- Modify: `.gitignore`
+- Modify: `web/index.html`, `.gitignore`
 
-> **공개 전환과 맞물리는 결과 — 점검 문서를 갱신해야 한다.**
+> **빌드된 JS에 Supabase URL과 publishable 키가 들어간다.** 공개 리포에서는 둘 다 공개되고, 공개 사이트에서도 보인다.
 >
-> 브라우저가 Supabase에 직접 붙으므로 **빌드된 JS에 Supabase URL과
-> publishable 키가 들어간다.** 공개 리포에서는 둘 다 공개된다.
->
-> 설계상 괜찮다 — 스펙 7.2가 "publishable 키는 비밀이 아니다. 브라우저에
-> 노출되도록 설계된 키다"라고 정했고, RLS가 실제 방어다(계획 1에서
-> `verify_anon_access.sh`로 실측 확인). 다만 `docs/공개-전-점검.md`의
-> "공개되지 않는 것" 목록에서 **"Supabase 프로젝트 ref·URL — 0건"을 지워야
-> 한다.** Task 13에서 함께 고친다.
+> 설계상 괜찮다 — 스펙 7.2가 "publishable 키는 비밀이 아니다. 브라우저에 노출되도록 설계된 키다"라고 정했고, RLS가 실제 방어다(Task 2 Step 9에서 실측). **secret 키는 들어가지 않는다** — Vite는 `VITE_` 접두사가 붙은 변수만 클라이언트에 넣고, `SUPABASE_SECRET_KEY`에는 접두사가 없다.
 
 - [ ] **Step 1: Vite + React + TypeScript 스캐폴드**
 
@@ -778,8 +622,7 @@ cd web
 npm ls --depth=0
 ```
 
-출력된 버전을 이 계획 문서의 이 자리에 적어 둔다. **락파일을 커밋하므로**
-나중에 "무엇이 깨졌나"를 추적할 수 있다.
+출력된 버전을 이 계획 문서의 이 자리에 적어 둔다. **락파일을 커밋하므로** 나중에 "무엇이 깨졌나"를 추적할 수 있다.
 
 - [ ] **Step 4: `web/vite.config.ts`**
 
@@ -792,56 +635,89 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
 
   // GitHub Pages 프로젝트 사이트는 /<repo>/ 하위에 올라간다.
-  // 이 값이 틀리면 JS·CSS 경로가 404가 된다.
+  // 이 값이 틀리면 JS·CSS 경로가 404가 되어 빈 화면이 뜬다.
   base: '/topic-briefing/',
 
   build: {
     // GitHub Pages가 docs/를 서빙한다.
     outDir: '../docs',
 
-    // **반드시 false다.** docs/에는 superpowers 설계·계획 문서와
-    // data/*.json(영구 보관)이 같이 있다. 기본값(true)이면 빌드가 그것들을
-    // 지운다 — 되돌릴 수 없는 손실이다.
+    // **반드시 false다.** docs/에 .nojekyll, robots.txt, 404.html이 같이
+    // 있는데 기본값(true)이면 빌드가 그것들을 지우고 사이트가 조용히 깨진다.
     emptyOutDir: false,
   },
 })
 ```
 
-- [ ] **Step 5: `docs/.nojekyll`**
+- [ ] **Step 5: 환경 변수**
+
+`web/.env.example` (커밋한다):
+
+```
+# 브라우저용 publishable 키. 비밀이 아니다 — 빌드된 JS에 그대로 들어간다.
+# 실제 방어는 RLS다(supabase/migrations/2026-11-13-page-direct-read.sql).
+VITE_SUPABASE_URL=https://xxxxx.supabase.co
+VITE_SUPABASE_PUBLISHABLE_KEY=sb_publishable_...
+```
+
+`web/.env.local` (커밋하지 않는다): 루트 `.env`의 같은 값을 넣는다.
 
 ```bash
+cd "$(git rev-parse --show-toplevel)"
+grep -E '^(SUPABASE_URL|VITE_SUPABASE_PUBLISHABLE_KEY)=' .env \
+  | sed 's/^SUPABASE_URL=/VITE_SUPABASE_URL=/' > web/.env.local
+cat web/.env.local
+```
+
+- [ ] **Step 6: `web/index.html` — 색인 차단과 글꼴**
+
+`<head>`에 넣는다. 요구사항 D4의 절반이다(나머지는 Task 13의 `robots.txt`).
+
+```html
+    <meta name="robots" content="noindex, nofollow" />
+    <title>브리핑</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Noto+Serif+KR:wght@400;600&family=Inter:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+```
+
+- [ ] **Step 7: `docs/.nojekyll`**
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
 touch docs/.nojekyll
 ```
 
-GitHub Pages는 기본적으로 Jekyll로 처리하면서 `_`로 시작하는 파일·디렉터리를
-무시한다. Vite 산출물에 그런 이름이 생기면 조용히 404가 된다.
+GitHub Pages는 기본적으로 Jekyll로 처리하면서 `_`로 시작하는 파일·디렉터리를 무시한다. Vite 산출물에 그런 이름이 생기면 조용히 404가 된다.
 
-- [ ] **Step 6: `.gitignore`에 프론트엔드 산출물 추가**
+- [ ] **Step 8: `.gitignore`**
 
 ```
 # Node
 node_modules/
 web/dist/
+web/.env.local
 ```
 
-`node_modules/`와 `web/dist/`는 이미 있다. **`docs/`는 넣지 않는다** — 빌드
-결과를 커밋해야 Pages가 서빙한다.
+**`docs/`는 넣지 않는다** — 빌드 결과를 커밋해야 Pages가 서빙한다. 다만 **코드가 바뀔 때만** 커밋한다(스펙 6.4). 매일 커밋할 것은 없다.
 
-- [ ] **Step 7: 빌드가 `docs/`를 지우지 않는지 확인**
+- [ ] **Step 9: 빌드가 `docs/`의 설정 파일을 지우지 않는지 확인**
 
 이게 이 태스크에서 가장 중요한 검증이다.
 
 ```bash
 cd "$(git rev-parse --show-toplevel)"
-ls docs/              # superpowers/, data/, 공개-전-점검.md 가 있어야 한다
+ls -a docs/            # .nojekyll 이 있어야 한다
 cd web && npm run build
-cd .. && ls docs/     # 위의 것들이 **그대로 있어야 한다** + index.html, assets/
+cd .. && ls -a docs/   # .nojekyll 이 **그대로 있어야 한다** + index.html, assets/
 ```
 
-Expected: `docs/superpowers/`와 `docs/data/`가 살아 있다. 사라졌으면
-`emptyOutDir: false`가 안 들어간 것이므로 `git checkout docs/`로 되돌린다.
+Expected: `.nojekyll`이 살아 있다. 사라졌으면 `emptyOutDir: false`가 안 들어간 것이다.
 
-- [ ] **Step 8: 커밋**
+- [ ] **Step 10: 커밋**
 
 ```bash
 git add web/ docs/.nojekyll .gitignore
@@ -975,16 +851,20 @@ git commit -m "feat: A 톤 디자인 토큰 + 색인 차단 메타"
 
 ---
 
-## Task 5: 타입과 데이터 불러오기
+## Task 5: Supabase 클라이언트와 데이터 조회
+
+**이 태스크가 초판의 Task 2(`render`)와 Task 5를 대체한다.** 함수 이름(`fetchLatest`·`fetchDay`·`fetchArchive`·`NotFound`)과 타입 모양(`Day`·`Archive`·`Article`·`ArchiveEntry`)을 **초판과 똑같이 유지한다** — Task 6~9가 그것만 쓰므로, 구현을 바꿔도 그 네 태스크는 한 글자도 바뀌지 않는다.
 
 **Files:**
 - Create: `web/src/lib/types.ts`
+- Create: `web/src/lib/supabase.ts`
 - Create: `web/src/lib/data.ts`
 
-- [ ] **Step 1: `web/src/lib/types.ts` — `render.py`의 출력과 1:1**
+- [ ] **Step 1: `web/src/lib/types.ts`**
 
 ```typescript
-// pipeline/render.py의 PAGE_FIELDS와 맞춰야 한다. 한쪽만 바꾸면 조용히 깨진다.
+// Supabase articles 테이블의 **페이지가 읽는 컬럼**과 1:1.
+// reason은 없다 — 마이그레이션이 컬럼 단위 grant로 막았고, 넣으면 쿼리가 실패한다.
 export type Article = {
   id: number
   headline: string
@@ -1000,8 +880,8 @@ export type Article = {
 export type Day = {
   date: string
   articles: Article[]
-  // 실행 기록이 없으면 null이다. 0으로 두면 "수집 0건"이라 거짓말하므로
-  // render가 일부러 null을 넣는다.
+  // runs 행에서 온다. 0건인 날에도 실행 기록은 있으므로 수치가 채워진다.
+  // 그 행조차 없으면 그 날짜는 존재하지 않는 것이고 fetchDay가 NotFound를 던진다.
   collected: number | null
   considered: number | null
   max_score: number | null
@@ -1012,6 +892,8 @@ export type Day = {
 export type ArchiveEntry = {
   date: string
   count: number
+  // count > 0이면 **반드시 문자열이다.** Archive 화면이 `${lead} 외 N건`으로
+  // 그대로 그리므로, null이 들어오면 화면에 "null"이 보인다.
   lead: string | null
 }
 
@@ -1022,46 +904,196 @@ export type Archive = {
 }
 ```
 
-- [ ] **Step 2: `web/src/lib/data.ts`**
+- [ ] **Step 2: `web/src/lib/supabase.ts`**
 
 ```typescript
-import type { Archive, Day } from './types'
+import { createClient } from '@supabase/supabase-js'
 
-// import.meta.env.BASE_URL은 vite.config.ts의 base와 같다('/topic-briefing/').
-// 하드코딩하면 로컬 dev 서버('/')에서 깨진다.
-const DATA = `${import.meta.env.BASE_URL}data`
+const url = import.meta.env.VITE_SUPABASE_URL
+const key = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY
 
+// 빈 값으로 클라이언트를 만들면 첫 질의에서 "Failed to fetch"만 나와서
+// 원인을 찾기 어렵다. 여기서 바로 멈추고 이유를 말한다.
+if (!url || !key) {
+  throw new Error(
+    'VITE_SUPABASE_URL / VITE_SUPABASE_PUBLISHABLE_KEY가 비어 있다. ' +
+      'web/.env.local을 확인한다 (web/.env.example 참고).',
+  )
+}
+
+export const supabase = createClient(url, key, {
+  auth: {
+    // 기기당 로그인 1회. 세션을 localStorage에 두고 토큰을 자동 갱신한다.
+    persistSession: true,
+    autoRefreshToken: true,
+    // URL 해시로 돌아오는 매직링크·OAuth 콜백을 자동으로 처리한다.
+    detectSessionInUrl: true,
+  },
+})
+```
+
+- [ ] **Step 3: `web/src/lib/data.ts`**
+
+```typescript
+import { supabase } from './supabase'
+import type { Archive, ArchiveEntry, Article, Day } from './types'
+
+// pipeline/summarize.py의 SCORE_THRESHOLD와 같은 값이다. **두 곳에 있다** —
+// 파이프라인에서 바꾸면 여기도 바꾼다. 화면의 "기준 60점" 표시에만 쓰이므로
+// 어긋나도 선별 동작은 바뀌지 않지만, 표시가 거짓이 된다.
+export const THRESHOLD = 60
+
+// articles에서 읽는 컬럼. reason을 넣으면 컬럼 단위 grant 때문에 쿼리가 실패한다.
+const ARTICLE_COLUMNS =
+  'id, url, source, published_at, headline, bullets, why_it_matters, topic, score'
+
+// runs에서 읽는 컬럼. errors·input_tokens·window_*는 grant가 없다.
+const RUN_COLUMNS =
+  'briefing_date, collected_count, considered_count, max_score, source_counts'
+
+// 아카이브 질의의 상한. 날짜당 한 행이므로 2000이면 5년 넘는다.
+// PostgREST의 기본 상한(1000)에 조용히 걸리는 것을 막으려고 명시한다.
+const ARCHIVE_LIMIT = 2000
+
+/** 그 날짜에 브리핑이 없다 (실행 기록조차 없다). */
 export class NotFound extends Error {}
 
-async function get<T>(path: string): Promise<T> {
-  const res = await fetch(path, { cache: 'no-cache' })
-  if (res.status === 404) throw new NotFound(path)
-  if (!res.ok) throw new Error(`${path}: HTTP ${res.status}`)
-  return (await res.json()) as T
+function fail(context: string, error: { message: string }): never {
+  // Supabase 오류를 그대로 던지면 화면에 "JSON object requested..." 같은
+  // 내부 문구가 뜬다. 무엇을 하다 실패했는지를 앞에 붙인다.
+  throw new Error(`${context}: ${error.message}`)
 }
 
-export function fetchArchive(): Promise<Archive> {
-  return get<Archive>(`${DATA}/index.json`)
+export async function fetchDay(date: string): Promise<Day> {
+  // 두 질의를 동시에 보낸다. 직렬이면 왕복이 두 배다.
+  const [articles, runs] = await Promise.all([
+    supabase
+      .from('articles')
+      .select(ARTICLE_COLUMNS)
+      .eq('briefing_date', date)
+      .order('score', { ascending: false }),
+    // maybeSingle()을 쓰지 않는다 — 같은 날짜에 행이 둘이면 **던진다.**
+    // notify의 AlreadySent 가드가 그걸 막지만, 화면이 그 가드에 의존할 이유가 없다.
+    supabase
+      .from('runs')
+      .select(RUN_COLUMNS)
+      .eq('briefing_date', date)
+      .limit(1),
+  ])
+
+  if (articles.error) fail(`${date}의 글을 읽지 못했다`, articles.error)
+  if (runs.error) fail(`${date}의 실행 기록을 읽지 못했다`, runs.error)
+
+  const run = runs.data?.[0] ?? null
+  const rows = (articles.data ?? []) as Article[]
+
+  // **이 줄이 "0건인 날"과 "없는 날짜"를 구별한다.**
+  // 실행 기록이 있으면 파이프라인이 돌았고 기준을 넘긴 글이 없었던 것이다.
+  // 둘 다 없으면 그 날짜는 존재하지 않는다.
+  if (rows.length === 0 && run === null) throw new NotFound(date)
+
+  return {
+    date,
+    articles: rows,
+    collected: run?.collected_count ?? null,
+    considered: run?.considered_count ?? null,
+    max_score: run?.max_score ?? null,
+    threshold: THRESHOLD,
+    source_counts: run?.source_counts ?? {},
+  }
 }
 
-export function fetchDay(date: string): Promise<Day> {
-  return get<Day>(`${DATA}/${date}.json`)
+export async function fetchArchive(): Promise<Archive> {
+  // briefing_index는 날짜당 한 행(건수 + 최고점 헤드라인)을 주는 뷰다.
+  // runs는 **0건인 날까지** 포함한 전체 날짜 목록이다. 둘을 합쳐야
+  // "조용했던 날"이 아카이브에서 사라지지 않는다.
+  const [index, runs] = await Promise.all([
+    supabase
+      .from('briefing_index')
+      .select('briefing_date, count, lead')
+      .order('briefing_date', { ascending: false })
+      .limit(ARCHIVE_LIMIT),
+    supabase
+      .from('runs')
+      .select('briefing_date')
+      .order('briefing_date', { ascending: false })
+      .limit(ARCHIVE_LIMIT),
+  ])
+
+  if (index.error) fail('아카이브 목록을 읽지 못했다', index.error)
+  if (runs.error) fail('실행 날짜를 읽지 못했다', runs.error)
+
+  const byDate = new Map<string, { count: number; lead: string | null }>()
+  for (const row of index.data ?? []) {
+    byDate.set(row.briefing_date as string, {
+      count: row.count as number,
+      lead: row.lead as string | null,
+    })
+  }
+
+  // runs의 날짜가 기준이다. 글이 있는 날은 뷰에서 건수와 헤드라인을 가져오고,
+  // 없는 날은 count 0으로 남는다.
+  const dates: ArchiveEntry[] = (runs.data ?? []).map((row) => {
+    const date = row.briefing_date as string
+    const hit = byDate.get(date)
+    return { date, count: hit?.count ?? 0, lead: hit?.lead ?? null }
+  })
+
+  return {
+    dates,
+    days: dates.length,
+    total: dates.reduce((sum, entry) => sum + entry.count, 0),
+  }
 }
 
-/** 최신 브리핑. 아카이브 목록의 첫 항목이 가장 최근이다. */
+/** 최신 브리핑. 아카이브 전체를 받지 않고 날짜 하나만 찾는다. */
 export async function fetchLatest(): Promise<Day> {
-  const archive = await fetchArchive()
-  const first = archive.dates[0]
-  if (!first) throw new NotFound('아직 발행한 브리핑이 없다')
-  return fetchDay(first.date)
+  const { data, error } = await supabase
+    .from('runs')
+    .select('briefing_date')
+    .order('briefing_date', { ascending: false })
+    .limit(1)
+
+  if (error) fail('최신 브리핑 날짜를 읽지 못했다', error)
+
+  const latest = data?.[0]?.briefing_date as string | undefined
+  if (!latest) throw new NotFound('아직 발행한 브리핑이 없다')
+
+  return fetchDay(latest)
 }
 ```
 
-- [ ] **Step 3: 커밋**
+- [ ] **Step 4: 실제 데이터로 확인한다**
+
+이 태스크는 단위 테스트를 두지 않는다 — 검증 가치가 전부 **실제 권한과 실제 행**에 있고, Supabase 클라이언트를 모킹하면 컬럼 grant가 맞는지를 확인할 수 없다. 대신 브라우저 콘솔에서 직접 부른다.
 
 ```bash
-git add web/src/lib/types.ts web/src/lib/data.ts
-git commit -m "feat: 페이지 데이터 타입과 불러오기"
+cd web && npm run dev
+```
+
+브라우저 콘솔에서:
+
+```javascript
+const { fetchLatest, fetchArchive } = await import('/src/lib/data.ts')
+console.log(await fetchLatest())
+console.log(await fetchArchive())
+```
+
+Expected:
+
+| 확인할 것 | 기대 |
+|---|---|
+| `fetchLatest()` | `2026-11-12`의 요약 7건. `articles[0].score`가 가장 높다 |
+| `collected` / `considered` | `null`이 아니다 — `runs.briefing_date` 마이그레이션이 동작한다는 증거다 |
+| `fetchArchive().dates` | 최신순. `lead`가 count > 0인 모든 항목에서 문자열이다 |
+| `reason`을 넣어 보기 | `ARTICLE_COLUMNS`에 `reason`을 임시로 더하면 **permission denied(42501)** — 컬럼 grant가 살아 있다는 증거다. 확인 후 되돌린다 |
+
+- [ ] **Step 5: 커밋**
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+git add web/src/lib/types.ts web/src/lib/supabase.ts web/src/lib/data.ts
+git commit -m "feat: Supabase 직접 조회 — 날짜별 브리핑과 아카이브"
 ```
 
 ---
@@ -1120,7 +1152,7 @@ export default function Card({ article, onOpen }: Props) {
 }
 ```
 
-- [ ] **Step 2: 커밋** (`LikeButton`은 Task 10에서 만든다 — 그때 빌드가 통과한다)
+- [ ] **Step 2: 커밋** (`LikeButton`은 Task 11, `Note`는 Task 12에서 만든다 — 그때 빌드가 통과한다)
 
 ```bash
 git add web/src/components/Card.tsx
@@ -1203,7 +1235,7 @@ function Row({ label, value, strong }: { label: string; value: string; strong?: 
 
 ```tsx
 import type { Article, Day } from '../lib/types'
-import { recordClick } from '../lib/supabase'
+import { recordClick } from '../lib/likes'
 import Card from './Card'
 import Empty from './Empty'
 
@@ -1512,416 +1544,680 @@ git commit -m "feat: 경로 라우팅 + Pages 404 폴백 (라우터 의존성 �
 
 ---
 
-## Task 10: Supabase 클라이언트와 좋아요
+## Task 10: 인증 — 로그인과 세션
+
+읽기는 익명 공개다. **좋아요·메모를 누를 때만** 로그인한다. 아침에 카톡 링크를 탭했을 때 로그인 화면이 뜨면 안 된다(설계 2.1).
 
 **Files:**
-- Create: `web/.env.local` (커밋하지 않는다)
-- Create: `web/.env.example`
-- Create: `web/src/lib/supabase.ts`
-- Create: `web/src/lib/liked.ts`
-- Create: `web/src/components/LikeButton.tsx`
-- Modify: `.gitignore`
+- Create: `web/src/lib/auth.ts`
+- Create: `web/src/components/SignIn.tsx`
 
-> **anon은 `reactions`에 INSERT만 할 수 있다** (계획 1의 `schema.sql` 실측).
-> 읽기도 삭제도 없으므로 **토글을 DB로 구현할 수 없다.** 권한을 늘리지 않는다 —
-> anon에 DELETE를 주면 URL을 아는 누구나 좋아요를 지울 수 있다.
->
-> DB는 **추가 전용 이벤트**로 쓰고, 눌렀는지 여부는 `localStorage`가 기기별로
-> 기억한다. 같은 글을 두 번 눌러도 이벤트가 둘 쌓이는데, 스펙 7.2가 "신호
-> 오염이 생기면 Phase 2에서 바로 드러나 그때 대응"으로 이미 수용했다.
+- [ ] **Step 1: Supabase 대시보드에서 가입을 막고 사용자를 하나 만든다** (직접)
 
-- [ ] **Step 1: 환경 변수**
+이 단계는 대시보드에서 직접 한다. **공개 가입을 열어 두면 아무나 계정을 만들어 좋아요를 넣을 수 있고**, 그건 anon INSERT를 거둔 이유를 무효로 만든다.
 
-`web/.env.example`:
+1. Authentication → Sign In / Providers → **Email**을 켠다
+2. 같은 화면에서 **"Allow new users to sign up"을 끈다**
+3. Authentication → Users → **Add user**로 본인 계정 하나를 만든다 (이메일 + 비밀번호). 비밀번호는 직접 정한다
+4. **Confirm email**을 체크해서 바로 쓸 수 있게 한다
 
-```
-# 브라우저용 publishable 키. **비밀이 아니다** — 브라우저에 노출되도록
-# 설계된 키이고, 실제 방어는 RLS다(계획 1의 verify_anon_access.sh로 확인).
-# 공개 리포에서는 빌드된 JS에 그대로 들어간다.
-VITE_SUPABASE_URL=https://xxxxx.supabase.co
-VITE_SUPABASE_PUBLISHABLE_KEY=sb_publishable_...
-```
+> 나중에 사람을 늘릴 때도 같은 자리에서 계정을 만들면 된다. RLS가 이미 `auth.uid() = user_id`이므로 코드는 바뀌지 않는다.
 
-`web/.env.local`을 만들어 실제 값을 넣는다. 루트 `.env`의
-`SUPABASE_URL`·`VITE_SUPABASE_PUBLISHABLE_KEY`와 같은 값이다.
-
-`.gitignore`에 추가:
-
-```
-web/.env.local
-```
-
-- [ ] **Step 2: `web/src/lib/liked.ts`**
+- [ ] **Step 2: `web/src/lib/auth.ts`**
 
 ```typescript
-// localStorage는 사생활이 아니라 **편의**다. 사생활 모드·사이트 데이터 삭제·
-// 다른 기기에서는 비어 있으므로, 없으면 "안 누른 상태"로 그린다.
-// 접근 자체가 예외를 던질 수 있어서 전부 try/catch로 감싼다.
+import { useEffect, useState } from 'react'
+import type { Session } from '@supabase/supabase-js'
+import { supabase } from './supabase'
 
-const KEY = (articleId: number) => `liked:${articleId}`
+export function useSession(): { session: Session | null; loading: boolean } {
+  const [session, setSession] = useState<Session | null>(null)
+  const [loading, setLoading] = useState(true)
 
-export function isLiked(articleId: number): boolean {
-  try {
-    return window.localStorage.getItem(KEY(articleId)) === '1'
-  } catch {
-    return false
-  }
+  useEffect(() => {
+    let alive = true
+
+    // 첫 로드: 저장된 세션을 읽는다. 없으면 null이고 그게 정상이다
+    // (로그인하지 않아도 페이지는 읽힌다).
+    supabase.auth.getSession().then(({ data }) => {
+      if (!alive) return
+      setSession(data.session)
+      setLoading(false)
+    })
+
+    // 로그인·로그아웃·토큰 자동 갱신을 구독한다.
+    const { data } = supabase.auth.onAuthStateChange((_event, next) => {
+      if (!alive) return
+      setSession(next)
+      setLoading(false)
+    })
+
+    // 구독을 끊지 않으면 컴포넌트가 사라진 뒤에도 setState가 불린다.
+    return () => {
+      alive = false
+      data.subscription.unsubscribe()
+    }
+  }, [])
+
+  return { session, loading }
 }
 
-export function markLiked(articleId: number): void {
-  try {
-    window.localStorage.setItem(KEY(articleId), '1')
-  } catch {
-    // 저장이 안 되면 다음 방문에 빈 하트로 보인다. 화면은 깨지지 않는다.
-  }
+export async function signIn(email: string, password: string): Promise<void> {
+  const { error } = await supabase.auth.signInWithPassword({ email, password })
+  // Supabase의 'Invalid login credentials'를 그대로 보여준다 — 어느 쪽이
+  // 틀렸는지 알려주지 않는 것이 맞다.
+  if (error) throw new Error(error.message)
+}
+
+export async function signOut(): Promise<void> {
+  await supabase.auth.signOut()
 }
 ```
 
-- [ ] **Step 3: `web/src/lib/supabase.ts`**
+- [ ] **Step 3: `web/src/components/SignIn.tsx`**
+
+쓰기를 누를 때만 뜨는 작은 폼이다. 전체 화면을 가리지 않는다.
 
 ```typescript
-import { createClient } from '@supabase/supabase-js'
-
-const url = import.meta.env.VITE_SUPABASE_URL as string
-const key = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string
-
-export const supabase = createClient(url, key)
-
-/** 좋아요 이벤트를 쌓는다. anon은 INSERT만 가능하므로 추가 전용이다. */
-export async function recordLike(articleId: number): Promise<void> {
-  // user_id는 넣지 않는다 — RLS 정책이 `with check (user_id is null)`이다.
-  const { error } = await supabase.from('reactions').insert({ article_id: articleId })
-  if (error) {
-    // 기록이 실패해도 화면은 그대로 둔다. 신호 하나가 빠지는 것이
-    // 화면이 깨지는 것보다 낫다.
-    console.warn('좋아요 기록 실패', error.message)
-  }
-}
-
-/**
- * 클릭을 기록한다. 원문으로 떠나는 중에도 요청이 살아야 한다.
- *
- * **스펙 7.3은 `navigator.sendBeacon`을 적었지만 쓸 수 없다** —
- * sendBeacon은 헤더를 설정할 수 없고, Supabase REST는 `apikey`와
- * `Authorization` 헤더를 요구한다. `fetch`의 `keepalive: true`가 같은
- * 목적(이탈 중 전송 유지)을 달성하면서 헤더를 보낼 수 있다.
- */
-export function recordClick(articleId: number): void {
-  const body = JSON.stringify({ article_id: articleId })
-  void fetch(`${url}/rest/v1/clicks`, {
-    method: 'POST',
-    keepalive: true,
-    headers: {
-      apikey: key,
-      Authorization: `Bearer ${key}`,
-      'Content-Type': 'application/json',
-      Prefer: 'return=minimal',
-    },
-    body,
-  }).catch(() => {
-    // 이탈 중이라 실패를 보고할 곳이 없다. 조용히 넘긴다.
-  })
-}
-```
-
-- [ ] **Step 4: `web/src/components/LikeButton.tsx`**
-
-```tsx
 import { useState } from 'react'
-import { isLiked, markLiked } from '../lib/liked'
-import { recordLike } from '../lib/supabase'
+import { signIn } from '../lib/auth'
 
-type Props = { articleId: number; className?: string }
+type Props = { onDone: () => void; onCancel: () => void }
 
-export default function LikeButton({ articleId, className = '' }: Props) {
-  const [liked, setLiked] = useState(() => isLiked(articleId))
+export default function SignIn({ onDone, onCancel }: Props) {
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
 
-  function onClick() {
-    // 이미 누른 글은 다시 보내지 않는다. DB에 삭제 권한이 없어서 되돌릴 수
-    // 없고, 중복 이벤트를 줄이는 것이 신호 품질에 낫다.
-    if (liked) return
-    setLiked(true)
-    markLiked(articleId)
-    void recordLike(articleId)
+  async function submit(event: React.FormEvent) {
+    event.preventDefault()
+    setBusy(true)
+    setError(null)
+    try {
+      await signIn(email, password)
+      onDone()
+    } catch (problem) {
+      setError(problem instanceof Error ? problem.message : String(problem))
+    } finally {
+      setBusy(false)
+    }
   }
 
   return (
-    <button
-      type="button"
-      aria-label="이 글에 좋아요"
-      aria-pressed={liked}
-      onClick={onClick}
-      // 44×44는 손가락 터치 목표 크기다. 목업과 같다.
-      className={`flex h-11 w-11 items-center justify-center border-0 bg-transparent ${
-        liked ? 'cursor-default text-accent' : 'cursor-pointer text-muted'
-      } ${className}`}
+    <form
+      onSubmit={submit}
+      className="mt-3 rounded-md border border-line bg-panel p-3.5"
     >
-      <svg
-        width="17"
-        height="17"
-        viewBox="0 0 24 24"
-        fill={liked ? 'currentColor' : 'none'}
-        stroke="currentColor"
-        strokeWidth="1.8"
-        aria-hidden="true"
-      >
-        <path d="M12 20.5 4.6 13.3a4.8 4.8 0 0 1 6.8-6.8l.6.6.6-.6a4.8 4.8 0 0 1 6.8 6.8z" />
-      </svg>
-    </button>
+      <p className="mb-2.5 text-[12.5px] leading-[1.5] text-muted">
+        좋아요와 메모는 기기당 한 번만 로그인하면 됩니다. 읽기는 로그인이
+        필요하지 않습니다.
+      </p>
+
+      <input
+        type="email"
+        value={email}
+        onChange={(event) => setEmail(event.target.value)}
+        placeholder="이메일"
+        autoComplete="username"
+        required
+        className="mb-2 w-full rounded border border-edge bg-bg px-2.5 py-2 text-[13.5px]"
+      />
+      <input
+        type="password"
+        value={password}
+        onChange={(event) => setPassword(event.target.value)}
+        placeholder="비밀번호"
+        autoComplete="current-password"
+        required
+        className="mb-2.5 w-full rounded border border-edge bg-bg px-2.5 py-2 text-[13.5px]"
+      />
+
+      {error && (
+        <p className="mb-2 text-[12.5px] leading-[1.5] text-warn">{error}</p>
+      )}
+
+      <div className="flex items-center gap-2">
+        <button
+          type="submit"
+          disabled={busy}
+          className="rounded bg-accent px-3 py-1.5 text-[12.5px] font-medium text-white disabled:opacity-50"
+        >
+          {busy ? '확인 중…' : '로그인'}
+        </button>
+        <button
+          type="button"
+          onClick={onCancel}
+          className="text-[12.5px] text-muted"
+        >
+          취소
+        </button>
+      </div>
+    </form>
   )
 }
 ```
 
-- [ ] **Step 5: 실제로 눌러서 DB에 들어가는지 확인**
+- [ ] **Step 4: 로그인이 되는지 확인한다**
 
 ```bash
 cd web && npm run dev
 ```
 
-브라우저에서 글 하나의 하트를 누른다. 그다음:
+브라우저 콘솔에서:
 
-```bash
-cd "$(git rev-parse --show-toplevel)"
-.venv/bin/python -c "
-from supabase import create_client
-from pipeline.lib.secrets import require
-c = create_client(require('SUPABASE_URL'), require('SUPABASE_SECRET_KEY'))
-print(c.table('reactions').select('article_id,user_id,created_at').execute().data)
-"
+```javascript
+const { signIn } = await import('/src/lib/auth.ts')
+const { supabase } = await import('/src/lib/supabase.ts')
+// 이메일과 비밀번호는 직접 입력한다
+await signIn(prompt('이메일'), prompt('비밀번호'))
+console.log((await supabase.auth.getSession()).data.session?.user?.id)
 ```
 
-Expected: 행 1개, `user_id`가 `None`이다. **`user_id`가 채워져 있으면 RLS 정책이
-의도와 다르게 통과한 것이므로 멈춘다.**
-
-새로고침해도 하트가 채워진 상태로 남아야 한다(`localStorage`).
-
-- [ ] **Step 6: 커밋**
-
-```bash
-git add web/src/lib/supabase.ts web/src/lib/liked.ts \
-        web/src/components/LikeButton.tsx web/.env.example .gitignore
-git commit -m "feat: 좋아요 — DB는 추가 전용, 누른 상태는 localStorage"
-```
-
----
-
-## Task 11: 메모와 태그
-
-**Files:**
-- Create: `web/src/components/Note.tsx`
-- Modify: `web/src/lib/supabase.ts`
-- Modify: `web/src/components/Card.tsx`
-
-> **anon은 `notes`에 SELECT와 INSERT만 할 수 있다.** UPDATE·DELETE가 없으므로
-> 제자리 수정이 안 된다. **추가 전용으로 쓰고 읽을 때 가장 최근 행을 쓴다.**
-> 태그를 지우는 것도 "지운 태그를 뺀 새 행"을 넣는 것이다.
-
-- [ ] **Step 1: `web/src/lib/supabase.ts`에 메모 함수 추가**
-
-```typescript
-export type Note = { text: string; tags: string[] }
-
-/** 그 글의 가장 최근 메모. 추가 전용이라 마지막 행이 현재 상태다. */
-export async function fetchNote(articleId: number): Promise<Note | null> {
-  const { data, error } = await supabase
-    .from('notes')
-    .select('text,tags')
-    .eq('article_id', articleId)
-    .order('created_at', { ascending: false })
-    .limit(1)
-
-  if (error || !data || data.length === 0) return null
-  return { text: data[0].text as string, tags: (data[0].tags as string[]) ?? [] }
-}
-
-/** 메모를 저장한다. 수정이 아니라 새 행을 넣는 것이다. */
-export async function saveNote(articleId: number, note: Note): Promise<boolean> {
-  const { error } = await supabase
-    .from('notes')
-    .insert({ article_id: articleId, text: note.text, tags: note.tags })
-  if (error) {
-    console.warn('메모 저장 실패', error.message)
-    return false
-  }
-  return true
-}
-```
-
-- [ ] **Step 2: `web/src/components/Note.tsx` — 목업 `Interact.dc.html`**
-
-```tsx
-import { useEffect, useState } from 'react'
-import { fetchNote, saveNote, type Note as NoteData } from '../lib/supabase'
-
-export default function Note({ articleId }: { articleId: number }) {
-  const [note, setNote] = useState<NoteData>({ text: '', tags: [] })
-  const [tagInput, setTagInput] = useState('')
-  const [hint, setHint] = useState('')
-
-  useEffect(() => {
-    fetchNote(articleId).then((loaded) => {
-      if (loaded) setNote(loaded)
-    })
-  }, [articleId])
-
-  function addTag() {
-    const next = tagInput.trim()
-    if (!next || note.tags.includes(next)) return
-    setNote({ ...note, tags: [...note.tags, next] })
-    setTagInput('')
-  }
-
-  async function save() {
-    const ok = await saveNote(articleId, note)
-    setHint(ok ? '저장했습니다' : '저장하지 못했습니다')
-  }
-
-  return (
-    <div className="flex flex-col gap-2.5 bg-panel p-3.5 font-meta">
-      <label htmlFor={`note-${articleId}`} className="font-serif text-[12.5px] font-semibold">
-        메모
-      </label>
-      <textarea
-        id={`note-${articleId}`}
-        rows={3}
-        value={note.text}
-        onChange={(e) => setNote({ ...note, text: e.target.value })}
-        placeholder="나중에 찾을 단서를 적습니다"
-        className="box-border w-full resize-y border border-edge bg-paper px-2.5 py-[9px] font-serif text-[13px] leading-[1.6] text-ink"
-      />
-
-      <div className="flex flex-wrap gap-1.5">
-        {note.tags.map((tag) => (
-          <span
-            key={tag}
-            className="inline-flex items-center gap-[5px] bg-tag px-[9px] py-1 text-[11.5px] text-ink-2"
-          >
-            {tag}
-            <button
-              type="button"
-              aria-label={`${tag} 태그 지우기`}
-              onClick={() => setNote({ ...note, tags: note.tags.filter((t) => t !== tag) })}
-              className="flex h-3.5 w-3.5 items-center justify-center border-0 bg-transparent p-0 text-muted"
-            >
-              <svg width="9" height="9" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
-                <path d="M2 2l8 8M10 2l-8 8" />
-              </svg>
-            </button>
-          </span>
-        ))}
-      </div>
-
-      <div className="flex gap-1.5">
-        <label htmlFor={`tag-${articleId}`} className="sr-only">태그 추가</label>
-        <input
-          id={`tag-${articleId}`}
-          type="text"
-          value={tagInput}
-          onChange={(e) => setTagInput(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addTag() } }}
-          placeholder="태그"
-          className="box-border min-w-0 flex-1 border border-edge bg-paper px-2.5 py-[9px] font-meta text-[12.5px] text-ink"
-        />
-        <button
-          type="button"
-          onClick={addTag}
-          className="min-h-11 flex-none cursor-pointer border border-edge bg-paper px-3.5 font-meta text-[12.5px] text-ink-2"
-        >
-          추가
-        </button>
-      </div>
-
-      <div className="mt-0.5 flex items-center gap-2.5">
-        <button
-          type="button"
-          onClick={save}
-          className="min-h-11 cursor-pointer border-0 bg-accent px-4 font-meta text-[12.5px] text-paper"
-        >
-          저장
-        </button>
-        <span className="font-serif text-[11.5px] text-muted">{hint}</span>
-      </div>
-    </div>
-  )
-}
-```
-
-- [ ] **Step 3: `Card.tsx`에 메모 열기 버튼을 붙인다**
-
-`Card.tsx`의 `import`에 추가:
-
-```tsx
-import { useState } from 'react'
-import Note from './Note'
-```
-
-컴포넌트 본문 맨 위에 추가:
-
-```tsx
-  const [noteOpen, setNoteOpen] = useState(false)
-```
-
-메타 줄의 `LikeButton` **뒤에** 추가:
-
-```tsx
-        <button
-          type="button"
-          aria-label={noteOpen ? '메모 접기' : '메모 쓰기'}
-          aria-expanded={noteOpen}
-          onClick={() => setNoteOpen(!noteOpen)}
-          className={`-mr-2.5 flex h-11 w-11 cursor-pointer items-center justify-center border-0 bg-transparent ${
-            noteOpen ? 'text-accent' : 'text-muted'
-          }`}
-        >
-          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true">
-            <path d="M4 20h4l11-11a2.8 2.8 0 0 0-4-4L4 16z" />
-          </svg>
-        </button>
-```
-
-메타 줄을 닫는 `</div>` **뒤에** 추가:
-
-```tsx
-      {noteOpen && <Note articleId={article.id} />}
-```
-
-`LikeButton`의 `className`에서 `-mr-2.5`를 **빼고** `ml-auto`만 남긴다
-(메모 버튼이 마지막이 되므로 음수 여백은 그쪽이 가진다).
-
-- [ ] **Step 4: 저장하고 새로고침해 남는지 확인**
-
-`npm run dev`에서 메모를 쓰고 태그를 둘 추가한 뒤 저장한다. 새로고침한다.
-
-Expected: 메모와 태그가 그대로 보인다(가장 최근 행을 읽는다).
-
-태그 하나를 ×로 지우고 저장한 뒤 새로고침한다.
-
-Expected: 지운 태그가 사라진다. DB에는 행이 **둘** 있다:
-
-```bash
-.venv/bin/python -c "
-from supabase import create_client
-from pipeline.lib.secrets import require
-c = create_client(require('SUPABASE_URL'), require('SUPABASE_SECRET_KEY'))
-for r in c.table('notes').select('article_id,text,tags,created_at').order('created_at').execute().data:
-    print(r['created_at'], r['tags'], r['text'][:30])
-"
-```
+Expected: uuid가 출력된다. 새로고침한 뒤 다시 `getSession()`을 불러도 같은 값이 나온다 (`persistSession`).
 
 - [ ] **Step 5: 커밋**
 
 ```bash
-git add web/src/components/Note.tsx web/src/components/Card.tsx web/src/lib/supabase.ts
-git commit -m "feat: 메모·태그 — 추가 전용, 읽을 때 최신 행"
+cd "$(git rev-parse --show-toplevel)"
+git add web/src/lib/auth.ts web/src/components/SignIn.tsx
+git commit -m "feat: 로그인 — 읽기는 익명, 쓰기만 인증"
 ```
 
 ---
 
-## Task 12: 색인 차단과 점검 문서 갱신
+## Task 11: 좋아요 — 토글과 클릭 기록
+
+초판은 anon이 INSERT만 가능해서 `localStorage`로 "눌렀는지"를 기억했다. 인증이 생겼으므로 **DB가 기억하고 토글이 된다.**
+
+**Files:**
+- Create: `web/src/lib/likes.ts`
+- Create: `web/src/components/LikeButton.tsx`
+
+- [ ] **Step 1: `web/src/lib/likes.ts`**
+
+> **모듈 수준 캐시를 쓰는 이유.** 카드가 7장이면 각 `LikeButton`이 "내가 눌렀나"를 따로 물어 질의가 7번 간다. React 컨텍스트로 묶으려면 `App.tsx`에 프로바이더를 넣어야 하는데, `App.tsx`는 Task 9에서 쓰고 더 고치지 않는다. 모듈 수준 캐시가 프로바이더 없이 같은 일을 한다.
+
+```typescript
+import { supabase } from './supabase'
+
+// 내가 좋아요한 article_id 집합. 로그인 상태에서 한 번만 받아 공유한다.
+// RLS가 auth.uid() = user_id로 좁히므로 **내 행만** 온다.
+let cache: Promise<Set<number>> | null = null
+
+// 집합이 바뀔 때 다시 그릴 컴포넌트들.
+const listeners = new Set<() => void>()
+
+function announce(): void {
+  for (const notify of listeners) notify()
+}
+
+export function subscribe(notify: () => void): () => void {
+  listeners.add(notify)
+  return () => listeners.delete(notify)
+}
+
+/** 로그아웃·로그인 시 캐시를 버린다. 사용자가 바뀌면 집합도 달라진다. */
+export function resetLikes(): void {
+  cache = null
+  announce()
+}
+
+export function loadLikes(): Promise<Set<number>> {
+  if (cache) return cache
+  cache = (async () => {
+    const { data, error } = await supabase.from('reactions').select('article_id')
+    // 로그인하지 않았으면 권한이 없어 오류가 난다. 그건 정상이므로
+    // 빈 집합으로 둔다 — 하트가 전부 빈 상태로 그려진다.
+    if (error) return new Set<number>()
+    return new Set<number>((data ?? []).map((row) => row.article_id as number))
+  })()
+  return cache
+}
+
+/**
+ * 좋아요를 뒤집는다. 돌려주는 값은 **뒤집은 뒤의 상태**다.
+ * 로그인하지 않았으면 호출하지 않는다 (버튼이 먼저 로그인을 띄운다).
+ */
+export async function toggleLike(
+  articleId: number,
+  userId: string,
+): Promise<boolean> {
+  const liked = await loadLikes()
+
+  if (liked.has(articleId)) {
+    const { error } = await supabase
+      .from('reactions')
+      .delete()
+      .eq('article_id', articleId)
+    if (error) throw new Error(`좋아요를 지우지 못했다: ${error.message}`)
+    liked.delete(articleId)
+    announce()
+    return false
+  }
+
+  // user_id를 **명시해서** 넣는다. RLS의 with check가 auth.uid() = user_id를
+  // 요구하므로 빼면 거부된다.
+  const { error } = await supabase
+    .from('reactions')
+    .insert({ article_id: articleId, user_id: userId })
+  if (error) throw new Error(`좋아요를 넣지 못했다: ${error.message}`)
+  liked.add(articleId)
+  announce()
+  return true
+}
+
+/**
+ * 원문 링크 클릭을 기록한다. 실패해도 조용히 넘긴다 — 클릭 신호 하나보다
+ * 링크가 열리는 것이 중요하다.
+ *
+ * **인자는 articleId 하나다.** 세션은 안에서 읽는다 — 호출하는 쪽(Card)이
+ * 로그인 상태를 알 필요가 없고, 로그인 전에도 클릭은 기록되어야 한다
+ * (anon의 clicks INSERT 정책이 user_id null을 받는다).
+ *
+ * sendBeacon을 쓰지 않는 이유: 헤더를 설정할 수 없고 Supabase REST는
+ * apikey/Authorization을 요구한다.
+ */
+export function recordClick(articleId: number): void {
+  void (async () => {
+    const { data } = await supabase.auth.getSession()
+    await supabase.from('clicks').insert({
+      article_id: articleId,
+      // 로그인했으면 내 id, 아니면 null. RLS가 두 경로를 각각 허용한다.
+      user_id: data.session?.user?.id ?? null,
+    })
+  })().catch(() => undefined)
+}
+```
+
+- [ ] **Step 2: `web/src/components/LikeButton.tsx`**
+
+```typescript
+import { useEffect, useState } from 'react'
+import { useSession } from '../lib/auth'
+import { loadLikes, subscribe, toggleLike } from '../lib/likes'
+import SignIn from './SignIn'
+
+type Props = { articleId: number; className?: string }
+
+export default function LikeButton({ articleId, className = '' }: Props) {
+  const { session } = useSession()
+  const [liked, setLiked] = useState(false)
+  const [asking, setAsking] = useState(false)
+  const [busy, setBusy] = useState(false)
+
+  // 집합이 바뀌면(다른 카드에서 눌렀거나 로그인했을 때) 다시 읽는다.
+  useEffect(() => {
+    let alive = true
+    const read = () => {
+      void loadLikes().then((set) => {
+        if (alive) setLiked(set.has(articleId))
+      })
+    }
+    read()
+    const stop = subscribe(read)
+    return () => {
+      alive = false
+      stop()
+    }
+  }, [articleId, session])
+
+  async function press() {
+    // 로그인하지 않았으면 누른 자리에서 폼을 띄운다. 페이지를 가리지 않는다.
+    if (!session) {
+      setAsking(true)
+      return
+    }
+    setBusy(true)
+    try {
+      setLiked(await toggleLike(articleId, session.user.id))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={press}
+        disabled={busy}
+        aria-pressed={liked}
+        aria-label={liked ? '좋아요 취소' : '좋아요'}
+        // 44×44: 손가락 터치 목표 크기 (목업).
+        className={`flex h-11 w-11 items-center justify-center disabled:opacity-50 ${className}`}
+      >
+        <svg
+          viewBox="0 0 24 24"
+          className="h-[18px] w-[18px]"
+          fill={liked ? 'currentColor' : 'none'}
+          stroke="currentColor"
+          strokeWidth="1.6"
+          // accent는 상호작용에만 쓴다 (요구사항 O14).
+          style={{ color: liked ? 'var(--color-accent)' : 'var(--color-muted)' }}
+        >
+          <path d="M12 20.2l-1.4-1.3C6 14.8 3.4 12.4 3.4 9.3 3.4 6.9 5.3 5 7.7 5c1.4 0 2.7.6 3.5 1.7l.8 1 .8-1C13.6 5.6 14.9 5 16.3 5 18.7 5 20.6 6.9 20.6 9.3c0 3.1-2.6 5.5-7.2 9.6L12 20.2z" />
+        </svg>
+      </button>
+
+      {asking && (
+        <SignIn
+          onDone={() => {
+            setAsking(false)
+            // 로그인 직후 집합을 다시 받는다. onAuthStateChange가
+            // useSession을 갱신하고, 그것이 위 useEffect를 다시 돌린다.
+          }}
+          onCancel={() => setAsking(false)}
+        />
+      )}
+    </>
+  )
+}
+```
+
+- [ ] **Step 3: 로그인·로그아웃 시 캐시를 버린다**
+
+`web/src/lib/supabase.ts` 끝에 더한다. 사용자가 바뀌면 좋아요 집합도 달라지므로 캐시를 들고 있으면 안 된다.
+
+```typescript
+import { resetLikes } from './likes'
+
+// 로그인·로그아웃 때 좋아요 캐시를 버린다. 들고 있으면 로그아웃한 뒤에도
+// 하트가 채워진 채로 남는다.
+supabase.auth.onAuthStateChange((event) => {
+  if (event === 'SIGNED_IN' || event === 'SIGNED_OUT') resetLikes()
+})
+```
+
+> **순환 import를 주의한다.** `likes.ts`가 `supabase.ts`를 import하고 그 역도 생긴다. ES 모듈이 순환을 허용하지만 평가 순서에 따라 `resetLikes`가 아직 정의되지 않을 수 있다. 위 코드는 콜백 **안에서만** 부르므로 안전하다 — 모듈 평가가 끝난 뒤에 실행된다.
+
+- [ ] **Step 4: 직접 눌러 확인한다**
+
+```bash
+cd web && npm run dev
+```
+
+| 확인할 것 | 기대 |
+|---|---|
+| 로그아웃 상태에서 하트 클릭 | 로그인 폼이 **그 자리에** 뜬다. 페이지가 가려지지 않는다 |
+| 로그인 후 하트 클릭 | 채워진다 |
+| 다시 클릭 | **빈다** (초판에서는 불가능했던 것) |
+| 새로고침 | 채워진 상태가 유지된다 |
+| 다른 브라우저에서 같은 계정으로 로그인 | **같은 글이 채워져 보인다** |
+| 로그아웃 | 하트가 전부 빈다 |
+
+- [ ] **Step 5: 커밋**
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+git add web/src/lib/likes.ts web/src/components/LikeButton.tsx web/src/lib/supabase.ts
+git commit -m "feat: 좋아요 토글 — DB가 기억하고 기기 간 같게 보인다"
+```
+
+---
+
+## Task 12: 메모와 태그
+
+**추가 전용이다.** `notes`에 UPDATE·DELETE를 주지 않았다. 저장할 때마다 새 행이 생기고, 읽을 때 그 글의 **가장 최근 행**을 쓴다. 화면에서는 제자리 수정과 구별되지 않으면서 수정 이력이 남는다.
+
+**Files:**
+- Create: `web/src/lib/notes.ts`
+- Create: `web/src/components/Note.tsx`
+- Modify: `web/src/components/Card.tsx`
+
+- [ ] **Step 1: `web/src/lib/notes.ts`**
+
+```typescript
+import { supabase } from './supabase'
+
+export type Note = { text: string; tags: string[] }
+
+/**
+ * 그 글의 가장 최근 메모. 없으면 null이다.
+ * 추가 전용이므로 행이 여러 개일 수 있고 **최신 하나만** 의미가 있다.
+ */
+export async function loadNote(articleId: number): Promise<Note | null> {
+  const { data, error } = await supabase
+    .from('notes')
+    .select('text, tags')
+    .eq('article_id', articleId)
+    .order('created_at', { ascending: false })
+    .limit(1)
+
+  // 로그인하지 않았으면 권한이 없다. 메모는 로그인 후에만 보이므로 정상이다.
+  if (error) return null
+
+  const row = data?.[0]
+  if (!row) return null
+  return { text: row.text as string, tags: (row.tags ?? []) as string[] }
+}
+
+/**
+ * 메모를 저장한다. **새 행을 넣는다** — 수정이 아니다.
+ * 태그 삭제도 "그 태그를 뺀 새 행"으로 표현된다.
+ */
+export async function saveNote(
+  articleId: number,
+  userId: string,
+  note: Note,
+): Promise<void> {
+  const { error } = await supabase.from('notes').insert({
+    article_id: articleId,
+    // RLS의 with check가 auth.uid() = user_id를 요구한다. 빼면 거부된다.
+    user_id: userId,
+    text: note.text.trim(),
+    tags: note.tags,
+  })
+  if (error) throw new Error(`메모를 저장하지 못했다: ${error.message}`)
+}
+
+/** 입력한 태그 문자열을 정리한다. 쉼표·공백으로 나누고 중복을 없앤다. */
+export function parseTags(input: string): string[] {
+  const parts = input
+    .split(/[,\s]+/)
+    .map((tag) => tag.replace(/^#/, '').trim())
+    .filter((tag) => tag.length > 0)
+  // Set으로 중복을 없애면서 입력 순서를 유지한다.
+  return [...new Set(parts)]
+}
+```
+
+- [ ] **Step 2: `web/src/components/Note.tsx`**
+
+```typescript
+import { useEffect, useState } from 'react'
+import { useSession } from '../lib/auth'
+import { loadNote, parseTags, saveNote, type Note as NoteData } from '../lib/notes'
+import SignIn from './SignIn'
+
+type Props = { articleId: number }
+
+export default function Note({ articleId }: Props) {
+  const { session } = useSession()
+  const [open, setOpen] = useState(false)
+  const [asking, setAsking] = useState(false)
+  const [note, setNote] = useState<NoteData>({ text: '', tags: [] })
+  const [tagInput, setTagInput] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [saved, setSaved] = useState(false)
+
+  // 열 때, 그리고 로그인 상태가 바뀔 때 최신 행을 읽는다.
+  useEffect(() => {
+    if (!open || !session) return
+    let alive = true
+    void loadNote(articleId).then((found) => {
+      if (alive && found) setNote(found)
+    })
+    return () => {
+      alive = false
+    }
+  }, [open, session, articleId])
+
+  function press() {
+    if (!session) {
+      setAsking(true)
+      return
+    }
+    setOpen((was) => !was)
+  }
+
+  async function save() {
+    if (!session) return
+    setBusy(true)
+    try {
+      // 입력창에 남은 태그도 함께 넣는다 — 엔터를 누르지 않고 저장하는
+      // 경우가 흔하고, 그때 조용히 사라지면 안 된다.
+      const pending = parseTags(tagInput)
+      const merged = { text: note.text, tags: [...new Set([...note.tags, ...pending])] }
+      await saveNote(articleId, session.user.id, merged)
+      setNote(merged)
+      setTagInput('')
+      setSaved(true)
+      setTimeout(() => setSaved(false), 1800)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  function removeTag(tag: string) {
+    // 화면에서만 뺀다. 저장을 누를 때 "그 태그가 없는 새 행"이 들어간다.
+    setNote((was) => ({ ...was, tags: was.tags.filter((item) => item !== tag) }))
+  }
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={press}
+        aria-expanded={open}
+        className="flex h-11 items-center text-[11.5px] font-medium"
+        style={{ color: 'var(--color-accent)' }}
+      >
+        {open ? '메모 닫기' : note.text || note.tags.length ? '메모 보기' : '메모'}
+      </button>
+
+      {asking && (
+        <SignIn onDone={() => { setAsking(false); setOpen(true) }} onCancel={() => setAsking(false)} />
+      )}
+
+      {open && session && (
+        <div className="mt-1.5 rounded-md border border-line bg-panel p-3">
+          <textarea
+            value={note.text}
+            onChange={(event) => setNote({ ...note, text: event.target.value })}
+            rows={3}
+            placeholder="이 글에 대해 남길 메모"
+            className="mb-2 w-full resize-y rounded border border-edge bg-bg px-2.5 py-2 text-[13.5px] leading-[1.6]"
+          />
+
+          {note.tags.length > 0 && (
+            <div className="mb-2 flex flex-wrap gap-1.5">
+              {note.tags.map((tag) => (
+                <span
+                  key={tag}
+                  className="flex items-center gap-1 rounded bg-tag px-2 py-0.5 text-[11.5px] text-ink-2"
+                >
+                  {tag}
+                  <button
+                    type="button"
+                    onClick={() => removeTag(tag)}
+                    aria-label={`${tag} 태그 빼기`}
+                    className="text-muted"
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+
+          <input
+            value={tagInput}
+            onChange={(event) => setTagInput(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key !== 'Enter') return
+              event.preventDefault()
+              const parsed = parseTags(tagInput)
+              if (parsed.length === 0) return
+              setNote((was) => ({ ...was, tags: [...new Set([...was.tags, ...parsed])] }))
+              setTagInput('')
+            }}
+            placeholder="태그 (쉼표나 엔터로 구분)"
+            className="mb-2.5 w-full rounded border border-edge bg-bg px-2.5 py-1.5 text-[12.5px]"
+          />
+
+          <div className="flex items-center gap-2.5">
+            <button
+              type="button"
+              onClick={save}
+              disabled={busy}
+              className="rounded px-3 py-1.5 text-[12.5px] font-medium text-white disabled:opacity-50"
+              style={{ backgroundColor: 'var(--color-accent)' }}
+            >
+              {busy ? '저장 중…' : '저장'}
+            </button>
+            {saved && <span className="text-[12px] text-muted">저장했습니다</span>}
+          </div>
+
+          <p className="mt-2 text-[11.5px] leading-[1.5] text-muted-2">
+            저장할 때마다 새 기록이 쌓입니다. 이전 메모는 지워지지 않습니다.
+          </p>
+        </div>
+      )}
+    </>
+  )
+}
+```
+
+- [ ] **Step 3: `Card.tsx`에 메모를 붙인다**
+
+Task 6에서 만든 `web/src/components/Card.tsx`에 import를 더한다.
+
+```typescript
+import Note from './Note'
+```
+
+그리고 메타 줄(`<div className="mt-0.5 flex items-center gap-2.5 …">`) **다음에**, `</article>` 앞에 넣는다. 메타 줄 **안**이 아니다 — 메모는 펼쳐지면 카드 아래로 자라므로 `flex items-center` 안에 들어가면 레이아웃이 깨진다.
+
+```typescript
+      <div className="mt-0.5 flex items-center gap-2.5 font-meta text-[11.5px] text-muted">
+        <span>{article.source}</span>
+        <span aria-hidden="true">·</span>
+        <span className="font-medium text-ink-2">{article.score}</span>
+        <LikeButton articleId={article.id} className="ml-auto -mr-2.5" />
+      </div>
+
+      <Note articleId={article.id} />
+    </article>
+```
+
+- [ ] **Step 4: 직접 써서 확인한다**
+
+| 확인할 것 | 기대 |
+|---|---|
+| 로그아웃 상태에서 "메모" | 로그인 폼이 뜬다 |
+| 메모를 쓰고 저장 | "저장했습니다"가 잠깐 뜬다 |
+| 닫고 다시 열기 | 쓴 내용이 그대로 있다 (최신 행) |
+| 내용을 바꾸고 저장, 다시 열기 | **바꾼 내용**이 보인다 (제자리 수정처럼 보인다) |
+| 태그를 넣고 엔터 | 칩으로 들어간다 |
+| 태그 `×` 누르고 저장 | 그 태그가 빠진다 |
+| 대시보드에서 `select * from notes` | **행이 여러 개다** — 추가 전용이 동작한다는 증거다 |
+
+- [ ] **Step 5: 커밋**
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+git add web/src/lib/notes.ts web/src/components/Note.tsx web/src/components/Card.tsx
+git commit -m "feat: 메모와 태그 — 추가 전용, 최신 행을 읽는다"
+```
+
+---
+
+## Task 13: 색인 차단
 
 **Files:**
 - Create: `docs/robots.txt`
-- Modify: `docs/공개-전-점검.md`
+- Modify: `design/공개-전-점검.md`
 
 - [ ] **Step 1: `docs/robots.txt`**
 
@@ -1930,74 +2226,76 @@ User-agent: *
 Disallow: /
 ```
 
-요구사항 D4. 스펙 7.2: "GitHub Pages는 검색엔진에 색인되므로, 이것이 없으면
-'아무도 모르는 URL'이라는 전제가 깨진다." `index.html`의 `noindex` 메타와 **둘 다**
-둔다 — `robots.txt`는 크롤링을, 메타는 이미 수집된 페이지의 색인을 막는다.
+요구사항 D4. 스펙 7.2: "GitHub Pages는 검색엔진에 색인되므로, 이것이 없으면 '아무도 모르는 URL'이라는 전제가 깨진다." Task 3의 `noindex` 메타와 **둘 다** 둔다 — `robots.txt`는 크롤링을, 메타는 이미 수집된 페이지의 색인을 막는다.
 
-- [ ] **Step 2: 점검 문서의 "공개되지 않는 것"을 고친다**
+> **`robots.txt`가 접근을 막지는 않는다.** 크롤러에게 하는 부탁이다. 그래서 Task 1에서 설계 문서를 `docs/` 밖으로 옮겼고, 민감한 것은 애초에 웹 루트에 두지 않는다.
 
-**이 줄을 지운다:**
+- [ ] **Step 2: 점검 문서를 갱신한다**
 
+`design/공개-전-점검.md`의 "3. 검토했고 공개해도 되는 것" 표에 두 줄을 더한다.
+
+```markdown
+| `docs/assets/*.js`의 Supabase URL과 publishable 키 | **의도된 노출이다.** 브라우저가 Supabase에 직접 붙으므로 빌드 산출물에 들어간다. 스펙 7.2: "publishable 키는 비밀이 아니다 — 브라우저에 노출되도록 설계된 키다." 실제 방어는 RLS이고, 계획 2 Task 2 Step 9에서 실측했다. **secret 키는 들어가지 않는다** — Vite는 `VITE_` 접두사만 클라이언트에 넣는다 |
+| `supabase/migrations/*.sql` | RLS 정책과 grant가 전부 보인다. 보안이 스키마 비밀에 의존하지 않는다 |
 ```
-- **Supabase 프로젝트 ref·URL** — 추적 파일에 한 건도 없다
+
+그리고 "4. 공개되지 않는 것"에 한 줄을 더한다. 직접 조회로 바꾼 결과다.
+
+```markdown
+- **기사 데이터** — 헤드라인·요약·판단 근거가 **리포지토리에 전혀 커밋되지 않는다.**
+  페이지가 Supabase를 직접 조회하므로 `docs/data/` 같은 디렉터리가 없다.
+  타인 저작물에서 파생된 내용이 공개 git 히스토리에 영구히 쌓이지 않는다
+  (설계 2.1이 "전환 시 가장 먼저 검토"로 꼽은 저작권 항목과 같은 방향이다)
 ```
-
-**대신 "검토했고 공개해도 되는 것" 표에 추가한다:**
-
-| 항목 | 판단 |
-|---|---|
-| `docs/assets/*.js`의 Supabase URL과 publishable 키 | **의도된 노출이다.** 브라우저가 Supabase에 직접 붙으므로 빌드 산출물에 들어간다. 스펙 7.2: "publishable 키는 비밀이 아니다 — 브라우저에 노출되도록 설계된 키다." 실제 방어는 RLS이고 `verify_anon_access.sh`로 실측 확인했다. **secret 키는 들어가지 않는다**(파이프라인만 쓴다) |
 
 - [ ] **Step 3: secret 키가 빌드 산출물에 없는지 확인**
 
 이게 이 태스크의 핵심 검증이다.
 
 ```bash
-cd "$(git rev-parse --show-toplevel)"
+cd "$(git rev-parse --show-toplevel)/web" && npm run build && cd ..
 grep -rl "sb_secret_" docs/assets/ 2>/dev/null && echo "⚠️  secret 키가 들어갔다" || echo "✓ secret 키 없음"
 grep -rlo "sb_publishable_[A-Za-z0-9_-]*" docs/assets/ 2>/dev/null | head -1
 ```
 
-Expected: secret 키 없음. publishable 키는 있어도 정상이다.
-
-> Vite는 `VITE_` 접두사가 붙은 환경 변수만 클라이언트에 넣는다. 루트 `.env`의
-> `SUPABASE_SECRET_KEY`는 접두사가 없고 `web/.env.local`에도 없으므로 들어갈
-> 경로가 없다 — 그래도 공개 리포이므로 매 빌드마다 확인한다.
+Expected: secret 키 없음. publishable 키는 **있어야 정상이다** — 없으면 `.env.local`이 빌드에 안 들어간 것이다.
 
 - [ ] **Step 4: 커밋**
 
 ```bash
-git add docs/robots.txt docs/공개-전-점검.md
-git commit -m "feat: 색인 차단 + 점검 문서에 publishable 키 노출을 기록"
+cd "$(git rev-parse --show-toplevel)"
+git add docs/robots.txt design/공개-전-점검.md
+git commit -m "feat: 색인 차단 + 점검 문서에 노출 면 기록"
 ```
 
 ---
 
-## Task 13: GitHub Pages 배포
+## Task 14: GitHub Pages 배포
 
 **Files:**
-- 설정만 (리포지토리 설정)
+- 설정 + 빌드 산출물
 
-- [ ] **Step 1: Pages를 `docs/`로 켠다**
+- [ ] **Step 1: Pages를 `main`의 `/docs`로 켠다**
 
 ```bash
 gh api -X POST repos/predevho/topic-briefing/pages \
   -f 'source[branch]=main' -f 'source[path]=/docs'
 ```
 
-실패하면 웹에서 한다: Settings → Pages → Source: *Deploy from a branch* →
-Branch `main`, 폴더 `/docs`.
+실패하면 웹에서 한다: Settings → Pages → Source: *Deploy from a branch* → Branch `main`, 폴더 `/docs`.
 
-- [ ] **Step 2: 빌드 결과를 커밋하고 푸시**
+- [ ] **Step 2: 빌드하고 커밋한다**
 
 ```bash
-cd web && npm run build && cd ..
+cd "$(git rev-parse --show-toplevel)/web" && npm run build && cd ..
 git add docs/
 git commit -m "build: 페이지 빌드 산출물"
 git push origin main
 ```
 
-- [ ] **Step 3: 배포를 기다려 확인**
+> **이것이 매일 하는 일이 아니다.** 빌드 산출물은 **코드가 바뀔 때만** 커밋한다. 브리핑이 새로 나오는 것은 파이프라인이 Supabase에 쓰는 것으로 끝이고, 페이지는 열릴 때 조회한다(스펙 6.4의 분리). Task 15 Step 1이 이것을 검증한다.
+
+- [ ] **Step 3: 배포를 기다려 확인한다**
 
 ```bash
 gh api repos/predevho/topic-briefing/pages --jq '"status: \(.status)  url: \(.html_url)"'
@@ -2005,7 +2303,7 @@ gh api repos/predevho/topic-briefing/pages --jq '"status: \(.status)  url: \(.ht
 
 Expected: `status: built`, `url: https://predevho.github.io/topic-briefing/`
 
-- [ ] **Step 4: 실제 URL을 폰과 데스크톱에서 확인**
+- [ ] **Step 4: 실제 URL을 폰과 데스크톱에서 확인한다**
 
 | 확인할 것 | 기대 |
 |---|---|
@@ -2016,132 +2314,209 @@ Expected: `status: built`, `url: https://predevho.github.io/topic-briefing/`
 | `.../robots.txt` | `Disallow: /` |
 | 폰 (가로 390px 정도) | 1열, 글자가 읽히는 크기 |
 | 데스크톱 | 2열 (`md:grid-cols-2`) |
+| **로그인하지 않은 상태** | 브리핑이 **그대로 읽힌다.** 로그인 화면이 뜨지 않는다 |
 
-**`base`가 틀리면 JS·CSS가 404가 되어 빈 화면이 뜬다.** 그러면
-`vite.config.ts`의 `base`를 `/topic-briefing/`으로 확인한다.
+**`base`가 틀리면 JS·CSS가 404가 되어 빈 화면이 뜬다.** 그러면 `web/vite.config.ts`의 `base`를 `/topic-briefing/`으로 확인한다.
 
-- [ ] **Step 5: `README.md`에 배포 절차를 적는다**
-
-"## 매일 실행" 아래에 추가:
-
-```markdown
-페이지까지 갱신하려면 두 단계를 더 한다.
+- [ ] **Step 5: 커밋 (있으면)**
 
 ```bash
-python -m pipeline.render      # docs/data/<날짜>.json + index.json
-cd web && npm run build && cd ..   # docs/index.html + assets/
-git add docs/ && git commit -m "build: 브리핑 갱신" && git push
-```
-
-`render`만 돌리고 빌드를 건너뛰어도 된다 — **SPA는 코드가 바뀔 때만 다시
-빌드한다.** JSON만 커밋하면 페이지가 새 날짜를 읽는다(스펙 6.4).
-```
-
-- [ ] **Step 6: 커밋**
-
-```bash
-git add README.md
-git commit -m "docs: 페이지 배포 절차"
-git push origin main
+git status --short
 ```
 
 ---
 
-## Task 14: 엔드투엔드 검증
+## Task 15: 엔드투엔드 검증과 문서 갱신
 
-- [ ] **Step 1: 파이프라인부터 페이지까지 한 번에 돌린다**
+- [ ] **Step 1: 파이프라인과 프론트엔드의 분리를 검증한다 (요구사항 O11)**
+
+**이것이 이 계획에서 가장 중요한 검증이다.** 빌드도 커밋도 없이, DB에 행을 넣는 것만으로 페이지에 새 날짜가 보여야 한다.
 
 ```bash
 cd "$(git rev-parse --show-toplevel)"
-.venv/bin/python -m pipeline.collect
-.venv/bin/python -m pipeline.rank
-.venv/bin/python -m pipeline.enrich
-.venv/bin/python -m pipeline.summarize
-.venv/bin/python -m pipeline.notify
-.venv/bin/python -m pipeline.render
-git add docs/data/ && git commit -m "build: 브리핑 갱신" && git push
+.venv/bin/python - <<'PY'
+import os
+from datetime import datetime, timezone
+from supabase import create_client
+
+client = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SECRET_KEY"])
+DATE = "2099-01-01"   # 실제 날짜와 섞이지 않는 값
+
+client.table("runs").insert({
+    "briefing_date": DATE,
+    "window_start": "2099-01-01T00:00:00+00:00",
+    "window_end": "2099-01-01T12:00:00+00:00",
+    "status": "sent",
+    "sent_at": datetime.now(timezone.utc).isoformat(),
+    "collected_count": 7, "considered_count": 3, "max_score": 88,
+    "published_count": 1, "source_counts": {"검증용": 1},
+    "input_tokens": None, "errors": [],
+}).execute()
+
+client.table("articles").insert({
+    "briefing_date": DATE,
+    "url": "https://example.com/separation-check",
+    "source": "검증용", "published_at": "2099-01-01T06:00:00+00:00",
+    "headline": "분리 검증용 글",
+    "bullets": ["빌드 없이 보이는지 확인한다"],
+    "why_it_matters": "파이프라인과 프론트엔드가 분리됐다는 증거다.",
+    "topic": "other", "score": 88, "reason": "검증용",
+}).execute()
+print(f"{DATE} 행을 넣었다. 빌드하지 않는다.")
+PY
 ```
 
-Expected: 1~2분 뒤 페이지에 그날 브리핑이 보인다. **빌드를 다시 하지 않았는데도
-보여야 한다** — 그게 스펙 6.4의 분리가 작동한다는 증거다.
+브라우저에서 `https://predevho.github.io/topic-briefing/2099-01-01`을 **새로고침만** 한다.
 
-- [ ] **Step 2: 0건인 날을 만들어 본다**
+Expected: "분리 검증용 글"이 보인다. **`npm run build`도 `git push`도 하지 않았다.** 보이면 O11이 충족된다.
 
-`notify` 직후 윈도우가 전진하므로 바로 다시 돌리면 0건이 된다
-(계획 1의 Task 22에서 확인한 경로).
+치운다.
 
 ```bash
-.venv/bin/python -m pipeline.collect && .venv/bin/python -m pipeline.rank \
-  && .venv/bin/python -m pipeline.enrich && .venv/bin/python -m pipeline.summarize \
-  && .venv/bin/python -m pipeline.notify --force && .venv/bin/python -m pipeline.render
+.venv/bin/python - <<'PY'
+import os
+from supabase import create_client
+client = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SECRET_KEY"])
+client.table("articles").delete().eq("briefing_date", "2099-01-01").execute()
+client.table("runs").delete().eq("briefing_date", "2099-01-01").execute()
+print("검증용 행을 지웠다")
+PY
 ```
 
-Expected: 페이지가 "오늘은 보낼 글이 없습니다"와 **왜 비었는지**(수집·최고 점수·
-기준)를 보여준다.
+- [ ] **Step 2: 0건인 날이 보이는지 검증한다 (요구사항 D8)**
 
-- [ ] **Step 3: 상호작용이 쌓이는지 확인**
+`runs` 행만 있고 `articles`가 없는 날짜를 만들어, 화면이 "없는 날짜"가 아니라 **"조용한 날"**로 그리는지 본다. 이게 `runs.briefing_date` 마이그레이션의 목적이다.
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+.venv/bin/python - <<'PY'
+import os
+from datetime import datetime, timezone
+from supabase import create_client
+client = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SECRET_KEY"])
+client.table("runs").insert({
+    "briefing_date": "2099-01-02",
+    "window_start": "2099-01-02T00:00:00+00:00",
+    "window_end": "2099-01-02T12:00:00+00:00",
+    "status": "sent", "sent_at": datetime.now(timezone.utc).isoformat(),
+    "collected_count": 240, "considered_count": 10, "max_score": 52,
+    "published_count": 0, "source_counts": {"검증용": 240},
+    "input_tokens": None, "errors": [],
+}).execute()
+print("0건인 날을 만들었다")
+PY
+```
+
+| URL | 기대 |
+|---|---|
+| `.../2099-01-02` | "후보 10건을 봤지만 기준을 넘긴 글이 없었습니다" + **수집 240건 / 최고 52점 / 기준 60점** |
+| `.../archive` | `2099-01-02`가 **0건으로 목록에 있다** |
+| `.../1999-01-01` | "그 날짜의 브리핑이 없습니다" (실행 기록조차 없는 날짜) |
+
+**수치가 0으로 나오면 마이그레이션이 적용되지 않은 것이다.** Task 2 Step 7로 돌아간다.
+
+치운다.
 
 ```bash
 .venv/bin/python -c "
+import os
 from supabase import create_client
-from pipeline.lib.secrets import require
-c = create_client(require('SUPABASE_URL'), require('SUPABASE_SECRET_KEY'))
-for t in ('reactions', 'clicks', 'notes'):
-    n = c.table(t).select('id', count='exact').execute().count
-    print(f'{t}: {n}건')
+create_client(os.environ['SUPABASE_URL'], os.environ['SUPABASE_SECRET_KEY']).table('runs').delete().eq('briefing_date', '2099-01-02').execute()
+print('지웠다')
 "
 ```
 
-Expected: 폰에서 누른 좋아요와 클릭이 보인다.
+- [ ] **Step 3: 권한을 실측한다**
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+bash scripts/verify_anon_access.sh
+```
+
+Expected: 전부 통과 — 본문 차단(D2), `reason` 차단, `runs.errors` 차단, anon 좋아요 차단.
 
 - [ ] **Step 4: 전체 테스트**
 
-Run: `.venv/bin/python -m pytest`
-Expected: 전부 통과
+```bash
+.venv/bin/python -m pytest
+```
 
-- [ ] **Step 5: 커밋**
+Expected: 397 passed
+
+- [ ] **Step 5: 요구사항 문서를 갱신한다**
+
+`design/superpowers/specs/2026-11-11-requirements.md`에서 수단이 바뀐 행을 고친다. **의도는 그대로이고 수단만 바뀌었다** — 그 구분이 문서에 남아야 한다.
+
+| ID | 고칠 내용 |
+|---|---|
+| O9 | 충족 위치 → `계획 2 Task 7·8`, 상태 → ✅ |
+| O10 | 상태 → ✅ (Task 14 Step 4에서 실측) |
+| **O11** | 요구사항 문구를 "SPA + **런타임 조회** (파이프라인과 프론트 분리)"로. 충족 위치 → `계획 2 Task 5`. 검증 → "Task 15 Step 1 — 빌드·커밋 없이 DB에 행을 넣어 새 날짜가 보이는지 확인". 상태 → ✅ |
+| O12 | 상태 → ✅ |
+| **O13** | 검증 문구에서 "anon은 INSERT만 가능 / `localStorage`"를 지운다. → "**인증 후 `auth.uid() = user_id` RLS.** 좋아요는 토글(삽입·삭제), 메모는 추가 전용 + 최신 행 읽기". 상태 → ✅ |
+| O14 | 상태 → ✅ |
+| **D3** | 충족 위치 → "**구조적**: 리포지토리에 기사 데이터를 전혀 커밋하지 않는다. 페이지가 Supabase를 직접 조회하므로 `docs/data/`가 없다". 상태 → ✅ |
+| D4 | 충족 위치 → `계획 2 Task 3·13`, 상태 → ✅ |
+| **D8** | 검증에 한 줄 추가 → "계획 2 Task 2가 `runs.briefing_date`를 더해 페이지가 이 데이터에 도달한다. Task 15 Step 2에서 실측". 상태 → ✅ |
+
+- [ ] **Step 6: `README.md`를 갱신한다**
+
+"## 매일 실행" 절에 더한다.
+
+```markdown
+페이지는 **아무것도 하지 않아도 갱신된다.** 파이프라인이 Supabase에 쓰면
+페이지가 열릴 때 조회한다 — 빌드도 커밋도 필요 없다(스펙 6.4의 분리).
+
+프론트엔드 **코드**를 바꿨을 때만 배포한다.
 
 ```bash
-git add -A && git commit -m "docs: 계획 2 엔드투엔드 검증 기록" && git push
+cd web && npm run build && cd ..
+git add docs/ && git commit -m "build: 페이지 갱신" && git push
+```
+
+페이지: <https://predevho.github.io/topic-briefing/>
+```
+
+- [ ] **Step 7: 커밋**
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+git add design/ README.md
+git commit -m "docs: 요구사항·README를 직접 조회 방식으로 갱신"
+git push origin main
 ```
 
 ---
 
 ## 완료 조건
 
-- [ ] `pytest`가 전부 통과한다
-- [ ] 공개 URL을 폰에서 열면 그날 브리핑이 읽힌다
-- [ ] `/:date`를 직접 열어도 뜬다 (404 폴백)
-- [ ] 없는 날짜는 "그 날짜의 브리핑이 없습니다."가 뜬다
-- [ ] 아카이브에 0건인 날도 보인다
-- [ ] 0건인 날 화면이 **왜 비었는지**(수집·최고 점수·기준)를 보여준다
-- [ ] 모바일 1열 / 태블릿 이상 2열
-- [ ] 좋아요를 누르면 `reactions`에 `user_id=NULL`로 들어가고, 새로고침해도 채워져 있다
-- [ ] 원문을 클릭하면 `clicks`에 들어간다
-- [ ] 메모를 저장하고 새로고침하면 남아 있다
-- [ ] 태그를 지우고 저장하면 `notes`에 행이 **하나 더** 쌓인다 (추가 전용)
-- [ ] `robots.txt`가 `Disallow: /`이고 HTML에 `noindex`가 있다
-- [ ] `docs/assets/`에 **secret 키가 없다** (publishable 키는 있어도 정상)
-- [ ] `npm run build`가 `docs/superpowers/`와 `docs/data/`를 **지우지 않는다**
-- [ ] `render`만 돌리고 커밋해도 페이지에 새 날짜가 보인다 (파이프라인·프론트 분리)
-- [ ] `docs/공개-전-점검.md`가 publishable 키 노출을 기록하고 있다
+- [ ] `design/`에 설계·계획 문서가 있고 `docs/`에는 빌드 산출물과 `robots.txt`·`.nojekyll`·`404.html`만 있다
+- [ ] `https://predevho.github.io/topic-briefing/`이 **로그인 없이** 최신 브리핑을 보여준다
+- [ ] `/:date`와 `/archive`가 동작하고, 없는 날짜는 "없습니다"로 끝난다
+- [ ] 0건인 날이 아카이브에 0건으로 보이고, 그 날짜 화면이 수집 건수·최고 점수·기준을 보여준다
+- [ ] 좋아요가 **토글되고**, 다른 기기에서 같은 계정으로 보면 같게 보인다
+- [ ] 메모를 쓰고 다시 열면 그 내용이 있다. `notes` 테이블에는 행이 쌓여 있다
+- [ ] `scripts/verify_anon_access.sh`가 통과한다 — 본문·`reason`·`runs.errors`·anon 좋아요가 모두 막혔다
+- [ ] `docs/assets/`에 `sb_secret_`이 없다
+- [ ] 빌드도 커밋도 없이 DB에 넣은 새 날짜가 페이지에 보인다 (O11)
+- [ ] `.venv/bin/python -m pytest` 397 passed
+- [ ] 요구사항 문서의 O9~O14·D3·D4·D8이 ✅다
 
 ---
 
 ## 다음 계획
 
-**계획 3 (전달과 자동화):** `KakaoSender`·`SlackSender`·`lib/guard`·GitHub Actions.
-이 계획이 끝나면 **카톡의 "전체 보기" 버튼이 가리킬 곳이 생긴다** — 그것이
-계획 2를 먼저 하는 이유였다.
+**계획 3 (전달과 자동화):** `KakaoSender`·`SlackSender`·`lib/guard`·GitHub Actions. 이 계획이 끝나면 **카톡의 "전체 보기" 버튼이 가리킬 곳이 생긴다** — 그것이 계획 2를 먼저 하는 이유였다.
 
-계획 3에서 메워야 할 구멍은 `README.md`의 "계획 3에서 메워야 할 구멍" 절에 있다
-(`runs.input_tokens` 배선, 소스별 `quiet_days`).
+계획 3에서 메워야 할 구멍은 `README.md`의 같은 이름 절에 있다 (`runs.input_tokens` 배선, 소스별 `quiet_days`).
 
 ### 이 계획에서 의도적으로 하지 않은 것
 
-- **다크 모드** — 라이트 모드만 만든다. 쓰면서 필요하면 추가한다.
-- **좋아요 토글** — anon에 DELETE를 주지 않는다. `localStorage`가 기기별로 기억한다.
-- **메모 제자리 수정** — anon에 UPDATE를 주지 않는다. 추가 전용으로 쓰고 최신 행을 읽는다.
+- **사용자별 브리핑** — `interests.md`를 DB로 올리고 파이프라인을 사용자별로 돌리는 일. 설계 2.1: "비용이 아니라 **근거가 없기 때문이다.** 외부 사용자가 실제로 무엇에 반응하는지를 보고 정해야 한다. 상상으로 설계하면 틀린다." 사용자가 0명인 지금 하지 않는다. **인증은 이 계획에서 켰으므로, 그때 추가로 할 일은 큐레이션 모델뿐이다.**
+- **외부 사용자에게 알림** — 카카오 메시지 API는 같은 서비스 내 사용자 간 발송만 지원하고, 서비스→사용자 직접 발송은 사업자(채널·알림톡) 영역이다. 다수 사용자 알림이 목표가 되면 **슬랙·텔레그램·이메일**로 가야 한다 (설계 2.1).
+- **저작권 재검토** — 설계 2.1이 "전환 시 가장 먼저 검토해야 하는 항목"으로 꼽았다. 1인 열람은 사적 복제 범위라는 7.2의 전제가 유지되는 동안은 그대로 간다. **실제로 남에게 보내기 전에** 검토한다.
+- **다크 모드** — 라이트 모드만. Task 4가 색을 전부 CSS 변수로 두므로, 나중에 토큰 파일 한 곳에 다크 값을 더하고 `@media (prefers-color-scheme: dark)`로 덮으면 된다. 컴포넌트를 다시 손댈 일이 없다.
+- **메모 제자리 수정** — `notes`에 UPDATE를 주지 않는다. 추가 전용이 화면에서 같아 보이면서 수정 이력을 남긴다.
+- **공개 가입** — Supabase Auth의 "Allow new users to sign up"을 끈다. 열어 두면 아무나 계정을 만들어 좋아요를 넣을 수 있고, 그건 anon INSERT를 거둔 이유를 무효로 만든다. 사람을 늘릴 때는 대시보드에서 계정을 만든다.
+- **로그아웃 버튼** — `auth.ts`에 `signOut()`이 있지만 화면에 버튼을 두지 않았다. 1인용이고 **세션이 기기당 유지되는 것이 목적**이므로 로그아웃할 이유가 드물다. 필요하면 콘솔에서 `(await import('/src/lib/auth.ts')).signOut()`을 부른다. 화면에 넣으려면 `App.tsx`(Task 9)에 푸터를 더하면 되는데, 그 파일은 이 계획에서 초판 그대로 살리는 쪽을 택했다.
 - **소스 침묵 "N일 연속"** — 여러 날의 `runs`를 봐야 안다. 계획 3의 `lib/guard`가 한다.
-- **로그인** — 스펙 7.2가 "좋아요에 추가 인증을 두지 않는다"로 정했다.
-  다수 사용자 전환은 설계 2.1에 분석해 뒀고 `user_id` 컬럼만 선반영돼 있다.
