@@ -7038,7 +7038,7 @@ python -m pipeline.evaluate --limit 40
 > - "프로필이 잘 줄 세우나" → `--date _seed` (넓이)
 > - "임계값 60에서 몇 건이 통과하나" → `--date <오늘>` (물량)
 
-- [ ] **Step 6: 관심사 프로필을 튜닝한다 (반복)**
+- [x] **Step 6: 관심사 프로필을 튜닝한다 (반복)** — **1차 판단 완료: 수정 없음**
 
 출력을 보면서 다음을 확인한다.
 
@@ -7052,6 +7052,15 @@ python -m pipeline.evaluate --limit 40
 > 취향이고, 내가 대신 판정하면 내 취향으로 프로필을 깎는 것이 된다.
 > 1차 출력을 보여 주고 판단을 받는다.
 
+> **2026-11-12 판단: 상위 10건 그대로 통과.** `interests.md`를 고치지 않았다.
+> 첫 실행에서 바로 통과한 이유는 Task 11에서 프로필을 쓸 때 "보도자료
+> 재가공", "제품 마케팅", "내용 없는 동향 기사"를 **구체적인 예시와 함께**
+> 적어 둔 덕이다. 추상적인 단어만 적었다면 여러 번 돌려야 했을 것이다.
+>
+> 다음에 다시 돌릴 때 볼 것: `전자신문_사설`이 최하위 10건에 2건 들어
+> 있었다("기술 내용이 없다"). 한 번의 표본으로 소스를 끄기에는 근거가
+> 얇으니 몇 번 더 관찰한다.
+
 - [x] **Step 7: 커밋** (도구만. 프로필 튜닝은 Step 6 판단 후)
 
 ```bash
@@ -7063,16 +7072,78 @@ git commit -m "feat: 선별 품질 평가 도구 — 소스별 상한 표본, �
 
 ## Task 18: 본문 확보
 
-외부 크롤링은 구조적으로 가장 자주 깨지는 단계이면서, 폴백이 존재하는 유일한 단계다. **절대 중단하지 않는다.**
+외부 크롤링은 구조적으로 가장 자주 깨지는 단계이면서, 폴백이 존재하는 유일한
+단계다. **절대 중단하지 않는다.**
 
-분류가 여기서 실질적인 차이를 만든다 — **403(봇 차단)에 재시도를 걸면 10건이면 수십 초를 버린다.** 영구 실패는 즉시 발췌로 내려간다.
+분류가 여기서 실질적인 차이를 만든다 — **403(봇 차단)에 재시도를 걸면 10건이면
+수십 초를 버린다.** 영구 실패는 즉시 발췌로 내려간다.
 
 **Files:**
 - Create: `pipeline/enrich.py`
 - Create: `tests/fixtures/article.html`
 - Create: `tests/test_enrich.py`
 
-- [ ] **Step 1: HTML fixture 작성**
+> **계획에서 고친 것** (테스트 15개 → 25개)
+>
+> ### trafilatura는 `None`을 잘 주지 않는다
+>
+> 계획의 테스트 두 개가 통과할 수 없었다:
+>
+> ```python
+> assert extract_body(b"<html><body><nav>메뉴</nav></body></html>") is None
+> ```
+>
+> 실제로 확인해 보니 **`'메뉴'`를 돌려준다.** 그대로 본문으로 쓰면 브리핑에
+> "메뉴"가 실린다. `BODY_MIN_CHARS = 200`을 넣어 그보다 짧은 추출은 본문으로
+> 보지 않는다. 200자로 정한 근거는 **RSS 발췌가 중앙값 250자**(Task 13 실측)
+> 라서다 — 그보다 한참 짧은 추출은 발췌가 낫다.
+>
+> 같은 이유로 계획의 fixture도 고쳤다. 본문이 약 220자여서 하한에 간신히
+> 걸렸다 — 하한을 조금만 올리면 `test_본문을_추출한다`가 깨지는 상태였다.
+> 문단을 늘려 491자로 만들었다.
+>
+> ### 발췌 폴백에도 상한을 적용했다
+>
+> 계획은 `body[:BODY_MAX_CHARS]`를 두 경로에 공통으로 적용하므로 이미
+> 맞지만, **왜 필요한지가 적혀 있지 않았다.** 실측에서 Netflix 발췌가
+> 15,633자였다. 피드에 전문을 담는 소스가 있어서 폴백 쪽을 자르지 않으면
+> 요약 토큰이 튄다. 테스트로 못 박았다.
+
+**실측 (2026-11-12, 실제 상위 10건): 본문 확보 6건, 폴백 4건, 21초.**
+
+| 소스 | 결과 | 본문/발췌 |
+|---|---|---|
+| 토스_기술블로그 | 본문 | 8,147자 (발췌는 39자) |
+| Hacker_News_Best | 본문 | 5,254자 |
+| Shopify_Engineering | 본문 | 18,799자 |
+| Cloudflare_Blog | 본문 | 25,384자 |
+| Martin_Fowler | 본문 | 37,908자 |
+| 우아한형제들 | 본문 | 12,229자 |
+| 네이버_D2 × 3 | **추출 0자** | 발췌 975 / 14,790 / 1,015자 |
+| Netflix_Tech_Blog | **403** | 발췌 15,633자 |
+
+> **폴백이 품질 저하가 아니었다 — 반비례 관계가 있다.**
+>
+> 크롤링이 막히거나 JS로 그리는 소스가 **피드에 본문을 길게 담는다**:
+> Netflix 15,633자, 네이버 D2 14,790자가 사실상 전문이다. 반대로 본문 추출이
+> 성공한 소스의 발췌는 39~673자로 짧다. 즉 두 경로가 서로를 메운다.
+>
+> 남은 두 건(D2 975자·1,015자)은 **발표 영상 페이지**였다. "NAVER
+> Engineering Day 세션을 공개합니다 / 발표 내용 / 발표 대상 / 목차" 구조라
+> 읽을 본문이 애초에 없고, 그 발췌가 최선의 설명이다.
+>
+> 그래서 **UA를 브라우저로 위장하지 않았다.** Task 11에서 403 피드를 끈 것과
+> 같은 판단이고, 여기서는 폴백이 실제로 메워 주므로 더 그럴 이유가 없다.
+
+> **Task 19에 넘기는 수치**
+>
+> 기사 10건의 본문 합계 **63,244자 = 입력 37,432토큰**. 요약 프롬프트의
+> 입력 바닥값이다(프로필·지시문 별도).
+>
+> **10건 중 7건이 `BODY_MAX_CHARS`(8,000자) 상한에 걸렸다.** 즉 이 상수가
+> 요약 입력을 좌우하는 손잡이다. 5,000자로 내리면 입력이 약 23,000토큰이 된다.
+
+- [x] **Step 1: HTML fixture 작성**
 
 `tests/fixtures/article.html` — 본문 외에 내비게이션·광고·푸터가 섞인 실제 구조:
 
@@ -7085,27 +7156,40 @@ git commit -m "feat: 선별 품질 평가 도구 — 소스별 상한 표본, �
   <aside class="ad">지금 가입하면 10만원 할인! 광고 문의: ad@example.com</aside>
   <article>
     <h1>결제 서버 P99 40ms 달성기</h1>
-    <p>결제 서버의 P99 지연이 400ms였다. 사용자 이탈의 직접 원인이었다.</p>
-    <p>프로파일링 결과 커넥션 풀 고갈이 병목이었다. 풀 크기를 늘리는 것은
-       근본 해결이 아니었고, 실제 원인은 트랜잭션 경계가 너무 넓은 것이었다.</p>
-    <p>트랜잭션을 쪼갠 뒤 P99는 40ms로 떨어졌다. 교훈은 풀 크기보다
-       트랜잭션 수명을 먼저 보라는 것이다.</p>
+    <p>결제 서버의 P99 지연이 400ms였다. 사용자 이탈의 직접 원인이었고, 결제
+       전환율이 분기 내내 떨어지는 동안 원인을 찾지 못하고 있었다.</p>
+    <p>프로파일링 결과 커넥션 풀 고갈이 병목이었다. 처음에는 풀 크기를 늘리는
+       처방을 떠올렸지만 그것은 근본 해결이 아니었다. 풀을 두 배로 늘려도 지연은
+       280ms에서 멈췄고, 트래픽이 조금만 늘면 다시 400ms로 돌아왔다.</p>
+    <p>실제 원인은 트랜잭션 경계가 너무 넓은 것이었다. 외부 결제 게이트웨이를
+       호출하는 구간이 트랜잭션 안에 들어 있어, 네트워크 왕복 시간 동안 커넥션을
+       붙잡고 있었다. 평균 180ms의 외부 호출이 커넥션 하나를 그만큼 점유했다.</p>
+    <p>트랜잭션을 쪼개 외부 호출을 밖으로 빼낸 뒤 P99는 40ms로 떨어졌다. 풀
+       크기는 원래대로 되돌렸는데도 그랬다. 교훈은 풀 크기보다 트랜잭션 수명을
+       먼저 보라는 것이다. 지표로는 활성 커넥션 수가 아니라 커넥션 점유 시간을
+       봐야 병목이 드러난다.</p>
   </article>
   <footer>© 2026 Example Corp. 모든 권리 보유.</footer>
 </body>
 </html>
 ```
 
-- [ ] **Step 2: 실패하는 테스트 작성**
+추출 결과 491자, `채용`·`10만원 할인`·`모든 권리 보유`가 모두 걸러진다.
+
+- [x] **Step 2: 실패하는 테스트 작성**
 
 `tests/test_enrich.py`:
 
 ```python
 from pathlib import Path
 
+import pytest
+
 from pipeline.enrich import (
     ARTICLE_ATTEMPTS,
     BODY_MAX_CHARS,
+    BODY_MIN_CHARS,
+    REQUEST_DELAY,
     enrich,
     extract_body,
 )
@@ -7148,6 +7232,10 @@ def _ok_fetch():
     return fetch
 
 
+def _html(body_text: str) -> bytes:
+    return f"<html><body><article><p>{body_text}</p></article></body></html>".encode()
+
+
 def _enrich(items, fetch=None, sleeps=None):
     recorded: list[float] = [] if sleeps is None else sleeps
     bundle = enrich(
@@ -7175,12 +7263,33 @@ def test_내비게이션과_광고와_푸터를_걸러낸다():
     assert "모든 권리 보유" not in body
 
 
-def test_본문이_없는_HTML은_None을_돌려준다():
-    assert extract_body(b"<html><body><nav>메뉴</nav></body></html>") is None
+def test_내비게이션만_있는_HTML은_None을_돌려준다():
+    """**trafilatura는 이걸 None으로 주지 않는다.** 2026-11-12 확인:
+    `<nav>menu</nav>`를 넣으면 `'menu'`를 돌려준다. 그대로 본문으로 쓰면
+    브리핑에 "메뉴"가 실린다. 길이 하한이 필요한 이유다.
+    """
+    assert extract_body(b"<html><body><nav>\xeb\xa9\x94\xeb\x89\xb4</nav></body></html>") is None
+
+
+def test_너무_짧은_추출은_본문으로_보지_않는다():
+    """RSS 발췌가 보통 250자다. 그보다 짧은 추출은 발췌가 낫다."""
+    assert extract_body(_html("짧다")) is None
+
+
+def test_하한을_넘으면_본문으로_본다():
+    body = extract_body(_html("가" * BODY_MIN_CHARS))
+    assert body is not None
 
 
 def test_HTML이_아니면_None을_돌려준다():
     assert extract_body(b"\x00\x01\x02") is None
+
+
+def test_하한이_발췌_길이보다_작지_않다():
+    """하한이 너무 크면 멀쩡한 짧은 글이 발췌로 떨어진다.
+    2026-11-12 실측 발췌 중앙값 250자를 기준으로 둔다.
+    """
+    assert 100 <= BODY_MIN_CHARS <= 400
 
 
 # --- 정상 경로 ---
@@ -7195,14 +7304,17 @@ def test_본문을_확보하고_출처를_기록한다():
 
 
 def test_본문을_상한에서_자른다():
-    long_html = ("<html><body><article><p>" + "가" * 20000
-                 + "</p></article></body></html>").encode("utf-8")
     bundle, _ = _enrich(
         [_ranked()],
-        fetch=lambda url: FetchResult(content=long_html, final_url=url, moved_from=None),
+        fetch=lambda url: FetchResult(content=_html("가" * 20000),
+                                      final_url=url, moved_from=None),
     )
 
     assert len(bundle.articles[0].body) <= BODY_MAX_CHARS
+
+
+def test_상한이_하한보다_크다():
+    assert BODY_MAX_CHARS > BODY_MIN_CHARS
 
 
 def test_요청_사이에_간격을_둔다():
@@ -7212,6 +7324,11 @@ def test_요청_사이에_간격을_둔다():
     # 3건이면 2번 쉰다 (마지막 뒤에는 쉬지 않는다)
     assert len(sleeps) == 2
     assert all(delay >= 1.0 for delay in sleeps)
+
+
+def test_한_건이면_쉬지_않는다():
+    _, sleeps = _enrich([_ranked()])
+    assert sleeps == []
 
 
 def test_선별_결과가_비면_요청하지_않는다():
@@ -7233,6 +7350,16 @@ def test_윈도우_경계를_이어받는다():
     assert bundle.window_end == WINDOW[1]
 
 
+def test_선별_정보를_그대로_들고_간다():
+    """점수·이유·주제는 요약과 화면이 쓴다."""
+    bundle, _ = _enrich([_ranked()])
+    ranked = bundle.articles[0].ranked
+
+    assert ranked.score == 85
+    assert ranked.reason == "이유"
+    assert ranked.topic == "backend"
+
+
 # --- 폴백과 분류 ---
 
 def test_본문_추출_실패시_RSS_발췌로_폴백한다():
@@ -7240,7 +7367,7 @@ def test_본문_추출_실패시_RSS_발췌로_폴백한다():
     bundle, _ = _enrich(
         [_ranked(excerpt="발췌로 대체된다")],
         fetch=lambda url: FetchResult(
-            content=b"<html><body><nav>메뉴만</nav></body></html>",
+            content=b"<html><body><nav>menu</nav></body></html>",
             final_url=url, moved_from=None,
         ),
     )
@@ -7251,7 +7378,10 @@ def test_본문_추출_실패시_RSS_발췌로_폴백한다():
 
 
 def test_영구_실패는_재시도하지_않고_즉시_폴백한다():
-    """403 봇 차단에 재시도를 걸면 10건이면 수십 초를 버린다."""
+    """403 봇 차단에 재시도를 걸면 10건이면 수십 초를 버린다.
+
+    2026-11-12 실측: 상위 10건 중 Netflix(Medium)가 403이었다.
+    """
     calls = []
 
     def fetch(url: str) -> FetchResult:
@@ -7296,6 +7426,22 @@ def test_재시도_중_성공하면_본문을_쓴다():
     assert bundle.articles[0].fallback_reason is None
 
 
+def test_한_건이_실패해도_나머지는_본문을_쓴다():
+    """절대 중단하지 않는다 — spec 8.2."""
+    data = (FIXTURES / "article.html").read_bytes()
+
+    def fetch(url: str) -> FetchResult:
+        if url.endswith("/0"):
+            raise Permanent("HTTP 403")
+        return FetchResult(content=data, final_url=url, moved_from=None)
+
+    bundle, _ = _enrich([_ranked(0, excerpt="발췌"), _ranked(1)], fetch=fetch)
+
+    assert len(bundle.articles) == 2
+    assert bundle.articles[0].body_source == "rss_excerpt"
+    assert bundle.articles[1].body_source == "trafilatura"
+
+
 def test_본문도_발췌도_없으면_그_건만_제외한다():
     """요약할 재료가 전혀 없으면 보낼 수 없다. 중단은 하지 않는다."""
     def fetch(url: str) -> FetchResult:
@@ -7307,18 +7453,39 @@ def test_본문도_발췌도_없으면_그_건만_제외한다():
     assert bundle.articles[0].body == "발췌 있음"
 
 
+def test_공백뿐인_발췌도_없는_것으로_본다():
+    def fetch(url: str) -> FetchResult:
+        raise Permanent("HTTP 404")
+
+    bundle, _ = _enrich([_ranked(0, excerpt="   \n  ")], fetch=fetch)
+    assert bundle.articles == []
+
+
+def test_발췌_폴백도_상한에서_자른다():
+    """2026-11-12 실측: Netflix 발췌가 15,633자였다. 전문이 피드에 들어
+    있는 소스가 있어서, 폴백 쪽도 자르지 않으면 요약 토큰이 튄다.
+    """
+    def fetch(url: str) -> FetchResult:
+        raise Permanent("HTTP 403")
+
+    bundle, _ = _enrich([_ranked(0, excerpt="가" * 20000)], fetch=fetch)
+    assert len(bundle.articles[0].body) <= BODY_MAX_CHARS
+
+
 def test_분류되지_않은_예외는_삼키지_않는다():
     """fetch 구현의 코드 버그를 발췌 폴백으로 가리면 원인을 못 찾는다."""
-    import pytest
-
     def fetch(url: str) -> FetchResult:
         raise TypeError("코드 버그")
 
     with pytest.raises(TypeError):
         _enrich([_ranked()], fetch=fetch)
+
+
+def test_요청_간격이_1초_이상이다():
+    assert REQUEST_DELAY >= 1.0
 ```
 
-- [ ] **Step 3: 실패를 확인**
+- [x] **Step 3: 실패를 확인**
 
 ```bash
 pytest tests/test_enrich.py
@@ -7326,7 +7493,7 @@ pytest tests/test_enrich.py
 
 Expected: FAIL — `ModuleNotFoundError: No module named 'pipeline.enrich'`
 
-- [ ] **Step 4: 최소 구현 작성**
+- [x] **Step 4: 최소 구현 작성**
 
 `pipeline/enrich.py`:
 
@@ -7339,6 +7506,11 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'pipeline.enrich'`
 
 분류의 실익이 여기서 가장 크다 — 403(봇 차단)은 재시도해도 같으므로
 즉시 발췌로 내려가고, 503은 재시도한 뒤 내려간다.
+
+2026-11-12 실측(상위 10건): 본문 확보 6건, 폴백 4건. 그리고 폴백이
+나쁘지 않았다 — **크롤링이 막히거나 JS로 그리는 소스가 피드에 본문을
+길게 담는다**(Netflix 15,633자, 네이버 D2 14,790자가 사실상 전문).
+반대로 본문 추출이 성공한 소스의 발췌는 39~673자로 짧았다.
 
 실행: python -m pipeline.enrich
 """
@@ -7357,9 +7529,23 @@ from pipeline.lib.timeutil import KST
 from pipeline.models import Article, ArticlesBundle, RankedBundle
 
 # 이 이상은 요약 품질에 기여하지 않으면서 토큰만 쓴다.
+# 발췌 폴백에도 같은 상한을 적용한다 — 피드에 전문을 담는 소스가 있어서
+# (실측 15,633자) 폴백 쪽을 자르지 않으면 요약 토큰이 튄다.
 BODY_MAX_CHARS = 8000
 
+# 이보다 짧은 추출은 본문으로 보지 않는다.
+#
+# **trafilatura가 `None`을 잘 주지 않는다.** 2026-11-12 확인:
+# `<nav>menu</nav>`만 있는 HTML에 `'menu'`를 돌려준다. 그대로 쓰면 브리핑에
+# "메뉴"가 실린다. RSS 발췌가 중앙값 250자이므로, 그보다 한참 짧은 추출은
+# 발췌가 낫다.
+BODY_MIN_CHARS = 200
+
 # 상대 서버 부담을 줄이는 요청 간격(초).
+#
+# 호스트별로 두지 않고 모든 요청 사이에 둔다. 상위 10건은 대개 서로 다른
+# 사이트라 과한 배려지만, 같은 소스가 2건 들어오는 일이 실제로 있었고
+# (실측: 네이버 D2가 상위 10건에 3건) 10건이면 13.5초라 비용이 작다.
 REQUEST_DELAY = 1.5
 
 # 글당 시도 횟수 (일시 실패에만 적용된다. 영구 실패는 1회로 끝난다.)
@@ -7370,7 +7556,7 @@ SleepFn = Callable[[float], None]
 
 
 def extract_body(payload: bytes) -> str | None:
-    """HTML에서 본문만 뽑는다. 실패하면 None."""
+    """HTML에서 본문만 뽑는다. 실패하거나 너무 짧으면 None."""
     try:
         # include_comments=False: 댓글 제외
         # include_tables=False: 표는 요약에 도움이 안 되고 토큰을 많이 쓴다
@@ -7384,9 +7570,12 @@ def extract_body(payload: bytes) -> str | None:
     except Exception:  # noqa: BLE001 — 어떤 입력이 와도 None으로 떨어뜨린다
         return None
 
-    if not text or not text.strip():
+    if not text:
         return None
-    return text.strip()
+    text = text.strip()
+    if len(text) < BODY_MIN_CHARS:
+        return None
+    return text
 
 
 def _fetch_body(
@@ -7415,7 +7604,10 @@ def _fetch_body(
 
     body = extract_body(result.content)
     if body is None:
-        return None, "본문 추출 실패 — 광고·내비게이션만 있는 페이지일 수 있다"
+        return None, (
+            f"본문 추출 실패 — 광고·내비게이션만 있거나 JS로 그리는 "
+            f"페이지일 수 있다(추출 {BODY_MIN_CHARS}자 미만)"
+        )
     return body, None
 
 
@@ -7436,7 +7628,7 @@ def enrich(
             body_source: str = "trafilatura"
             fallback_reason: str | None = None
         else:
-            # 폴백: RSS 발췌. 얕지만 요약은 된다.
+            # 폴백: RSS 발췌. 얕을 수도 있고, 소스에 따라 전문일 수도 있다.
             body = item.item.excerpt.strip()
             body_source = "rss_excerpt"
             fallback_reason = reason
@@ -7478,32 +7670,54 @@ def main() -> None:
 
     if fallbacks:
         print()
-        print(f"  경고: {len(fallbacks)}건이 발췌로 폴백됐다 (요약 품질 저하)")
+        print(f"  {len(fallbacks)}건이 발췌로 폴백됐다")
         for article in fallbacks:
             print(f"    {article.ranked.item.source}: {article.fallback_reason}")
         print("  '접근 불가'가 반복되는 소스는 봇 차단일 가능성이 높다.")
-```
+        print("  발췌가 충분히 길면(피드에 전문을 담는 소스) 품질 저하가 아니다.")
 
-```python
+
 if __name__ == "__main__":
     main()
 ```
 
-> **설명** — `_fetch_body`가 예외를 던지지 않고 `(본문, 이유)` 튜플을 돌려주는 이유는, 호출부에서 "실패했지만 계속한다"가 **정상 흐름**이기 때문이다. 예외로 처리하면 호출부가 try/except로 감싸야 하고, 그러면 "이건 정상 폴백인지 진짜 버그인지"가 흐려진다.
+> **설명** — `_fetch_body`가 예외를 던지지 않고 `(본문, 이유)` 튜플을 돌려주는
+> 이유는, 호출부에서 "실패했지만 계속한다"가 **정상 흐름**이기 때문이다.
+> 예외로 처리하면 호출부가 try/except로 감싸야 하고, 그러면 "이건 정상
+> 폴백인지 진짜 버그인지"가 흐려진다.
 >
-> `body_source: str = "trafilatura"`에 타입을 명시한 이유는, 아래 `else` 분기에서 다른 값을 넣기 때문이다. 명시하지 않으면 타입 검사기가 첫 대입에서 `Literal["trafilatura"]`로 좁혀버려 재대입을 에러로 본다. `# type: ignore[arg-type]`은 `str`을 `BodySource`(Literal) 자리에 넘기는 것을 검사기에게 허용하는 표시다.
+> `body_source: str = "trafilatura"`에 타입을 명시한 이유는, 아래 `else`
+> 분기에서 다른 값을 넣기 때문이다. 명시하지 않으면 타입 검사기가 첫 대입에서
+> `Literal["trafilatura"]`로 좁혀버려 재대입을 에러로 본다.
+> `# type: ignore[arg-type]`은 `str`을 `BodySource`(Literal) 자리에 넘기는
+> 것을 검사기에게 허용하는 표시다.
 >
-> **구문법 대조** — `tuple[str | None, str | None]`은 구형으로 `Tuple[Optional[str], Optional[str]]`이다.
+> `REQUEST_DELAY`를 호스트별이 아니라 모든 요청 사이에 두는 것은 의도적이다.
+> 상위 10건은 대개 서로 다른 사이트라 과한 배려지만, **같은 소스가 여러 건
+> 들어오는 일이 실제로 있었고**(실측: 네이버 D2가 상위 10건에 3건) 10건이면
+> 13.5초라 비용이 작다. 호스트별로 나누는 복잡도를 살 이유가 없다.
+>
+> **구문법 대조** — `tuple[str | None, str | None]`은 구형으로
+> `Tuple[Optional[str], Optional[str]]`이다.
 
-- [ ] **Step 5: 통과를 확인**
+- [x] **Step 5: 통과를 확인**
 
 ```bash
 pytest tests/test_enrich.py
 ```
 
-Expected: `15 passed`
+Expected: `25 passed`. 전체 `286 passed`.
 
-- [ ] **Step 6: 커밋**
+- [x] **Step 6: 실제 상위 10건으로 본문 확보**
+
+```bash
+python -m pipeline.enrich
+```
+
+**실측: 10건 전부 산출(본문 6 · 발췌 4), 21초.** 폴백 이유가 소스별로
+출력돼 "어느 소스가 왜 막혔나"가 바로 보인다.
+
+- [x] **Step 7: 커밋**
 
 ```bash
 git add pipeline/enrich.py tests/test_enrich.py tests/fixtures/article.html
