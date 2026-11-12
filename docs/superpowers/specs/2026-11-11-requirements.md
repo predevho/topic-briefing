@@ -56,11 +56,16 @@
 | S18 | 전송 재시도를 이중으로 걸지 않는다 | 8.2 | SDK `max_retries` + `retry_on_schema` | `test_전송_계층_일시_실패는_재시도하지_않는다` — 이중이면 한 호출이 최악 6번이 된다 | ✅ |
 | S19 | 정책 거부 시 서버 측 폴백을 쓴다 | 8.2 | `lib/llm` `betas=[FALLBACK_BETA]` + `fallbacks="default"` | `test_거부는_재시도하지_않는다`, `test_거부는_영구_실패로_분류된다` — 폴백도 실패하면 같은 입력은 또 거부된다 | ✅ |
 | S20 | Opus 5.5에 `thinking`을 넘기지 않는다 | 5.1 | `lib/llm._parse_once` 주석 | 사고가 항상 켜져 있고 `disabled`·`budget_tokens`는 어떤 effort에서도 400이다. 깊이는 `effort`로만 조절 | ✅ |
+| S29 | 구조화된 출력의 스키마 제약을 보장으로 보지 않는다 | 8.1 | LLM 초안은 느슨하게 · 우리 계약은 엄격하게 · 경계에서 정규화 | **2026-11-12 실측**: `maxLength: 30`인 헤드라인이 34자로 와서 pydantic이 시트 전체를 거부해 요약 7건이 날아갔다. 탐침 3회(평평·스트리밍·중첩)는 모두 강제됐으므로 **비결정적으로 새어 나간다** | ✅ |
+| S30 | 긴 헤드라인 한 건으로 브리핑을 잃지 않는다 | 8.2 | `summarize.shorten` | `test_긴_헤드라인이_와도_브리핑을_잃지_않는다`, `test_단어_경계에서_끊는다` | ✅ |
+| S31 | 범위·분류를 어긴 한 건으로 채점 전체를 잃지 않는다 | 8.2 | `rank.clamp_score`, `rank.normalize_topic` | `test_범위를_넘는_점수가_와도_전체를_잃지_않는다`, `test_모르는_topic이_와도_전체를_잃지_않는다` | ✅ |
+| S32 | 스키마 위반은 1회 재시도에 태운다 | 8.1 | `lib/llm.classify_sdk_error`의 ValidationError 분기 | `test_pydantic_위반은_SchemaError로_바꾼다`, `test_스키마_위반은_재시도된다` — 비결정성이라 두 번째에 통과할 가능성이 높다(실측: 2차 실행이 그랬다) | ✅ |
+| S33 | 요약 출력 예산을 명시한다 | 5.4 | `summarize.SUMMARIZE_MAX_TOKENS` | `test_최대_건수를_담을_수_있다`, `test_요약은_스트리밍으로_간다` — 잘리면 폴백이 없어 브리핑 전체가 날아간다 | ✅ |
 | S21 | 출력 잘림을 스키마 실패와 구분한다 | 8.1 | `lib/llm.classify_response` + `TruncatedError` | `test_max_tokens_잘림은_스키마_실패와_구분된다`, `test_잘림_판정이_스키마_판정보다_먼저다` — 구분 안 하면 증상이 "출력이 비어 있다"로 나오고 Transient로 재시도해 토큰만 두 배 쓴다 | ✅ |
 | S22 | max_tokens를 항목 수에서 계산한다 | 5.2 | `rank.rank_max_tokens` | `test_실측한_227건을_담을_수_있다`, `test_산정한_max_tokens를_LLM에_넘긴다` — 기본값 16,000으로는 240건에서 잘린다 | ✅ |
 | S23 | 큰 요청은 스트리밍으로 보낸다 | 5.1 | `lib/llm.needs_streaming` | `test_비스트리밍_한계가_SDK와_일치한다`, `test_스트림의_반환이_parse와_같은_타입이다` — SDK 공식(3600×max_tokens/128000>600)이 바뀌면 테스트가 알려준다 | ✅ |
 | S24 | 한 번에 채점할 수 있는 상한을 넘으면 호출 전에 거부한다 | 8.1 | `rank.max_items_per_call` | `test_항목이_너무_많으면_잘리기_전에_거부한다` — 보내 놓고 잘리면 토큰을 쓰고도 결과가 없다 | ✅ |
-| S25 | `topic`은 정해진 다섯 값만 받는다 | 5.2 | `models.Topic` Literal | `test_topic은_정해진_다섯_값만_받는다`, `test_topic이_스키마의_enum으로_나간다` — 프롬프트 준수에만 의존하면 값이 흔들려 집계와 화면 분류가 조용히 깨진다 | ✅ |
+| S25 | `topic`은 정해진 다섯 값만 받는다 (우리 계약에서) | 5.2 | `models.Topic` Literal은 **`RankedItem`에만**. 초안(`ScoreItem`)은 `str` | `test_초안_topic에는_enum을_걸지_않는다`, `test_최종_항목의_topic은_계약을_지킨다`, `test_모르는_topic은_other로_바꾼다` — 초안에 걸면 한 건이 어길 때 채점 240건이 통째로 날아간다. **실측: enum을 빼도 240/240이 다섯 값 안이었다** | ✅ |
 | S4 | 선별·요약 모두 `claude-opus-5-5` | 5.1 | `lib/llm.MODEL` | `test_404는_모델_ID를_안내한다` (상수 참조) | ✅ |
 | S5 | 본문 추출 실패 시 RSS 발췌로 폴백, 중단 없음 | 8.2 | `enrich._fetch_body` | `test_본문_추출_실패시_RSS_발췌로_폴백한다`, `test_한_건이_실패해도_나머지는_본문을_쓴다` — **2026-11-12 실측**: 상위 10건에서 본문 6 · 폴백 4, 10건 전부 산출 | ✅ |
 | S6 | 영구 실패는 재시도 없이 즉시 폴백한다 | 8.2 | 같음 | `test_영구_실패는_재시도하지_않고_즉시_폴백한다` | ✅ |

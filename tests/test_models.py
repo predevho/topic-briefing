@@ -48,11 +48,33 @@ def test_정의되지_않은_필드를_거부한다():
         )
 
 
-def test_점수는_0에서_100_사이여야_한다():
+def test_LLM_초안은_범위를_벗어난_점수도_받는다():
+    """**신뢰할 수 없는 입력에는 제약을 걸지 않는다.**
+
+    스키마 제약은 대체로 지켜지지만 보장은 아니다(2026-11-18 실측:
+    maxLength 30인 헤드라인이 33자로 왔다). ScoreItem에 ge/le를 걸면 한
+    건이 어길 때 pydantic이 ScoreSheet 전체를 거부해 **채점 240건이
+    통째로** 날아간다. 정규화는 rank가 한다.
+    """
+    assert ScoreItem(index=0, score=101, reason="r", topic="AI").score == 101
+    assert ScoreItem(index=-1, score=-5, reason="r", topic="인공지능").topic == "인공지능"
+
+
+def test_최종_항목은_점수_범위를_지킨다():
+    """RankedItem은 우리 계약이다. DB 제약과 화면이 여기에 기댄다."""
+    from pipeline.models import RankedItem
+
     with pytest.raises(ValidationError):
-        ScoreItem(index=0, score=101, reason="r", topic="AI")
+        RankedItem(item=_raw(), score=101, reason="r", topic="AI")
     with pytest.raises(ValidationError):
-        ScoreItem(index=0, score=-1, reason="r", topic="AI")
+        RankedItem(item=_raw(), score=-1, reason="r", topic="AI")
+
+
+def test_최종_항목은_topic도_지킨다():
+    from pipeline.models import RankedItem
+
+    with pytest.raises(ValidationError):
+        RankedItem(item=_raw(), score=80, reason="r", topic="인공지능")
 
 
 def test_헤드라인이_30자를_넘으면_거부한다():
@@ -178,3 +200,32 @@ def test_RankedBundle과_ArticlesBundle이_왕복한다():
         articles=[Article(ranked=_ranked(), body="본문", body_source="rss_excerpt")],
     )
     assert ArticlesBundle.model_validate(articles.model_dump()) == articles
+
+
+# --- DB 스키마와의 일치 ---
+#
+# 같은 숫자가 pydantic 모델과 supabase/schema.sql 두 곳에 있다. 한쪽만
+# 고치면 모델은 통과시키고 DB가 적재 때 거부한다 — 파이프라인 마지막
+# 단계에서 터지는 가장 비싼 실패다.
+
+def test_헤드라인_상한이_DB_제약과_같다():
+    from pathlib import Path
+
+    from pipeline.models import HEADLINE_MAX
+
+    sql = Path("supabase/schema.sql").read_text(encoding="utf-8")
+    assert f"char_length(headline) <= {HEADLINE_MAX}" in sql, (
+        f"models.HEADLINE_MAX={HEADLINE_MAX}인데 schema.sql의 제약이 다르다"
+    )
+
+
+def test_body_source_값이_DB_제약과_같다():
+    """BodySource Literal과 schema.sql의 check 제약이 같아야 한다."""
+    import typing
+    from pathlib import Path
+
+    from pipeline.models import BodySource
+
+    sql = Path("supabase/schema.sql").read_text(encoding="utf-8")
+    for 값 in typing.get_args(BodySource):
+        assert f"'{값}'" in sql, f"BodySource의 '{값}'이 schema.sql에 없다"

@@ -12,7 +12,7 @@
 from typing import Callable, Literal, Protocol, TypeVar, runtime_checkable
 
 import anthropic
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from pipeline.lib.http import classify_status
 from pipeline.lib.retry import Permanent, Transient
@@ -143,6 +143,19 @@ def classify_sdk_error(error: Exception) -> Exception:
         return Transient(
             f"Claude API 연결 실패. SDK 재시도 후에도 실패했다: {error}"
         )
+
+    # 구조화된 출력이 스키마를 어기면 SDK 안에서 pydantic이 던진다.
+    #
+    # **스키마 제약은 대체로 지켜지지만 보장이 아니다.** 2026-11-18 실측:
+    # `maxLength: 30`인 헤드라인이 33자로 와서 pydantic이 시트 **전체**를
+    # 거부했고, 요약 7건이 한꺼번에 날아갔다. 같은 요청을 다시 보내면
+    # 통과했다(비결정성). 그래서 SchemaError로 바꿔 1회 재시도에 태운다.
+    #
+    # 결정적으로 고칠 수 있는 것은 모델을 느슨하게 두고 경계에서 정규화하는
+    # 쪽이 낫다(`rank.clamp_score`, `summarize.shorten`). 이 분기는 그러고도
+    # 남는 경우를 위한 그물이다.
+    if isinstance(error, ValidationError):
+        return SchemaError(f"구조화된 출력이 스키마를 어겼다: {error}")
 
     # SDK 예외가 아니다 — 코드 버그일 수 있으므로 분류하지 않고 그대로 돌려준다.
     # 여기서 Transient로 감싸면 TypeError가 재시도로 가려진다.

@@ -6,6 +6,7 @@
 실행: python -m pipeline.rank
 """
 
+import typing
 from datetime import datetime, timezone
 
 from pipeline.lib.config import load_interests, load_sources
@@ -20,7 +21,12 @@ from pipeline.models import (
     RawItem,
     ScoreItem,
     ScoreSheet,
+    Topic,
 )
+
+# Topic Literal의 허용값. 손으로 적지 않고 모델에서 끌어온다 — 둘이
+# 어긋나면 normalize_topic이 멀쩡한 값을 other로 보낸다.
+TOPICS = frozenset(typing.get_args(Topic))
 
 # 본문을 가져올 건수. 03_enrich가 이 개수만 크롤링한다.
 TOP_N = 10
@@ -55,6 +61,24 @@ THINKING_ALLOWANCE = 8_000
 # 필요하다. 지금 여유는 약 363건이고 실측 상한이 227건이라 한동안 버틴다
 # (test_현실적_상한에_여유가_남아_있다가 지킨다).
 MAX_OUTPUT_TOKENS = 48_000
+
+
+def clamp_score(score: int) -> int:
+    """LLM 점수를 0~100 안으로 넣는다.
+
+    **왜 필요한가** — 구조화된 출력의 스키마 제약은 대체로 지켜지지만
+    보장이 아니다. 2026-11-18 실측: `maxLength: 30`인 헤드라인이 33자로
+    왔고 pydantic이 시트 **전체**를 거부해 요약 7건이 한꺼번에 날아갔다.
+    여기서 같은 일이 생기면 **채점 240건이 통째로** 날아간다.
+
+    그래서 `ScoreItem`에는 제약을 걸지 않고(받아들이고) 여기서 고친다.
+    """
+    return max(0, min(100, score))
+
+
+def normalize_topic(topic: str) -> Topic:
+    """모르는 분류는 other로 보낸다. 같은 이유로 Literal을 입력에 걸지 않는다."""
+    return topic if topic in TOPICS else "other"   # type: ignore[return-value]
 
 
 def weighted_score(score: int, weight: float) -> float:
@@ -205,14 +229,22 @@ def rank(
         item = items[score.index]
         weight = weights.get(item.source, 1.0)
 
-        kept_scores.append(score)
+        # LLM 출력을 계약 안으로 넣는다. 한 건이 어겨도 나머지를 잃지 않는다.
+        점수 = clamp_score(score.score)
+        주제 = normalize_topic(score.topic)
+
+        # all_scores에도 정규화한 값을 담는다. 원본을 담으면 evaluate의
+        # 분포에 105점이 찍히고, Task 20의 DB 적재가 거부한다.
+        kept_scores.append(ScoreItem(
+            index=score.index, score=점수, reason=score.reason, topic=주제,
+        ))
         scored.append((
-            weighted_score(score.score, weight),
+            weighted_score(점수, weight),
             RankedItem(
                 item=item,
-                score=apply_weight(score.score, weight),
+                score=apply_weight(점수, weight),
                 reason=score.reason,
-                topic=score.topic,
+                topic=주제,
             ),
         ))
 

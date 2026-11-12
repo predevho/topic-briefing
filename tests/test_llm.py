@@ -443,3 +443,46 @@ def test_스트림에도_필요한_인자가_모두_있다():
 
     for name in ("output_format", "output_config", "betas", "fallbacks"):
         assert name in params, name
+
+
+# --- 스키마 위반을 재시도에 태운다 ---
+#
+# 2026-11-18 실측: maxLength 30인 헤드라인이 33자로 와서 SDK 안의 pydantic이
+# 시트 **전체**를 거부했고, 요약 7건이 한꺼번에 날아갔다. 같은 요청을 다시
+# 보내면 통과했다(비결정성). 분류하지 않으면 재시도 없이 그대로 죽는다.
+
+def test_pydantic_위반은_SchemaError로_바꾼다():
+    from pydantic import BaseModel, Field, ValidationError
+
+    class 모델(BaseModel):
+        name: str = Field(max_length=3)
+
+    try:
+        모델(name="너무긴이름")
+        raise AssertionError("ValidationError가 나야 한다")
+    except ValidationError as error:
+        mapped = classify_sdk_error(error)
+
+    assert isinstance(mapped, SchemaError)
+
+
+def test_스키마_위반은_재시도된다():
+    """SchemaError는 Transient의 하위라 retry_on_schema가 다시 시도한다."""
+    from pydantic import BaseModel, Field, ValidationError
+
+    class 모델(BaseModel):
+        name: str = Field(max_length=3)
+
+    calls = []
+
+    def flaky():
+        calls.append(1)
+        if len(calls) == 1:
+            try:
+                모델(name="너무긴이름")
+            except ValidationError as error:
+                raise classify_sdk_error(error) from error
+        return "두 번째에 통과"
+
+    assert retry_on_schema(flaky) == "두 번째에 통과"
+    assert len(calls) == 2

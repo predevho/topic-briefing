@@ -5,12 +5,15 @@ from pipeline.lib.llm import TruncatedError
 from pipeline.models import RawItem, ScoreItem, ScoreSheet
 from pipeline.rank import (
     MAX_OUTPUT_TOKENS,
+    TOPICS,
     OUTPUT_TOKENS_PER_ITEM,
     RANK_EFFORT,
     THINKING_ALLOWANCE,
     TOP_N,
     apply_weight,
     build_prompt,
+    clamp_score,
+    normalize_topic,
     rank,
     rank_max_tokens,
     weighted_score,
@@ -249,23 +252,16 @@ def test_범위를_벗어난_index는_무시한다():
     assert len(bundle.selected) == 1
 
 
-def test_음수_index는_계약_경계에서_막힌다():
-    """`rank`의 `0 <= index` 검사보다 먼저, pydantic이 거부한다.
-
-    `ScoreItem.index`에 `ge=0`이 있어 **스키마에도 minimum 0이 들어간다** —
-    LLM이 음수를 돌려줄 길이 없고, 돌려줘도 파싱에서 걸린다. 검사가
-    없으면 `index=-1`이 `items[-1]`(마지막 항목)을 가리킬 뻔했다.
+def test_음수_index는_rank가_막는다():
+    """`ScoreItem`에는 제약이 없다(신뢰할 수 없는 입력이므로). `rank`의
+    `0 <= index` 검사가 막는다 — 없으면 `index=-1`이 `items[-1]`(마지막
+    항목)을 가리킨다.
     """
-    with pytest.raises(ValidationError):
-        ScoreItem(index=-1, score=90, reason="r", topic="AI")
+    items = [_item(0), _item(1)]
+    scores = [ScoreItem(index=-1, score=90, reason="r", topic="AI")]
+    bundle, _ = _rank(items, scores)
 
-
-def test_점수_범위도_계약_경계에서_막힌다():
-    """0~100을 벗어난 점수는 가중치 계산과 임계값 판정을 무의미하게 만든다."""
-    with pytest.raises(ValidationError):
-        ScoreItem(index=0, score=101, reason="r", topic="AI")
-    with pytest.raises(ValidationError):
-        ScoreItem(index=0, score=-1, reason="r", topic="AI")
+    assert bundle.selected == []
 
 
 def test_같은_index를_두_번_주면_한_번만_센다():
@@ -414,17 +410,87 @@ def test_최고_점수는_상한_있는_값으로_기록한다():
 
 # --- topic 계약 ---
 
-def test_topic은_정해진_다섯_값만_받는다():
-    """프롬프트에만 적어 두면 LLM 준수에 의존한다. 값이 흔들리면
-    (AI / ai / 인공지능) 집계와 화면 분류가 조용히 깨진다.
+def test_초안_topic에는_enum을_걸지_않는다():
+    """**규칙: LLM 초안은 느슨하게, 우리 계약은 엄격하게, 경계에서 정규화.**
+
+    enum을 걸면 API가 생성을 제약해 주지만(실측 240/240 준수) **보장은
+    아니다** — 같은 종류의 제약인 maxLength가 2026-11-18에 실제로 어겨졌고,
+    pydantic이 시트 전체를 거부해 요약 7건이 한꺼번에 날아갔다. 여기서
+    같은 일이 생기면 채점 240건이 통째로 날아간다.
+
+    프롬프트가 다섯 값을 명시하고, `normalize_topic`이 모르는 값을 other로
+    보내고, `RankedItem`이 계약을 지킨다.
     """
-    with pytest.raises(ValidationError):
-        ScoreItem(index=0, score=50, reason="r", topic="인공지능")
-
-
-def test_topic이_스키마의_enum으로_나간다():
-    """API가 생성 단계에서 막아 주려면 스키마에 enum이 있어야 한다."""
     schema = ScoreSheet.model_json_schema()
-    topic = schema["$defs"]["ScoreItem"]["properties"]["topic"]
+    assert "enum" not in schema["$defs"]["ScoreItem"]["properties"]["topic"]
 
-    assert set(topic["enum"]) == {"AI", "backend", "infra", "tooling", "other"}
+    # 모르는 값도 받아들여야 한다 — 거부하면 전체를 잃는다
+    assert ScoreItem(index=0, score=50, reason="r", topic="인공지능").topic == "인공지능"
+
+
+def test_최종_항목의_topic은_계약을_지킨다():
+    from pipeline.models import RankedItem
+
+    with pytest.raises(ValidationError):
+        RankedItem(item=_item(0), score=80, reason="r", topic="인공지능")
+
+
+# --- LLM 출력 정규화 ---
+#
+# 구조화된 출력의 스키마 제약은 대체로 지켜지지만 **보장이 아니다.**
+# 2026-11-18 실측: maxLength 30인 헤드라인이 33자로 왔고 pydantic이 시트
+# 전체를 거부해 요약 7건이 한꺼번에 날아갔다. 여기서 같은 일이 생기면
+# 채점 240건이 통째로 날아간다.
+
+def test_점수를_0_100으로_자른다():
+    assert clamp_score(105) == 100
+    assert clamp_score(-5) == 0
+    assert clamp_score(80) == 80
+
+
+def test_모르는_topic은_other로_바꾼다():
+    assert normalize_topic("인공지능") == "other"
+    assert normalize_topic("AI") == "AI"
+
+
+def test_TOPICS를_모델에서_끌어온다():
+    """손으로 적으면 Topic Literal과 어긋나 멀쩡한 값이 other로 간다."""
+    import typing
+
+    from pipeline.models import Topic
+
+    assert TOPICS == frozenset(typing.get_args(Topic))
+
+
+def test_범위를_넘는_점수가_와도_전체를_잃지_않는다():
+    """이게 정규화의 존재 이유다. 한 건 때문에 240건을 잃지 않는다."""
+    items = [_item(0), _item(1)]
+    scores = [
+        ScoreItem(index=0, score=105, reason="r", topic="AI"),
+        ScoreItem(index=1, score=70, reason="r", topic="AI"),
+    ]
+    bundle, _ = _rank(items, scores)
+
+    assert len(bundle.selected) == 2
+    assert bundle.selected[0].score == 100
+
+
+def test_모르는_topic이_와도_전체를_잃지_않는다():
+    items = [_item(0), _item(1)]
+    scores = [
+        ScoreItem(index=0, score=90, reason="r", topic="인공지능"),
+        ScoreItem(index=1, score=70, reason="r", topic="AI"),
+    ]
+    bundle, _ = _rank(items, scores)
+
+    assert len(bundle.selected) == 2
+    assert bundle.selected[0].topic == "other"
+
+
+def test_정규화한_값이_all_scores에_들어간다():
+    """원본을 담으면 evaluate의 분포에 105점이 찍히고 DB 적재가 거부한다."""
+    scores = [ScoreItem(index=0, score=105, reason="r", topic="인공지능")]
+    bundle, _ = _rank([_item(0)], scores)
+
+    assert bundle.all_scores[0].score == 100
+    assert bundle.all_scores[0].topic == "other"

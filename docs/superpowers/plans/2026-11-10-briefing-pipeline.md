@@ -5686,10 +5686,33 @@ git commit -m "feat: Claude API 래퍼 — SDK에 전송 재시도 위임, 예�
 > 길이다.** 모델이 알맞게 아끼고 있다. 증거 없이 `min_length`를 걸지 않았다.
 > Task 17의 `evaluate`가 이유로 부족하다고 판단하면 그때 근거를 들고 고친다.
 >
-> **`topic`은 Literal로 묶었다.** 240건 모두 프롬프트의 다섯 값 안이었지만,
-> DB 컬럼을 **프롬프트 준수에만 의존**하는 것은 약하다. `Topic` Literal로
-> 두면 JSON 스키마에 `enum`이 들어가 API가 생성 단계에서 막는다. 실측
-> 분포는 other 97 / AI 81 / infra 23 / tooling 20 / backend 19였다.
+> **`topic`은 Literal로 묶었다 — 그리고 Task 19에서 되돌렸다.**
+>
+> 처음 판단: 240건 모두 프롬프트의 다섯 값 안이었지만 DB 컬럼을 프롬프트
+> 준수에만 의존하는 것은 약하니, `Topic` Literal로 두면 JSON 스키마에
+> `enum`이 들어가 API가 생성 단계에서 막는다 — **"막는다"가 검증되지 않은
+> 가정이었다.**
+>
+> Task 19에서 `maxLength: 30`인 헤드라인이 **33자로 왔다.** pydantic이 시트
+> **전체**를 거부해 요약 7건이 한꺼번에 날아갔다. 같은 종류의 제약이므로
+> `topic`도 어길 수 있고, 그러면 **채점 240건이 통째로** 날아간다.
+>
+> 그래서 규칙을 세웠다 — **LLM 초안은 느슨하게, 우리 계약은 엄격하게,
+> 경계에서 정규화.** `ScoreItem`에서 제약을 빼고 `rank.clamp_score`·
+> `rank.normalize_topic`이 고치며, `RankedItem`이 계약을 지킨다.
+>
+> **enum을 빼도 품질이 떨어지지 않았다**(실측):
+>
+> | topic | enum 있음 | enum 없음 |
+> |---|---:|---:|
+> | AI | 82 | 85 |
+> | other | 93 | 89 |
+> | backend | 23 | 23 |
+> | tooling | 20 | 24 |
+> | infra | 22 | 19 |
+>
+> 다섯 값 밖으로 나온 것은 **0건**이다. 프롬프트의 "AI / backend / infra /
+> tooling / other 중 하나"가 그 역할을 한다.
 >
 > **중복 판정은 아직 한 번도 돌지 않았다.** `recent_headlines`가 0건이라
 > (아직 발행한 글이 없다) `build_prompt`가 그 섹션을 생략한다. 첫 발송
@@ -7731,13 +7754,91 @@ git commit -m "feat: 본문 확보 — 영구 실패 즉시 폴백, 일시 실�
 **Files:**
 - Create: `pipeline/summarize.py`
 - Create: `tests/test_summarize.py`
+- Modify: `pipeline/models.py` (LLM 초안의 제약 완화)
+- Modify: `pipeline/lib/llm.py` (스키마 위반을 재시도에 태운다)
+- Modify: `pipeline/rank.py` (정규화 추가)
 
-- [ ] **Step 1: 실패하는 테스트 작성**
+> **이 태스크가 프로젝트의 가정 하나를 깼다.**
+>
+> ### 스키마 제약은 대체로 지켜지지만 보장이 아니다
+>
+> 1차 실행이 이렇게 죽었다:
+>
+> ```
+> ValidationError: 1 validation error for SummarySheet
+> summaries.3.headline
+>   String should have at most 30 characters
+>   input_value='Cloudflare가 Raft 대신 QuePaxa를 고른 이유'  (34자)
+> ```
+>
+> `SummaryDraft.headline`에 `max_length=30`이 있고 JSON 스키마에
+> `maxLength: 30`으로 나가고 프롬프트에도 "30자 이내"라고 적었는데, 모델이
+> 34자를 돌려줬다. 그리고 pydantic이 **SummarySheet 전체를 거부해 요약
+> 7건이 한꺼번에 날아갔다.**
+>
+> **원인을 추적한 과정** (추론이 두 번 틀렸다):
+>
+> 1. "API가 강제하지 않는 모양이다" → **틀렸다.** 평평한 스키마에 "제약을
+>    무시하고 26자를 넣어라"고 지시해도 `maxLength`·`minimum/maximum`·`enum`을
+>    모두 강제했다(`abcde`, `10`, `'a'`).
+> 2. "스트리밍 경로에서만 안 먹히는 모양이다" → **틀렸다.** 같은 탐침을
+>    `beta.messages.stream`으로 보내도 강제됐다.
+> 3. "`$defs` 안의 배열 항목이라 안 먹히는 모양이다" → **틀렸다.**
+>    중첩 스키마 탐침도 3건 모두 강제됐다.
+>
+> 그리고 **같은 요청을 다시 보내니 통과했다** — 2차 실행의 같은 글
+> 헤드라인은 `Cloudflare가 QuePaxa를 택한 이유`(26자)였다.
+>
+> 결론: **강제는 대체로 작동하지만 비결정적으로 새어 나간다.** 보장으로
+> 기대고 설계하면 안 된다.
+>
+> ### 그래서 세운 규칙 — LLM 초안은 느슨하게, 우리 계약은 엄격하게, 경계에서 정규화
+>
+> | | 초안(LLM 출력) | 우리 계약 | 경계 |
+> |---|---|---|---|
+> | 헤드라인 | `SummaryDraft.headline` 제약 없음 | `Summary.headline` ≤ 30 (DB 제약과 동일) | `summarize.shorten` |
+> | 점수 | `ScoreItem.score` 제약 없음 | `RankedItem.score` 0~100 | `rank.clamp_score` |
+> | 분류 | `ScoreItem.topic: str` | `RankedItem.topic: Topic` | `rank.normalize_topic` |
+> | index | `ScoreItem.index: int` | — | `rank`의 `0 <= index < len` 검사 |
+>
+> **그러고도 남는 경우를 위한 그물**: `classify_sdk_error`가 pydantic
+> `ValidationError`를 `SchemaError`로 바꿔 **1회 재시도**에 태운다.
+> 비결정성이므로 두 번째에 통과할 가능성이 높다 — 실제로 2차 실행이 그랬다.
+>
+> ### 이 변경의 대가를 측정했다
+>
+> `topic`에서 `enum`을 빼면 생성 품질이 떨어질 수 있다. 재실행해 비교했다:
+>
+> | topic | enum 있음 | enum 없음 |
+> |---|---:|---:|
+> | AI | 82 | 85 |
+> | other | 93 | 89 |
+> | backend | 23 | 23 |
+> | tooling | 20 | 24 |
+> | infra | 22 | 19 |
+>
+> **다섯 값 밖으로 나온 것은 0건.** 차이는 재실행 변동 범위다. 프롬프트의
+> "AI / backend / infra / tooling / other 중 하나"가 그 역할을 한다.
+
+> **출력 토큰 예산** (Task 16과 같은 함정)
+>
+> 래퍼 기본값(16,000)에 맡기면 잘릴 수 있고, 잘리면 **브리핑 전체가**
+> 날아간다(요약은 폴백이 없다). 채점과 달리 출력 **건수가 MAX_SUMMARIES로
+> 묶여** 있어 입력 항목 수에 비례하지 않으므로 함수가 아니라 상수로 뒀다:
+> `28,000(사고) + 7 × 400 = 30,800`. 비스트리밍 한계(21,333)를 넘으므로
+> 래퍼가 스트리밍을 고른다.
+
+- [x] **Step 1: 실패하는 테스트 작성**
 
 `tests/test_summarize.py`:
 
 ```python
+import pytest
+from pydantic import ValidationError
+
+from pipeline.lib.llm import needs_streaming
 from pipeline.models import (
+    HEADLINE_MAX,
     Article,
     ArticlesBundle,
     RankedItem,
@@ -7745,17 +7846,27 @@ from pipeline.models import (
     SummaryDraft,
     SummarySheet,
 )
-from pipeline.summarize import MAX_SUMMARIES, SCORE_THRESHOLD, build_prompt, summarize
+from pipeline.summarize import (
+    MAX_SUMMARIES,
+    OUTPUT_TOKENS_PER_SUMMARY,
+    SCORE_THRESHOLD,
+    SUMMARIZE_EFFORT,
+    SUMMARIZE_MAX_TOKENS,
+    THINKING_ALLOWANCE,
+    build_prompt,
+    shorten,
+    summarize,
+)
 from tests.fakes import FakeLLM
 
 WINDOW = ("2026-11-09T22:20:00+00:00", "2026-11-10T22:20:00+00:00")
 
 
-def _article(index: int = 0, score: int = 85, lang_source: str = "토스_기술블로그") -> Article:
+def _article(index: int = 0, score: int = 85, source: str = "토스_기술블로그") -> Article:
     return Article(
         ranked=RankedItem(
             item=RawItem(
-                source=lang_source,
+                source=source,
                 title=f"제목 {index}",
                 url=f"https://e.com/{index}",
                 published="2026-11-10T05:30:00+00:00",
@@ -7785,11 +7896,113 @@ def _draft(index: int) -> SummaryDraft:
     )
 
 
+def _summarize(articles, drafts):
+    llm = FakeLLM(responses=[SummarySheet(summaries=drafts)])
+    return summarize(articles=_bundle(articles), llm=llm), llm
+
+
+# --- 출력 토큰 예산 ---
+#
+# Task 16과 같은 함정이다. 래퍼 기본값(16,000)에 맡기면 잘릴 수 있고, 잘리면
+# 브리핑 전체가 날아간다. 여기서는 출력 **건수**가 MAX_SUMMARIES로 묶여 있어
+# 항목 수에 비례하지 않으므로 상수로 둔다 — 대신 사고 토큰 여유가 커야 한다.
+# 2026-11-18 실측: 입력이 37,432토큰(기사 10건 본문)이고 effort는 medium이다.
+
+def test_요약_출력_예산이_기본값보다_크다():
+    from pipeline.lib.llm import DEFAULT_MAX_TOKENS
+
+    assert SUMMARIZE_MAX_TOKENS > DEFAULT_MAX_TOKENS
+
+
+def test_최대_건수를_담을_수_있다():
+    assert SUMMARIZE_MAX_TOKENS >= THINKING_ALLOWANCE + MAX_SUMMARIES * OUTPUT_TOKENS_PER_SUMMARY
+
+
+def test_사고_토큰_여유가_넉넉하다():
+    """effort=medium에 입력 37k 토큰이다. 사고가 길어질 수 있다."""
+    assert THINKING_ALLOWANCE >= 16_000
+
+
+def test_요약은_스트리밍으로_간다():
+    """예산이 비스트리밍 한계(21,333)를 넘는다. 래퍼가 알아서 고른다."""
+    assert needs_streaming(SUMMARIZE_MAX_TOKENS)
+
+
+def test_산정한_max_tokens를_LLM에_넘긴다():
+    """계산만 하고 넘기지 않으면 아무 의미가 없다."""
+    _, llm = _summarize([_article(0)], [_draft(0)])
+    assert llm.calls[0]["max_tokens"] == SUMMARIZE_MAX_TOKENS
+
+
+def test_요약은_medium_effort로_한다():
+    """채점은 low, 요약은 medium. 요약이 결과물 자체다."""
+    _, llm = _summarize([_article(0)], [_draft(0)])
+    assert llm.calls[0]["effort"] == SUMMARIZE_EFFORT == "medium"
+
+
+# --- 계약 경계 ---
+
+def test_초안_헤드라인에는_상한을_걸지_않는다():
+    """**스키마의 maxLength는 강제되지 않는다 — 2026-11-18 실측.**
+
+    `maxLength: 30`을 넣고 프롬프트에도 "30자 이내"라고 적었는데 모델이
+    33자를 돌려줬고(`Cloudflare가 Raft 대신 QuePaxa를 고른 이유`),
+    pydantic이 SummarySheet **전체**를 거부해 요약 7건이 한꺼번에 날아갔다.
+
+    LLM 출력은 신뢰할 수 없는 입력이다. 상한은 받는 쪽(Summary)에 두고
+    중간에서 줄인다.
+    """
+    schema = SummarySheet.model_json_schema()["$defs"]["SummaryDraft"]
+    assert "maxLength" not in schema["properties"]["headline"]
+
+    # 긴 헤드라인도 받아들여야 한다 — 거부하면 브리핑 전체를 잃는다
+    draft = SummaryDraft(index=0, headline="가" * 40,
+                         bullets=["b"], why_it_matters="w")
+    assert len(draft.headline) == 40
+
+
+def test_불릿_개수가_스키마에_들어간다():
+    schema = SummarySheet.model_json_schema()["$defs"]["SummaryDraft"]
+    assert schema["properties"]["bullets"]["maxItems"] == 3
+    assert schema["properties"]["bullets"]["minItems"] == 1
+
+
+def test_최종_요약은_헤드라인_상한을_지킨다():
+    """DB의 `articles_headline_len` 제약과 같은 값이다."""
+    from pipeline.models import Summary
+
+    with pytest.raises(ValidationError):
+        Summary(article=_article(), headline="가" * (HEADLINE_MAX + 1),
+                bullets=["b"], why_it_matters="w")
+
+
+def test_빈_헤드라인을_거부한다():
+    with pytest.raises(ValidationError):
+        SummaryDraft(index=0, headline="", bullets=["b"], why_it_matters="w")
+
+
+def test_불릿이_없으면_거부한다():
+    """요점이 없는 요약은 요약이 아니다."""
+    with pytest.raises(ValidationError):
+        SummaryDraft(index=0, headline="h", bullets=[], why_it_matters="w")
+
+
 # --- 프롬프트 ---
 
 def test_프롬프트에_본문이_들어간다():
     prompt = build_prompt(articles=[_article()])
     assert "본문 0" in prompt
+
+
+def test_프롬프트가_본문을_다시_자르지_않는다():
+    """enrich가 이미 BODY_MAX_CHARS로 잘랐다. 여기서 또 자르면 손잡이가
+    두 곳이 되어 토큰 예산을 추적할 수 없다.
+    """
+    긴본문 = "가" * 8000
+    article = Article(
+        ranked=_article().ranked, body=긴본문, body_source="trafilatura",
+    )
+    assert 긴본문 in build_prompt(articles=[article])
 
 
 def test_프롬프트가_한국어_요약을_요구한다():
@@ -7814,12 +8027,18 @@ def test_프롬프트가_최대_건수를_명시한다():
     assert str(MAX_SUMMARIES) in prompt
 
 
+def test_프롬프트에_출처와_주제가_들어간다():
+    """요약이 "토스가 공개한"처럼 출처를 쓸 수 있어야 한다."""
+    prompt = build_prompt(articles=[_article(0, source="토스_기술블로그")])
+    assert "토스_기술블로그" in prompt and "backend" in prompt
+
+
+def test_프롬프트에_번호가_들어간다():
+    prompt = build_prompt(articles=[_article(0), _article(1)])
+    assert "[0]" in prompt and "[1]" in prompt
+
+
 # --- 요약 ---
-
-def _summarize(articles, drafts):
-    llm = FakeLLM(responses=[SummarySheet(summaries=drafts)])
-    return summarize(articles=_bundle(articles), llm=llm), llm
-
 
 def test_LLM이_돌려준_요약을_담는다():
     briefing, _ = _summarize([_article(0)], [_draft(0)])
@@ -7880,6 +8099,15 @@ def test_중복_index는_한_번만_담는다():
     assert len(briefing.summaries) == 1
 
 
+def test_중복_index는_먼저_나온_것을_쓴다():
+    """어느 쪽을 쓰는지가 정해져 있어야 한다."""
+    첫째 = SummaryDraft(index=0, headline="먼저", bullets=["b"], why_it_matters="w")
+    둘째 = SummaryDraft(index=0, headline="나중", bullets=["b"], why_it_matters="w")
+    briefing, _ = _summarize([_article(0)], [첫째, 둘째])
+
+    assert briefing.summaries[0].headline == "먼저"
+
+
 def test_후보_건수를_기록한다():
     """적중률 추적에 쓴다."""
     briefing, _ = _summarize([_article(0), _article(1)], [_draft(0)])
@@ -7892,6 +8120,7 @@ def test_본문이_없으면_LLM을_호출하지_않는다():
 
     assert briefing.summaries == []
     assert llm.prompts == []
+    assert briefing.considered == 0
 
 
 def test_전부_임계값_미달이면_빈_브리핑이_된다():
@@ -7901,9 +8130,79 @@ def test_전부_임계값_미달이면_빈_브리핑이_된다():
 
     assert briefing.summaries == []
     assert briefing.considered == 3
+
+
+def test_윈도우_경계를_이어받는다():
+    briefing, _ = _summarize([_article(0)], [_draft(0)])
+    assert briefing.window_start == WINDOW[0]
+    assert briefing.window_end == WINDOW[1]
+
+
+def test_임계값이_가중치_적용_후_점수에_걸린다():
+    """`RankedItem.score`는 이미 가중치가 적용된 값이다(rank.apply_weight).
+    원점수에 걸면 가중치가 무의미해진다.
+    """
+    # 원점수 50에 가중치 1.3을 적용하면 65 — 임계값 60을 넘는다.
+    # rank가 그 계산을 끝내 놓으므로 여기서는 65를 그대로 본다.
+    article = _article(0, score=65)
+    briefing, _ = _summarize([article], [_draft(0)])
+
+    assert len(briefing.summaries) == 1
+
+
+# --- 헤드라인 줄이기 ---
+#
+# 2026-11-18 실측으로 생긴 기능이다. 스키마의 maxLength는 강제되지 않고,
+# 한 건이 넘기면 pydantic이 SummarySheet 전체를 거부해 브리핑이 사라진다.
+
+def test_상한_안이면_그대로_둔다():
+    assert shorten("짧은 헤드라인") == "짧은 헤드라인"
+
+
+def test_상한을_넘으면_줄인다():
+    assert len(shorten("가" * 50)) <= HEADLINE_MAX
+
+
+def test_줄이면_말줄임표를_붙인다():
+    assert shorten("가" * 50).endswith("…")
+
+
+def test_단어_경계에서_끊는다():
+    """한글도 띄어쓰기가 있다. 단어 중간에서 끊기면 읽기 나쁘다."""
+    원문 = "Cloudflare가 Raft 대신 QuePaxa를 고른 이유"
+    결과 = shorten(원문)
+
+    assert len(결과) <= HEADLINE_MAX
+    assert 결과.endswith("…")
+    assert "QuePax" not in 결과 or 결과.startswith("Cloudflare가 Raft 대신 QuePaxa")
+
+
+def test_단어_경계가_너무_앞이면_통째로_자른다():
+    """공백이 맨 앞에만 있으면 단어 경계를 따르면 거의 다 날아간다."""
+    원문 = "가 " + "나" * 50
+    결과 = shorten(원문)
+
+    assert len(결과) <= HEADLINE_MAX
+    assert len(결과) > HEADLINE_MAX // 2
+
+
+def test_앞뒤_공백을_없앤다():
+    assert shorten("  헤드라인  ") == "헤드라인"
+
+
+def test_긴_헤드라인이_와도_브리핑을_잃지_않는다():
+    """이게 이 기능의 존재 이유다. 한 건 때문에 7건을 잃지 않는다."""
+    drafts = [
+        SummaryDraft(index=0, headline="짧다", bullets=["b"], why_it_matters="w"),
+        SummaryDraft(index=1, headline="가" * 40, bullets=["b"], why_it_matters="w"),
+    ]
+    briefing, _ = _summarize([_article(0), _article(1)], drafts)
+
+    assert len(briefing.summaries) == 2
+    assert all(len(s.headline) <= HEADLINE_MAX for s in briefing.summaries)
 ```
 
-- [ ] **Step 2: 실패를 확인**
+- [x] **Step 2: 실패를 확인**
 
 ```bash
 pytest tests/test_summarize.py
@@ -7911,7 +8210,7 @@ pytest tests/test_summarize.py
 
 Expected: FAIL — `ModuleNotFoundError: No module named 'pipeline.summarize'`
 
-- [ ] **Step 3: 최소 구현 작성**
+- [x] **Step 3: 최소 구현 작성**
 
 `pipeline/summarize.py`:
 
@@ -7944,12 +8243,59 @@ from pipeline.models import (
 )
 
 # 가중치 적용 후 점수의 하한. 이 아래는 LLM이 넣었어도 보내지 않는다.
+# `RankedItem.score`는 rank.apply_weight를 거친 값이므로 여기서 다시
+# 가중치를 보지 않는다.
 SCORE_THRESHOLD = 60
 
 # 상한. 카톡에는 이 중 상위 5건만 싣고 나머지는 "외 N건"으로 표기한다.
 MAX_SUMMARIES = 7
 
+# 요약이 결과물 자체다. 채점(low)보다 한 단계 올린다.
 SUMMARIZE_EFFORT: Effort = "medium"
+
+# --- 출력 토큰 예산 ---
+#
+# Task 16과 같은 함정이다. 래퍼 기본값(16,000)에 맡기면 잘릴 수 있고,
+# 잘리면 **브리핑 전체가** 날아간다(요약은 폴백이 없다).
+#
+# 채점과 달리 출력 **건수가 MAX_SUMMARIES로 묶여** 있어 입력 항목 수에
+# 비례하지 않는다. 그래서 함수가 아니라 상수다. 대신 사고 토큰 여유를
+# 크게 둔다 — 2026-11-18 실측으로 입력이 37,432토큰(기사 10건 본문)이고
+# effort가 medium이라 사고가 길어질 수 있다.
+
+# 요약 한 건당 출력 토큰. 헤드라인 30자 + 불릿 2~3개 + 의미 한 문장이면
+# 실측 220토큰 정도이고, 여유를 둔다.
+OUTPUT_TOKENS_PER_SUMMARY = 400
+
+# 사고 토큰 여유. 비스트리밍 한계(21,333)를 넘기므로 래퍼가 스트리밍을
+# 고른다 — Task 16에서 검증된 경로다.
+THINKING_ALLOWANCE = 28_000
+
+SUMMARIZE_MAX_TOKENS = THINKING_ALLOWANCE + MAX_SUMMARIES * OUTPUT_TOKENS_PER_SUMMARY
+
+
+def shorten(text: str, limit: int = HEADLINE_MAX) -> str:
+    """헤드라인을 상한 안으로 줄인다. 가능하면 단어 경계에서 끊는다.
+
+    **왜 필요한가** — 2026-11-18 실측: 스키마에 `maxLength: 30`을 넣고
+    프롬프트에도 "30자 이내"라고 적었는데 모델이 33자를 돌려줬다
+    (`Cloudflare가 Raft 대신 QuePaxa를 고른 이유`). pydantic이 SummarySheet
+    **전체**를 거부해 요약 7건이 한꺼번에 날아갔다.
+
+    길이 보증은 프롬프트나 LLM이 아니라 여기에 있어야 한다. 한 건의 긴
+    헤드라인으로 그날 브리핑을 잃을 이유가 없다.
+    """
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+
+    # 말줄임표 한 칸을 남긴다.
+    cut = text[: limit - 1].rstrip()
+    space = cut.rfind(" ")
+    # 단어 경계가 너무 앞이면(절반 미만) 통째로 자르는 편이 낫다.
+    if space >= limit // 2:
+        cut = cut[:space].rstrip()
+    return cut + "…"
 
 
 def build_prompt(*, articles: list[Article]) -> str:
@@ -7976,6 +8322,8 @@ def build_prompt(*, articles: list[Article]) -> str:
 
     for index, article in enumerate(articles):
         item = article.ranked.item
+        # 본문을 여기서 다시 자르지 않는다. enrich가 BODY_MAX_CHARS로 이미
+        # 잘랐고, 손잡이가 두 곳이면 토큰 예산을 추적할 수 없다.
         lines += [
             f"### [{index}] {item.title}",
             f"출처: {item.source}  /  주제: {article.ranked.topic}",
@@ -8004,13 +8352,18 @@ def summarize(*, articles: ArticlesBundle, llm: LLM) -> Briefing:
     prompt = build_prompt(articles=candidates)
     # 재시도는 llm.parse 안에서 끝난다 (rank.py와 같은 이유).
     sheet, _tokens = llm.parse(
-        prompt=prompt, output_format=SummarySheet, effort=SUMMARIZE_EFFORT
+        prompt=prompt,
+        output_format=SummarySheet,
+        effort=SUMMARIZE_EFFORT,
+        max_tokens=SUMMARIZE_MAX_TOKENS,
     )
 
     summaries: list[Summary] = []
     seen: set[int] = set()
 
     for draft in sheet.summaries:
+        # 범위 밖 번호나 중복 번호를 돌려줄 수 있다. 둘 다 무시하고,
+        # 중복은 먼저 나온 것을 쓴다.
         if not (0 <= draft.index < len(candidates)) or draft.index in seen:
             continue
         seen.add(draft.index)
@@ -8023,7 +8376,8 @@ def summarize(*, articles: ArticlesBundle, llm: LLM) -> Briefing:
 
         summaries.append(Summary(
             article=article,
-            headline=draft.headline,
+            # LLM이 상한을 넘겨도 브리핑을 잃지 않는다. shorten 설명 참조.
+            headline=shorten(draft.headline),
             bullets=draft.bullets,
             why_it_matters=draft.why_it_matters,
         ))
@@ -8052,28 +8406,81 @@ def main() -> None:
     print(f"요약 {len(briefing.summaries)}건 / 후보 {briefing.considered}건 → {path}")
     if not briefing.summaries:
         print("  보낼 만한 글이 없다. 이것도 정상 결과다.")
+
+    # 줄인 건수를 센다. 자주 나오면 프롬프트의 "30자 이내"가 안 먹히는
+    # 것이고, HEADLINE_MAX 자체를 다시 볼 근거가 된다.
+    줄임 = sum(1 for s in briefing.summaries if s.headline.endswith("…"))
+    if 줄임:
+        print(f"  헤드라인 {줄임}건을 {HEADLINE_MAX}자로 줄였다 "
+              f"(프롬프트 지시가 안 먹힌 것이다. 반복되면 상한을 다시 본다)")
+    print()
     for summary in briefing.summaries:
-        print(f"  {summary.article.ranked.score:3d}  {summary.headline}")
+        article = summary.article
+        mark = "발췌" if article.body_source == "rss_excerpt" else "본문"
+        print(f"  {article.ranked.score:3d}  [{mark}] {summary.headline}")
         for bullet in summary.bullets:
             print(f"       - {bullet[:70]}")
+        print(f"       → {summary.why_it_matters[:70]}")
+        print()
 
 
 if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 4: 통과를 확인**
+> **설명** — `shorten`이 단어 경계를 보되 "경계가 상한의 절반보다 앞이면
+> 통째로 자르는" 예외를 둔 이유: `"가 " + "나"*50`처럼 공백이 맨 앞에만
+> 있으면 단어 경계를 따르다가 거의 다 날아간다.
+>
+> `SCORE_THRESHOLD`를 `RankedItem.score`에 거는 것은 **가중치 적용 후**
+> 점수에 거는 것이다(`rank.apply_weight`가 이미 계산해 뒀다). 원점수에
+> 걸면 가중치가 무의미해진다.
+
+- [x] **Step 4: 통과를 확인**
 
 ```bash
 pytest tests/test_summarize.py
 ```
 
-Expected: `17 passed`
+Expected: `40 passed`. 전체 `337 passed`.
 
-- [ ] **Step 5: 커밋**
+- [x] **Step 5: 실제 10건으로 요약**
 
 ```bash
-git add pipeline/summarize.py tests/test_summarize.py
+python -m pipeline.summarize
+```
+
+**실측 (2026-11-12): 요약 7건 / 후보 10건, 27초.** 헤드라인 19~26자로
+전부 상한 안이고 줄임이 0건이었다.
+
+나온 브리핑의 일부:
+
+```
+## Sonnet 대신 결정 모델로 비용 98% 절감  (26자)
+`100점` · 본문 · Hacker_News_Best
+- Amazon은 20개 라벨 중 하나를 고르는 티켓 분류를 Sonnet 4.6에서
+  Strands Decider로 바꿔 정확도를 유지하면서 비용을 약 44배 줄였다.
+- AppConfig 3단 스위치로 실트래픽에서 두 모델을 병렬 비교했고 롤백은 45초였다.
+- JSON 키 순서만 바꿔도 출력 확률이 최대 0.19 달라져 모든 요청을 키 정렬해 보낸다.
+> 닫힌 선택지를 고르는 대량 분류라면 LLM 대신 결정 모델로 비용과 지연을
+> 크게 줄일 수 있다.
+
+## Netflix 시놉시스 팩트체크 비용 절감  (23자)
+`96점` · **발췌** · Netflix_Tech_Blog
+- 기존에는 100k 토큰 이상 컨텍스트로 추론 모델을 5회 호출했는데, 확신도
+  기반 게이팅으로 어려운 케이스만 추가 검증하도록 바꿨다.
+- 비용은 52.4% 줄었고 Recall-Fail은 0.77→0.86, 사람 근거 일치도는 69%→82%.
+```
+
+> **Task 18의 판단이 확인됐다.** Netflix 건은 **발췌로 요약했는데도**
+> 구체적 수치가 전부 들어왔다(52.4%, 0.77→0.86, 69%→82%). 피드에 전문을
+> 담는 소스에서는 발췌 폴백이 품질 저하가 아니다.
+
+- [x] **Step 6: 커밋**
+
+```bash
+git add pipeline/summarize.py tests/test_summarize.py \
+        pipeline/models.py pipeline/lib/llm.py pipeline/rank.py
 git commit -m "feat: 요약 단계 — 임계값 기반 건수, 한국어 출력, 건수 채우기 금지"
 ```
 

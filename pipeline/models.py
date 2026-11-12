@@ -64,12 +64,24 @@ class RawBundle(Contract):
 # --- 02 선별 ---
 
 class ScoreItem(Contract):
-    """LLM이 돌려주는 채점 결과 한 건. 입력을 되돌려받지 않고 index로 참조한다."""
+    """LLM이 돌려주는 채점 결과 한 건. **신뢰할 수 없는 입력이다.**
 
-    index: int = Field(ge=0)
-    score: int = Field(ge=0, le=100)
+    입력을 되돌려받지 않고 index로 참조한다.
+
+    제약(ge/le/Literal)을 걸지 않는 이유는 `SummaryDraft`와 같다.
+    구조화된 출력의 스키마 제약은 **대체로 지켜지지만 보장은 아니다** —
+    2026-11-18 실측에서 `maxLength: 30`인 헤드라인이 33자로 왔고, pydantic이
+    시트 **전체**를 거부해 요약 7건이 한꺼번에 날아갔다. 여기서 같은 일이
+    생기면 **채점 240건이 통째로** 날아간다.
+
+    정규화는 `rank.clamp_score`·`rank.normalize_topic`이 하고, 그 결과를
+    받는 `RankedItem`이 계약을 지킨다.
+    """
+
+    index: int
+    score: int
     reason: str             # 탈락 이유를 나중에 조회하기 위해 항상 남긴다
-    topic: Topic
+    topic: str
 
 
 class ScoreSheet(Contract):
@@ -115,10 +127,19 @@ class ArticlesBundle(Contract):
 # --- 04 요약 ---
 
 class SummaryDraft(Contract):
-    """LLM이 돌려주는 요약 한 건."""
+    """LLM이 돌려주는 요약 한 건. **신뢰할 수 없는 입력이다.**
+
+    headline에 max_length를 걸지 않는다. 2026-11-18 실측: 스키마에
+    `maxLength: 30`을 넣고 프롬프트에도 "30자 이내"라고 적었는데 모델이
+    33자를 돌려줬고, pydantic이 **SummarySheet 전체를 거부**해 요약 7건이
+    한꺼번에 날아갔다.
+
+    길이 보증은 프롬프트나 LLM이 아니라 우리 코드에 있어야 한다 —
+    `summarize.shorten`이 줄이고, 그 결과를 받는 `Summary`가 상한을 지킨다.
+    """
 
     index: int = Field(ge=0)
-    headline: str = Field(min_length=1, max_length=HEADLINE_MAX)
+    headline: str = Field(min_length=1)
     bullets: list[str] = Field(min_length=1, max_length=3)
     why_it_matters: str
 
