@@ -6493,13 +6493,76 @@ git commit -m "feat: 선별 단계 — 일괄 채점, 소스 가중치, 잘못�
 - Create: `pipeline/evaluate.py`
 - Create: `tests/test_evaluate.py`
 
-- [ ] **Step 1: 실패하는 테스트 작성**
+> **계획에서 고친 것** (테스트 6개 → 23개)
+>
+> ### 1. 균등 무작위 표본이 쓸 수 없는 것이었다 — Task 14에서 남긴 메모 그대로
+>
+> 계획의 `sample_items`는 `random.Random(seed).sample(items, limit)`이다.
+> 시드에 실제로 적용해 보니:
+>
+> | | 소스 수 | 최다 소스 |
+> |---|---:|---|
+> | 균등 무작위 40건 | **14개** | OpenAI_Blog **18건(45%)** |
+> | | | Hugging_Face_Blog 7건(17.5%) |
+>
+> **두 소스가 표본의 62.5%**를 차지하고 45개 소스 중 14개만 덮었다.
+> 시드는 400일치라 발행이 잦은 소스가 누적으로 쌓인다(OpenAI 680건, 전체의 35%).
+>
+> 그런데 **실제 운영에서 OpenAI는 240건 중 11건(4.6%)**이다. 이 표본으로
+> 프로필을 튜닝하면 **OpenAI 공지문에 맞춰 기준을 깎게 된다** — 정작 매일
+> 들어오는 국내 기술블로그와 매체 칼럼은 표본에 거의 없다.
+>
+> **소스별 상한(`PER_SOURCE_CAP = 3`)을 넣었다.** 소스마다 상한까지만 뽑아
+> 풀을 만들고 거기서 표본을 뽑는다. 결과:
+>
+> | | 소스 수 | 최다 소스 |
+> |---|---:|---|
+> | 소스별 상한 40건 | **31개** | 3건 **(8%)** |
+>
+> 상한을 1로 하지 않은 이유는, 1건이면 **그 소스의 품질 분포**를 볼 수
+> 없어서다(좋은 글과 홍보글이 섞여 오는 소스가 많다).
+>
+> ### 2. 점수 분포를 출력하지 않았다
+>
+> 계획 Step 6이 "점수가 60~80에 몰려 있는가"를 확인하라고 하는데, 그걸
+> 보여 주지 않아 매번 손으로 세야 했다(Task 16에서 실제로 그랬다).
+> `format_distribution`을 넣었다. 쏠림은 프로필 기준이 모호하다는 신호이고
+> **튜닝의 주요 입력**이다.
+>
+> ### 3. 한글 소스명 때문에 표가 어긋났다
+>
+> 터미널에서 한글은 두 칸인데 `len()`은 1로 센다. `{'점수':>4}`는 폭 4가
+> 아니라 `"  점수"`(폭 6)를 만들고, `토스_기술블로그`(폭 16)와
+> `Cloudflare_Blog`(폭 15)가 같은 열에서 밀린다. **표로 읽는 게 이 도구의
+> 목적**이라 `display_width`·`pad`를 만들어 맞췄다.
+
+- [x] **Step 1: 실패하는 테스트 작성**
 
 `tests/test_evaluate.py`:
 
 ```python
-from pipeline.evaluate import format_table, sample_items
-from pipeline.models import RankedItem, RawItem
+from collections import Counter
+
+from pipeline.evaluate import (
+    DEFAULT_LIMIT,
+    PER_SOURCE_CAP,
+    display_width,
+    format_distribution,
+    format_table,
+    pad,
+    sample_items,
+)
+from pipeline.models import RankedItem, RawItem, ScoreItem
+
+
+def _raw(index: int, source: str = "s") -> RawItem:
+    return RawItem(
+        source=source,
+        title=f"t{index}",
+        url=f"https://e.com/{index}",
+        published="2026-11-10T05:30:00+00:00",
+        excerpt="e",
+    )
 
 
 def _ranked(score: int, title: str, source: str = "s") -> RankedItem:
@@ -6513,6 +6576,104 @@ def _ranked(score: int, title: str, source: str = "s") -> RankedItem:
         topic="AI",
     )
 
+
+# --- 표본 추출 ---
+
+def test_표본_추출이_요청한_개수를_넘지_않는다():
+    items = [_raw(i, f"소스{i % 20}") for i in range(100)]
+    assert len(sample_items(items, limit=30)) == 30
+
+
+def test_항목이_요청보다_적으면_전부_돌려준다():
+    assert len(sample_items([_raw(1)], limit=30)) == 1
+
+
+def test_표본_추출이_재현_가능하다():
+    """프롬프트 변경 효과만 비교하려면 입력이 고정돼야 한다."""
+    items = [_raw(i, f"소스{i % 20}") for i in range(100)]
+    assert sample_items(items, limit=20) == sample_items(items, limit=20)
+
+
+def test_전역_난수_상태를_건드리지_않는다():
+    """random.sample을 직접 쓰면 다른 코드의 재현성에 영향을 준다."""
+    import random
+
+    items = [_raw(i, f"소스{i % 20}") for i in range(100)]
+    random.seed(1)
+    먼저 = random.random()
+    random.seed(1)
+    sample_items(items, limit=10)
+    나중 = random.random()
+
+    assert 먼저 == 나중
+
+
+def test_한_소스가_표본을_독식하지_못한다():
+    """**이 태스크의 핵심.** 2026-11-12 실측: 시드 1923건을 균등 무작위로
+    40건 뽑으면 OpenAI_Blog가 18건(45%), Hugging_Face_Blog가 7건(17.5%)으로
+    **두 소스가 62.5%**를 차지하고 소스 45개 중 14개만 덮었다.
+
+    시드는 400일치라 발행이 잦은 소스가 누적으로 쌓인다(OpenAI 680건).
+    실제 운영에서 OpenAI는 240건 중 11건(4.6%)이다. 쏠린 표본으로
+    프로필을 튜닝하면 **OpenAI 공지문에 맞춰 기준을 깎게 된다.**
+    """
+    items = ([_raw(i, "독식소스") for i in range(500)]
+             + [_raw(500 + i, f"소스{i}") for i in range(40)])
+
+    표본 = sample_items(items, limit=40)
+    집계 = Counter(i.source for i in 표본)
+
+    assert 집계["독식소스"] <= PER_SOURCE_CAP
+
+
+def test_소스별_상한이_적용된다():
+    items = [_raw(i, "한소스") for i in range(100)]
+    표본 = sample_items(items, limit=40)
+
+    # 소스가 하나뿐이면 상한만큼만 나온다 — 40건을 채우려고 상한을 깨지 않는다
+    assert len(표본) == PER_SOURCE_CAP
+
+
+def test_여러_소스를_골고루_덮는다():
+    """넓게 보려고 쓰는 도구다. 소스 수가 표본 수에 가까워야 한다."""
+    items = [_raw(i, f"소스{i % 45}") for i in range(900)]
+    표본 = sample_items(items, limit=40)
+
+    assert len({i.source for i in 표본}) >= 20
+
+
+def test_상한이_1보다_크다():
+    """소스당 1건이면 그 소스의 글 품질 분포를 볼 수 없다."""
+    assert PER_SOURCE_CAP >= 2
+
+
+# --- 한글 폭 정렬 ---
+#
+# 터미널에서 한글은 두 칸을 차지하는데 len()은 1로 센다. 그대로 두면
+# 소스 열이 들쭉날쭉해서 표를 읽는 목적이 깨진다.
+
+def test_한글은_두_칸으로_센다():
+    assert display_width("토스") == 4
+
+
+def test_영문은_한_칸으로_센다():
+    assert display_width("toss") == 4
+
+
+def test_섞여_있어도_합이_맞는다():
+    assert display_width("토스tech") == 8
+
+
+def test_폭을_맞춰_채운다():
+    assert display_width(pad("토스", 10)) == 10
+    assert display_width(pad("Cloudflare", 10)) == 10
+
+
+def test_폭을_넘으면_자른다():
+    assert display_width(pad("토스_기술블로그입니다", 10)) <= 10
+
+
+# --- 표 ---
 
 def test_표에_점수와_제목과_소스가_들어간다():
     table = format_table([_ranked(90, "좋은 글", "토스_기술블로그")])
@@ -6532,34 +6693,66 @@ def test_빈_목록도_표가_된다():
     assert isinstance(format_table([]), str)
 
 
-def test_표본_추출이_요청한_개수를_넘지_않는다():
-    items = [
-        RawItem(source="s", title=f"t{i}", url=f"https://e.com/{i}",
-                published="2026-11-10T05:30:00+00:00", excerpt="e")
-        for i in range(100)
-    ]
-    assert len(sample_items(items, limit=30)) == 30
+def test_표의_소스_열이_정렬된다():
+    """한글 소스와 영문 소스가 섞여도 제목이 같은 칸에서 시작해야 한다."""
+    table = format_table([
+        _ranked(90, "제목A", "토스_기술블로그"),
+        _ranked(80, "제목B", "Cloudflare_Blog"),
+    ])
+    본문 = [l for l in table.splitlines() if "제목" in l]
+
+    시작 = [display_width(l[:l.index("제목")]) for l in 본문]
+    assert len(set(시작)) == 1, f"제목 시작 위치가 어긋났다: {시작}"
 
 
-def test_항목이_요청보다_적으면_전부_돌려준다():
-    items = [
-        RawItem(source="s", title="t", url="https://e.com/1",
-                published="2026-11-10T05:30:00+00:00", excerpt="e")
-    ]
-    assert len(sample_items(items, limit=30)) == 1
+# --- 점수 분포 ---
+#
+# 계획 Step 6이 "점수가 60~80에 몰려 있는가"를 확인하라고 하는데, 분포를
+# 출력하지 않으면 매번 손으로 세야 한다. 튜닝의 주요 신호다.
+
+def test_분포에_모든_구간이_나온다():
+    scores = [ScoreItem(index=i, score=s, reason="r", topic="AI")
+              for i, s in enumerate([5, 15, 95])]
+    out = format_distribution(scores)
+
+    assert "0~9" in out and "10~19" in out and "90~99" in out
 
 
-def test_표본_추출이_재현_가능하다():
-    """프롬프트 변경 효과만 비교하려면 입력이 고정돼야 한다."""
-    items = [
-        RawItem(source="s", title=f"t{i}", url=f"https://e.com/{i}",
-                published="2026-11-10T05:30:00+00:00", excerpt="e")
-        for i in range(100)
-    ]
-    assert sample_items(items, limit=20) == sample_items(items, limit=20)
+def test_분포에_건수가_나온다():
+    scores = [ScoreItem(index=i, score=50, reason="r", topic="AI") for i in range(7)]
+    assert "7" in format_distribution(scores)
+
+
+def test_분포에_중앙값과_최고가_나온다():
+    """쏠림을 한눈에 보려면 요약 수치가 필요하다."""
+    scores = [ScoreItem(index=i, score=s, reason="r", topic="AI")
+              for i, s in enumerate([10, 50, 92])]
+    out = format_distribution(scores)
+
+    assert "92" in out and "50" in out
+
+
+def test_100점도_구간에_들어간다():
+    """(score // 10) * 10이면 100이 별도 구간이 된다."""
+    scores = [ScoreItem(index=0, score=100, reason="r", topic="AI")]
+    out = format_distribution(scores)
+
+    assert "90~100" in out or "90~99" in out
+    assert "100~109" not in out
+
+
+def test_점수가_없으면_분포도_문자열이다():
+    assert isinstance(format_distribution([]), str)
+
+
+def test_기본_표본_크기가_상한_안에_있다():
+    """rank가 363건을 넘으면 거부한다. 기본값이 그 안이어야 한다."""
+    from pipeline.rank import max_items_per_call
+
+    assert DEFAULT_LIMIT <= max_items_per_call()
 ```
 
-- [ ] **Step 2: 실패를 확인**
+- [x] **Step 2: 실패를 확인**
 
 ```bash
 pytest tests/test_evaluate.py
@@ -6567,7 +6760,7 @@ pytest tests/test_evaluate.py
 
 Expected: FAIL — `ModuleNotFoundError: No module named 'pipeline.evaluate'`
 
-- [ ] **Step 3: 최소 구현 작성**
+- [x] **Step 3: 최소 구현 작성**
 
 `pipeline/evaluate.py`:
 
@@ -6578,19 +6771,22 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'pipeline.evaluate'`
 pipeline/rank.py의 프롬프트를 고친 뒤 다시 돌려 비교하는 것이 튜닝 작업이다.
 
 실행:
-  python -m pipeline.evaluate                # 시드에서 40건 표본
-  python -m pipeline.evaluate --limit 80     # 표본 크기 변경
-  python -m pipeline.evaluate --date 2026-11-10   # 특정 날짜 데이터로
+  python -m pipeline.evaluate                     # 시드에서 40건 표본
+  python -m pipeline.evaluate --limit 80          # 표본 크기 변경
+  python -m pipeline.evaluate --date 2026-11-12   # 특정 날짜 데이터로
 """
 
 import argparse
 import random
+import statistics
+import unicodedata
+from collections import Counter, defaultdict
 
 from pipeline.lib.config import load_interests, load_sources
 from pipeline.lib.llm import AnthropicLLM
 from pipeline.lib.secrets import require
 from pipeline.lib.store import LocalStore
-from pipeline.models import RankedItem, RawBundle, RawItem
+from pipeline.models import RankedItem, RawBundle, RawItem, ScoreItem
 from pipeline.rank import rank
 from pipeline.seed import SEED_DIR
 
@@ -6598,13 +6794,67 @@ from pipeline.seed import SEED_DIR
 SAMPLE_SEED = 20261110
 DEFAULT_LIMIT = 40
 
+# 한 소스가 표본에서 차지할 수 있는 최대 건수.
+#
+# 2026-11-12 실측: 시드 1923건을 균등 무작위로 40건 뽑으면 OpenAI_Blog가
+# 18건(45%), Hugging_Face_Blog가 7건(17.5%)으로 **두 소스가 62.5%**를
+# 차지하고 소스 45개 중 14개만 덮었다. 시드는 400일치라 발행이 잦은 소스가
+# 누적으로 쌓인다(OpenAI 680건).
+#
+# 실제 운영에서 OpenAI는 240건 중 11건(4.6%)이다. 쏠린 표본으로 프로필을
+# 튜닝하면 **OpenAI 공지문에 맞춰 기준을 깎게 된다.** 1이면 그 소스의
+# 품질 분포를 볼 수 없으니 3으로 둔다.
+PER_SOURCE_CAP = 3
+
+
+def display_width(text: str) -> int:
+    """터미널에서 차지하는 칸 수.
+
+    한글·한자·일문은 두 칸을 차지하는데 `len()`은 1로 센다. 그대로 두면
+    소스 열이 들쭉날쭉해서 표를 읽는 목적이 깨진다.
+    """
+    return sum(
+        2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+        for ch in text
+    )
+
+
+def pad(text: str, width: int) -> str:
+    """표시 폭 기준으로 잘라 내고 공백을 채운다."""
+    kept: list[str] = []
+    used = 0
+    for ch in text:
+        step = 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+        if used + step > width:
+            break
+        kept.append(ch)
+        used += step
+    return "".join(kept) + " " * (width - used)
+
 
 def sample_items(items: list[RawItem], *, limit: int = DEFAULT_LIMIT) -> list[RawItem]:
-    """재현 가능한 표본을 뽑는다."""
-    if len(items) <= limit:
-        return list(items)
+    """재현 가능한 표본을 뽑는다. 한 소스가 독식하지 못하게 상한을 둔다."""
     # Random(seed)는 전역 난수 상태를 건드리지 않는 독립 생성기를 만든다.
-    return random.Random(SAMPLE_SEED).sample(items, limit)
+    # random.sample을 직접 쓰면 다른 코드의 재현성에 영향을 준다.
+    rng = random.Random(SAMPLE_SEED)
+
+    소스별: dict[str, list[RawItem]] = defaultdict(list)
+    for item in items:
+        소스별[item.source].append(item)
+
+    # 소스마다 상한까지만 남긴다. 소스 순서를 정렬해 두는 이유는 dict의
+    # 삽입 순서가 입력에 따라 달라져 재현성이 흔들리기 때문이다.
+    풀: list[RawItem] = []
+    for 소스 in sorted(소스별):
+        후보 = 소스별[소스]
+        if len(후보) <= PER_SOURCE_CAP:
+            풀.extend(후보)
+        else:
+            풀.extend(rng.sample(후보, PER_SOURCE_CAP))
+
+    if len(풀) <= limit:
+        return 풀
+    return rng.sample(풀, limit)
 
 
 def format_table(selected: list[RankedItem]) -> str:
@@ -6612,17 +6862,45 @@ def format_table(selected: list[RankedItem]) -> str:
     if not selected:
         return "(선별된 항목이 없다)"
 
+    # 머리글도 pad로 맞춘다. f-string의 `{'점수':>4}`는 len() 기준이라
+    # 한글 2자를 폭 4로 보지 않고 "  점수"(폭 6)를 만들어 데이터 행과 어긋난다.
     lines = [
-        f"{'점수':>4}  {'주제':<8}  {'소스':<22}  제목",
+        f"{pad('점수', 4)}  {pad('주제', 8)}  {pad('소스', 24)}  제목",
         "-" * 100,
     ]
     for item in selected:
         lines.append(
-            f"{item.score:>4}  {item.topic:<8}  "
-            f"{item.item.source[:22]:<22}  {item.item.title[:44]}"
+            f"{item.score:>4}  {pad(item.topic, 8)}  "
+            f"{pad(item.item.source, 24)}  {item.item.title[:44]}"
         )
         lines.append(f"      └ {item.reason[:90]}")
 
+    return "\n".join(lines)
+
+
+def format_distribution(scores: list[ScoreItem]) -> str:
+    """점수 분포. 쏠림이 보이면 프로필 기준이 모호하다는 뜻이다."""
+    if not scores:
+        return "(채점된 항목이 없다)"
+
+    values = [s.score for s in scores]
+    # 100점은 90 구간에 넣는다. (score // 10) * 10이면 100이 따로 떨어져
+    # 구간이 하나 늘어난다.
+    구간 = Counter(min(90, (v // 10) * 10) for v in values)
+
+    최대 = max(구간.values())
+    lines = []
+    for 하한 in range(90, -1, -10):
+        n = 구간.get(하한, 0)
+        막대 = "█" * round(n / 최대 * 40) if n else ""
+        # 상한 쪽은 자리를 채우지 않는다. 채우면 "90~ 99"가 되어 grep도,
+        # 눈으로 읽기도 불편하다.
+        lines.append(f"  {하한:3d}~{하한 + 9}  {n:4d}  {막대}")
+
+    lines.append(
+        f"  최고 {max(values)} · 최저 {min(values)} · "
+        f"중앙값 {int(statistics.median(values))} · 평균 {statistics.mean(values):.1f}"
+    )
     return "\n".join(lines)
 
 
@@ -6638,6 +6916,9 @@ def main() -> None:
     items = sample_items(raw.items, limit=args.limit)
 
     print(f"데이터: {args.date}  전체 {len(raw.items)}건 중 표본 {len(items)}건")
+    집계 = Counter(item.source for item in items)
+    print(f"  소스 {len(집계)}개 · 한 소스 최대 {max(집계.values())}건 "
+          f"(상한 {PER_SOURCE_CAP})")
     print()
 
     bundle = rank(
@@ -6650,6 +6931,11 @@ def main() -> None:
         window_end=raw.window_end,
     )
 
+    print("점수 분포 (가중치 적용 전)")
+    print(format_distribution(bundle.all_scores))
+    print()
+
+    print(f"상위 {len(bundle.selected)}건")
     print(format_table(bundle.selected))
     print()
 
@@ -6658,8 +6944,8 @@ def main() -> None:
     print("최하위 10건 (탈락 이유 확인용)")
     print("-" * 100)
     for score in lowest:
-        title = items[score.index].title[:50]
-        print(f"{score.score:>4}  {title}")
+        item = items[score.index]
+        print(f"{score.score:>4}  {pad(item.source, 24)}  {item.title[:44]}")
         print(f"      └ {score.reason[:90]}")
 
 
@@ -6667,23 +6953,90 @@ if __name__ == "__main__":
     main()
 ```
 
-> **설명** — `argparse`는 명령행 인자를 파싱하는 표준 라이브러리다. `--limit 80`처럼 받은 값을 `args.limit`으로 쓴다. f-string의 `{값:>4}`는 너비 4로 오른쪽 정렬, `{값:<8}`은 왼쪽 정렬이다. `random.Random(seed)`로 생성기를 따로 만드는 이유는, `random.sample`을 직접 쓰면 전역 난수 상태를 바꿔 다른 코드의 재현성에 영향을 주기 때문이다.
+> **설명** — `argparse`는 명령행 인자를 파싱하는 표준 라이브러리다.
+> `--limit 80`처럼 받은 값을 `args.limit`으로 쓴다.
+>
+> `random.Random(seed)`로 생성기를 따로 만드는 이유는, `random.sample`을
+> 직접 쓰면 **전역 난수 상태를 바꿔** 다른 코드의 재현성에 영향을 주기
+> 때문이다(`test_전역_난수_상태를_건드리지_않는다`가 지킨다).
+>
+> `for 소스 in sorted(소스별)`에서 정렬하는 이유 — dict의 삽입 순서는 입력
+> 순서를 따르므로, 수집 순서가 조금 달라지면 표본이 바뀐다. 정렬하면
+> **프롬프트 변경 효과만** 비교된다.
+>
+> `unicodedata.east_asian_width(ch)`는 문자의 동아시아 폭 분류를 돌려준다.
+> `"W"`(Wide)·`"F"`(Fullwidth)가 두 칸을 차지한다.
 
-- [ ] **Step 4: 통과를 확인**
+- [x] **Step 4: 통과를 확인**
 
 ```bash
 pytest tests/test_evaluate.py
 ```
 
-Expected: `6 passed`
+Expected: `23 passed`. 전체 `261 passed`.
 
-- [ ] **Step 5: 실제 시드 데이터로 선별을 돌려본다**
+- [x] **Step 5: 실제 시드 데이터로 선별을 돌려본다**
 
 ```bash
 python -m pipeline.evaluate --limit 40
 ```
 
-Expected: 상위 10건의 점수·주제·소스·제목·이유가 표로 나오고, 최하위 10건이 이어서 나온다.
+**실측 (2026-11-12):** 시드 1923건 → 표본 40건, 소스 31개.
+
+점수 분포 (가중치 적용 전):
+
+```
+ 90~99     1  █████
+ 80~89     7  ███████████████████████████████████
+ 70~79     3  ███████████████
+ 60~69     6  ██████████████████████████████
+ 50~59     8  ████████████████████████████████████████
+ 40~49     3  ███████████████
+ 30~39     3  ███████████████
+ 20~29     1  █████
+ 10~19     4  ████████████████████
+  0~9      4  ████████████████████
+최고 90 · 최저 2 · 중앙값 55 · 평균 50.5
+```
+
+상위 5건:
+
+```
+100  AI       인프런_기술블로그    사내 LLM 요청을 한곳으로 모은 AI Gateway 구축기
+100  AI       Slack_Engineering    Slack AI: The Path to Multi-Cloud
+100  AI       Airbnb_Engineering   Eval-driven development: Lessons from ...
+100  backend  카카오_기술블로그    문자를 보냈다는데 왜 안 오죠? 길 잃은 국제 MO 메시지 구출 작전
+100  tooling  토스_기술블로그      머릿속에 있던 로그 정의 기준을 모두의 AI 스킬로 만들기
+```
+
+최하위 5건 — **탈락 이유가 전부 정확하다**:
+
+```
+ 2  Discord_Engineering   During October, Treat a Friend to Nitro ...
+    └ Nitro 프로모션 마케팅 글이다.
+ 3  전자신문_칼럼         [이시형의 잘 쉬는 법]②붓을 들면 고요해지는 머리...
+    └ 휴식·문인화 칼럼으로 관심사와 무관하다.
+ 8  바이라인네트워크      [RE: 자사몰] 브랜드가 '구매 결정'을 설계하는 곳
+    └ 자사몰 마케팅 성격 기사다.
+10  전자신문_사설         [사설] AI해킹, 한차원 높인 방어력 갖춰야
+    └ AI 해킹 대응 사설로 기술 내용이 없다.
+15  OpenAI_Blog           Commonwealth Bank of Australia builds AI flu...
+    └ ChatGPT Enterprise 도입 보도자료 성격이다.
+```
+
+`interests.md`의 "낮게 평가" 항목(보도자료 재가공, 제품 마케팅, 내용 없는
+동향 기사)이 **문구 그대로 작동한다.**
+
+> **주의 — 이 분포로 `SCORE_THRESHOLD`를 정하면 안 된다.**
+>
+> 평가 표본의 중앙값은 55인데 **실제 하루(240건)의 중앙값은 30**이었다.
+> 당연하다 — 소스별 상한이 "실적 기사가 하루 30건 들어오는 소스"의 비중을
+> 깎기 때문이다. 평가 표본은 **소스 넓이**를 대표하고, 실제 수집은
+> **물량**을 대표한다.
+>
+> 그래서 용도를 나눈다:
+> - "프로필이 잘 줄 세우나" → `--date _seed` (넓이)
+> - "임계값 60에서 몇 건이 통과하나" → `--date <오늘>` (물량)
 
 - [ ] **Step 6: 관심사 프로필을 튜닝한다 (반복)**
 
@@ -6695,13 +7048,15 @@ Expected: 상위 10건의 점수·주제·소스·제목·이유가 표로 나�
 
 고친 뒤 다시 돌린다. **입력 표본이 고정이므로 프롬프트 변경 효과만 비교된다.**
 
-상위 10건 중 8건 이상이 "읽고 싶다"가 될 때까지 반복한다. 보통 5~15회다.
+> **이 단계는 사용자의 판단이 필요하다.** "읽고 싶다"는 프로필 주인의
+> 취향이고, 내가 대신 판정하면 내 취향으로 프로필을 깎는 것이 된다.
+> 1차 출력을 보여 주고 판단을 받는다.
 
-- [ ] **Step 7: 커밋**
+- [x] **Step 7: 커밋** (도구만. 프로필 튜닝은 Step 6 판단 후)
 
 ```bash
-git add pipeline/evaluate.py tests/test_evaluate.py config/interests.md
-git commit -m "feat: 선별 품질 평가 도구 + 관심사 프로필 튜닝"
+git add pipeline/evaluate.py tests/test_evaluate.py
+git commit -m "feat: 선별 품질 평가 도구 — 소스별 상한 표본, 점수 분포, 한글 폭 정렬"
 ```
 
 ---
