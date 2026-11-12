@@ -758,7 +758,7 @@ git commit -m "feat: 페이지 데이터 생성 — articles에서 읽어 본문
 - [ ] **Step 1: Vite + React + TypeScript 스캐폴드**
 
 ```bash
-cd /Users/predevho/토픽컬럼자동화
+cd "$(git rev-parse --show-toplevel)"
 npm create vite@latest web -- --template react-ts
 cd web && npm install
 ```
@@ -766,7 +766,7 @@ cd web && npm install
 - [ ] **Step 2: Tailwind와 Supabase 클라이언트 설치**
 
 ```bash
-cd /Users/predevho/토픽컬럼자동화/web
+cd web
 npm install tailwindcss @tailwindcss/vite
 npm install @supabase/supabase-js
 ```
@@ -774,7 +774,7 @@ npm install @supabase/supabase-js
 - [ ] **Step 3: 해결된 버전을 기록한다**
 
 ```bash
-cd /Users/predevho/토픽컬럼자동화/web
+cd web
 npm ls --depth=0
 ```
 
@@ -810,7 +810,7 @@ export default defineConfig({
 - [ ] **Step 5: `docs/.nojekyll`**
 
 ```bash
-touch /Users/predevho/토픽컬럼자동화/docs/.nojekyll
+touch docs/.nojekyll
 ```
 
 GitHub Pages는 기본적으로 Jekyll로 처리하면서 `_`로 시작하는 파일·디렉터리를
@@ -832,7 +832,7 @@ web/dist/
 이게 이 태스크에서 가장 중요한 검증이다.
 
 ```bash
-cd /Users/predevho/토픽컬럼자동화
+cd "$(git rev-parse --show-toplevel)"
 ls docs/              # superpowers/, data/, 공개-전-점검.md 가 있어야 한다
 cd web && npm run build
 cd .. && ls docs/     # 위의 것들이 **그대로 있어야 한다** + index.html, assets/
@@ -942,7 +942,7 @@ a:focus-visible {
 - [ ] **Step 3: 스캐폴드가 만든 `App.css`를 지우고 `main.tsx`를 고친다**
 
 ```bash
-rm /Users/predevho/토픽컬럼자동화/web/src/App.css
+rm web/src/App.css
 ```
 
 `web/src/main.tsx`:
@@ -1681,7 +1681,7 @@ cd web && npm run dev
 브라우저에서 글 하나의 하트를 누른다. 그다음:
 
 ```bash
-cd /Users/predevho/토픽컬럼자동화
+cd "$(git rev-parse --show-toplevel)"
 .venv/bin/python -c "
 from supabase import create_client
 from pipeline.lib.secrets import require
@@ -1953,7 +1953,7 @@ Disallow: /
 이게 이 태스크의 핵심 검증이다.
 
 ```bash
-cd /Users/predevho/토픽컬럼자동화
+cd "$(git rev-parse --show-toplevel)"
 grep -rl "sb_secret_" docs/assets/ 2>/dev/null && echo "⚠️  secret 키가 들어갔다" || echo "✓ secret 키 없음"
 grep -rlo "sb_publishable_[A-Za-z0-9_-]*" docs/assets/ 2>/dev/null | head -1
 ```
@@ -2052,7 +2052,7 @@ git push origin main
 - [ ] **Step 1: 파이프라인부터 페이지까지 한 번에 돌린다**
 
 ```bash
-cd /Users/predevho/토픽컬럼자동화
+cd "$(git rev-parse --show-toplevel)"
 .venv/bin/python -m pipeline.collect
 .venv/bin/python -m pipeline.rank
 .venv/bin/python -m pipeline.enrich

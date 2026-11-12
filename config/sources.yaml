@@ -50,9 +50,9 @@ sources:
     lang: ko
     enabled: true
 
-  # 끔 — 더 이상 IT 매체 피드가 아니다. 같은 도메인의 다른 섹션
-  # (/rss/S1N4.xml)이 "파인데일리 - 예술"을 돌려준다. 받아 본 4건도
-  # 롯데렌탈 의무공개매수·SK하이닉스·미국 CPI로 일반 경제·금융이었다.
+  # 끔 — 같은 도메인의 다른 섹션(/rss/S1N4.xml)이 "파인데일리 - 예술"을
+  # 돌려준다. 받아 본 4건도 롯데렌탈 의무공개매수·SK하이닉스·미국 CPI로
+  # 일반 경제·금융이었다.
   - name: 블로터
     url: https://www.bloter.net/rss/allArticle.xml
     kind: rss
@@ -114,7 +114,7 @@ sources:
     lang: ko
     enabled: true
 
-  # 끔 — 최신 글이 2024-10-14 — 13개월 무발행. 느린 발행이 아니라 중단으로 본다.
+  # 끔 — 최신 글이 2024-10-14 (13개월 전).
   # 다시 글이 올라오면 켠다(시드의 최신 발행일 표로 확인할 수 있다).
   - name: 쿠팡_기술블로그
     url: https://medium.com/feed/coupang-engineering
