@@ -1,9 +1,0 @@
-pyproject.toml
-pipeline/__init__.py
-pipeline/lib/__init__.py
-tests/test_sanity.py
-topic_briefing.egg-info/PKG-INFO
-topic_briefing.egg-info/SOURCES.txt
-topic_briefing.egg-info/dependency_links.txt
-topic_briefing.egg-info/requires.txt
-topic_briefing.egg-info/top_level.txt

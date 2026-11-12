@@ -11,6 +11,8 @@ __pycache__/
 .venv/
 venv/
 .pytest_cache/
+# pip install -e가 만드는 빌드 산출물. pyproject.toml로 재생성된다.
+*.egg-info/
 
 # Node
 node_modules/
