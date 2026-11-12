@@ -8488,17 +8488,63 @@ git commit -m "feat: 요약 단계 — 임계값 기반 건수, 한국어 출력
 
 ## Task 20: 전송과 실행 이력
 
-보낼 곳이 여러 곳이 될 것이 **이미 정해져 있으므로**(계획 3에서 카카오톡과 슬랙) 전송 대상을 프로토콜로 추상화한다. 계획 1은 터미널 출력 하나만 구현한다.
+보낼 곳이 여러 곳이 될 것이 **이미 정해져 있으므로**(계획 3에서 카카오톡과
+슬랙) 전송 대상을 프로토콜로 추상화한다. 계획 1은 터미널 출력 하나만 구현한다.
 
-`notify.py`를 계획 1에 남기는 이유는 **여기에 `runs` 기록이 들어 있기 때문이다.** 그게 없으면 윈도우가 전진하지 않아 매번 같은 구간을 다시 수집한다 — 파이프라인의 핵심 루프가 돌지 않는다.
+`notify.py`를 계획 1에 남기는 이유는 **여기에 `runs` 기록이 들어 있기
+때문이다.** 그게 없으면 윈도우가 전진하지 않아 매번 같은 구간을 다시
+수집한다 — 파이프라인의 핵심 루프가 돌지 않는다.
 
 **Files:**
 - Create: `pipeline/lib/sender.py`
 - Create: `pipeline/notify.py`
 - Create: `tests/test_sender.py`
 - Create: `tests/test_notify.py`
+- Modify: `tests/fakes.py` (FakeSender, FakeRemoteStore의 save_error)
 
-- [ ] **Step 1: 전송 대상의 테스트 작성**
+> **계획에서 고친 것** (테스트 33개 → 41개)
+>
+> ### 1. 예외 메시지가 거짓말을 했다
+>
+> 계획의 `AllSendersFailedError`는 이렇게 말한다:
+>
+> > "전송 이력은 남지 않았으므로 원인을 고친 뒤 그대로 재실행하면 된다"
+>
+> 그런데 바로 윗줄에서 `record("failed", ...)`로 **실행 기록을 남긴다.**
+> 다음 사람이 이 메시지를 믿고 `runs` 테이블을 보면 혼란에 빠진다.
+> 정확히는 "`status='failed'` 기록은 남고 전송 이력(`status='sent'`)은
+> 갱신되지 않았다"다. 문구를 고치고 `test_실패_메시지가_거짓말하지_않는다`로
+> 못 박았다.
+>
+> ### 2. 저장 실패 경로가 없었다
+>
+> 계획의 순서는 `센더 전송 → save_articles → record("sent")`다.
+> `save_articles`가 터지면 **실행 기록이 남지 않는다.** 그러면 다음 실행이
+> `AlreadySent`에 걸리지 않고 **이미 보낸 브리핑을 다시 보낸다.**
+>
+> 사용자에게 두 번 가는 것이 페이지가 비는 것보다 나쁘다. 전송은 이미
+> 성공했으므로, 저장 실패는 `runs.errors`에 `save_articles`로 남기고
+> `status='sent'`를 기록한다. 윈도우는 전진한다.
+>
+> ### 3. "품질 저하"라는 경고 문구를 뺐다
+>
+> 계획은 발췌 폴백을 `"발췌 폴백 N건 (요약 품질 저하)"`로 알린다. Task 18
+> 실측에서 **발췌가 전문인 경우가 많았다**(Netflix 15,633자). 멀쩡한 날에
+> 품질 경고가 뜨면 경고를 무시하게 된다 — spec 8.4가 말하는 알림 피로다.
+> 문구를 `"발췌로 요약한 글 N건"`으로 바꾸고 **본문 길이를 함께 보여 준다.**
+> 판단은 읽는 사람에게 맡긴다.
+>
+> ### 4. `Sender`를 `runtime_checkable`로 (LLM·RemoteStore와 동일)
+>
+> 계획의 `sender: Sender = ConsoleSender()`는 타입 주석이라 런타임에
+> 아무것도 검사하지 않는다.
+>
+> ### 5. 막기 전에 센더를 부르지 않는지 테스트했다
+>
+> 계획에는 `AlreadySentError`가 나는지만 확인하는 테스트가 있었다.
+> 센더를 부른 **뒤에** 막으면 막은 의미가 없는데 그걸 확인하지 않았다.
+
+- [x] **Step 1: 전송 대상의 테스트 작성**
 
 `tests/test_sender.py`:
 
@@ -8602,10 +8648,36 @@ def test_일시_실패는_경고로_모으지_않는다():
     assert warnings == []
 
 
+def test_발췌가_길면_품질_저하로_부르지_않는다():
+    """2026-11-12 실측: 크롤링이 막힌 소스가 피드에 전문을 담는다
+    (Netflix 15,633자). "품질 저하"라고 쓰면 멀쩡한 날에 경고가 뜬다.
+    """
+    긴발췌 = _summary(0, fallback=True)
+    긴발췌 = Summary(
+        article=Article(
+            ranked=긴발췌.article.ranked,
+            body="가" * 5000,
+            body_source="rss_excerpt",
+            fallback_reason="접근 불가 — HTTP 403",
+        ),
+        headline=긴발췌.headline,
+        bullets=긴발췌.bullets,
+        why_it_matters=긴발췌.why_it_matters,
+    )
+    warnings = collect_warnings(briefing=_briefing([긴발췌]), raw=_raw())
+
+    assert warnings != []                    # 알리기는 한다
+    assert "품질 저하" not in "\n".join(warnings)
+
+
 # --- 터미널 출력 ---
 
 def test_ConsoleSender가_인터페이스를_만족한다():
-    sender: Sender = ConsoleSender()
+    sender = ConsoleSender()
+
+    # Sender가 runtime_checkable이라 실제로 확인된다. 타입 주석만 달면
+    # 런타임에는 아무것도 검사되지 않는다.
+    assert isinstance(sender, Sender)
     assert sender.name == "console"
 
 
@@ -8654,9 +8726,17 @@ def test_경고를_하단에_출력한다(capsys):
 
     assert "죽은소스" in out
     assert "403" in out
+
+
+def test_발췌로_온_건을_표시한다(capsys):
+    """요약이 얕을 수 있다는 걸 읽는 사람이 알아야 한다."""
+    ConsoleSender().send(briefing=_briefing([_summary(0, fallback=True)]), raw=_raw())
+    out = capsys.readouterr().out
+
+    assert "발췌" in out
 ```
 
-- [ ] **Step 2: 실패를 확인**
+- [x] **Step 2: 실패를 확인**
 
 ```bash
 pytest tests/test_sender.py
@@ -8664,7 +8744,7 @@ pytest tests/test_sender.py
 
 Expected: FAIL — `ModuleNotFoundError: No module named 'pipeline.lib.sender'`
 
-- [ ] **Step 3: 최소 구현 작성**
+- [x] **Step 3: 최소 구현 작성**
 
 `pipeline/lib/sender.py`:
 
@@ -8681,7 +8761,7 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'pipeline.lib.sender'`
 """
 
 from datetime import datetime
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from pipeline.lib.timeutil import KST
 from pipeline.models import Briefing, RawBundle
@@ -8694,8 +8774,13 @@ TOPIC_MARKS = {
 }
 
 
+@runtime_checkable
 class Sender(Protocol):
-    """브리핑을 어딘가로 내보내는 것."""
+    """브리핑을 어딘가로 내보내는 것.
+
+    runtime_checkable이라 `isinstance(sender, Sender)`로 확인할 수 있다
+    (메서드 이름만 본다 — 서명은 보지 않는다).
+    """
 
     name: str
 
@@ -8716,9 +8801,14 @@ def collect_warnings(*, briefing: Briefing, raw: RawBundle) -> list[str]:
         if summary.article.body_source == "rss_excerpt"
     ]
     if fallbacks:
-        lines = [f"발췌 폴백 {len(fallbacks)}건 (요약 품질 저하):"]
+        # "품질 저하"라고 쓰지 않는다. 2026-11-12 실측: 크롤링이 막힌 소스가
+        # 피드에 전문을 담는 경우가 많다(Netflix 15,633자). 멀쩡한 날에
+        # 품질 경고가 뜨면 경고를 무시하게 된다. 길이를 함께 보여 주고
+        # 판단은 읽는 사람에게 맡긴다.
+        lines = [f"발췌로 요약한 글 {len(fallbacks)}건:"]
         lines += [
-            f"  {summary.article.ranked.item.source}: "
+            f"  {summary.article.ranked.item.source} "
+            f"({len(summary.article.body):,}자): "
             f"{summary.article.fallback_reason}"
             for summary in fallbacks
         ]
@@ -8765,6 +8855,11 @@ class ConsoleSender:
             for position, summary in enumerate(briefing.summaries, start=1):
                 item = summary.article.ranked.item
                 mark = TOPIC_MARKS.get(summary.article.ranked.topic, "📄")
+                # 발췌로 요약한 건은 표시한다. 요약이 얕을 수 있다는 걸
+                # 읽는 사람이 알아야 한다.
+                출처표시 = (
+                    "발췌" if summary.article.body_source == "rss_excerpt" else "본문"
+                )
 
                 print()
                 print(f"  [{position}] {summary.article.ranked.score:3d}  "
@@ -8772,7 +8867,7 @@ class ConsoleSender:
                 for bullet in summary.bullets:
                     print(f"           • {bullet}")
                 print(f"           왜: {summary.why_it_matters}")
-                print(f"           {item.source}  {item.url}")
+                print(f"           {item.source} · {출처표시}  {item.url}")
 
         for warning in collect_warnings(briefing=briefing, raw=raw):
             print()
@@ -8781,21 +8876,22 @@ class ConsoleSender:
         print()
 ```
 
-> **설명** — `enumerate(..., start=1)`은 0이 아니라 1부터 번호를 센다. `datetime.strftime("%m/%d (%a)")`는 "11/10 (Tue)" 형태의 문자열을 만든다. `"=" * 78`은 문자열 반복으로 구분선을 만드는 Python 관용구다.
+> **설명** — `enumerate(..., start=1)`은 0이 아니라 1부터 번호를 센다.
+> `datetime.strftime("%m/%d (%a)")`는 "11/10 (Tue)" 형태의 문자열을 만든다.
+> `"=" * 78`은 문자열 반복으로 구분선을 만드는 Python 관용구다.
 >
-> `Sender`를 `Protocol`로 둔 덕분에 `ConsoleSender`가 아무것도 상속하지 않는다. 계획 3의 `KakaoSender`도 그렇다. **상속이 없으므로 센더끼리 공통 기반 클래스를 통해 엉키지 않는다** — 카톡의 200자 제약이 슬랙 코드에 영향을 주는 일이 구조적으로 불가능해진다.
+> `Sender`를 `Protocol`로 둔 덕분에 `ConsoleSender`가 아무것도 상속하지
+> 않는다. 계획 3의 `KakaoSender`도 그렇다. **상속이 없으므로 센더끼리
+> 공통 기반 클래스를 통해 엉키지 않는다** — 카톡의 200자 제약이 슬랙
+> 코드에 영향을 주는 일이 구조적으로 불가능해진다.
 >
-> pytest의 `capsys` fixture는 `print` 출력을 가로채 `capsys.readouterr().out`으로 돌려준다. 출력 함수를 테스트하려고 별도 추상화를 만들 필요가 없다.
+> pytest의 `capsys` fixture는 `print` 출력을 가로채
+> `capsys.readouterr().out`으로 돌려준다. 출력 함수를 테스트하려고 별도
+> 추상화를 만들 필요가 없다.
 
-- [ ] **Step 4: 통과를 확인**
+- [x] **Step 4: 통과를 확인** → `13 passed`
 
-```bash
-pytest tests/test_sender.py
-```
-
-Expected: `12 passed`
-
-- [ ] **Step 5: 전송과 이력의 테스트 작성**
+- [x] **Step 5: 전송과 이력의 테스트 작성**
 
 `tests/test_notify.py`:
 
@@ -8815,11 +8911,12 @@ from pipeline.models import (
     SourceError,
     Summary,
 )
-from pipeline.notify import AlreadySentError, AllSendersFailedError, notify
+from pipeline.notify import AllSendersFailedError, AlreadySentError, notify
 from tests.fakes import FakeRemoteStore, FakeSender
 
 WINDOW_START = datetime(2026, 11, 9, 22, 20, tzinfo=timezone.utc)
 WINDOW_END = datetime(2026, 11, 10, 22, 20, tzinfo=timezone.utc)
+SENT_AT = datetime(2026, 11, 10, 22, 22, tzinfo=timezone.utc)
 
 
 def _summary(index: int = 0) -> Summary:
@@ -8848,9 +8945,6 @@ def _briefing(summaries) -> Briefing:
         summaries=summaries,
         considered=10,
     )
-
-
-SENT_AT = datetime(2026, 11, 10, 22, 22, tzinfo=timezone.utc)
 
 
 def _raw(item_count: int = 42) -> RawBundle:
@@ -8948,6 +9042,14 @@ def test_성공한_실행은_sent_상태와_발송_시각을_남긴다():
     assert remote.runs[0]["sent_at"] == SENT_AT
 
 
+def test_윈도우를_그대로_남긴다():
+    """다음 실행의 윈도우 시작점이 된다. 어긋나면 구간이 겹치거나 빈다."""
+    remote, _ = _notify(_briefing([_summary()]))
+
+    assert remote.runs[0]["window_start"] == WINDOW_START
+    assert remote.runs[0]["window_end"] == WINDOW_END
+
+
 # --- 0건 ---
 
 def test_0건이어도_내보내고_이력을_남긴다():
@@ -8964,6 +9066,12 @@ def test_0건이면_글을_저장하지_않는다():
     assert remote.saved == []
 
 
+def test_0건이어도_윈도우가_전진한다():
+    """파이프라인의 핵심 루프다. 전진하지 않으면 매번 같은 96시간을 다시 본다."""
+    remote, _ = _notify(_briefing([]))
+    assert remote.last_sent_at() == SENT_AT
+
+
 # --- 멱등성 ---
 
 def test_이미_보낸_윈도우는_다시_보내지_않는다():
@@ -8972,6 +9080,17 @@ def test_이미_보낸_윈도우는_다시_보내지_않는다():
 
     with pytest.raises(AlreadySentError):
         _notify(_briefing([_summary()]), store=store)
+
+
+def test_이미_보냈으면_센더를_부르지도_않는다():
+    """막기만 하고 보내면 막은 의미가 없다."""
+    store = FakeRemoteStore(last_sent=WINDOW_END)
+    sender = FakeSender()
+
+    with pytest.raises(AlreadySentError):
+        _notify(_briefing([_summary()]), store=store, senders=[sender])
+
+    assert sender.calls == 0
 
 
 def test_더_늦은_발송_이력이_있으면_거부한다():
@@ -9007,6 +9126,16 @@ def test_센더가_여럿이면_하나가_죽어도_나머지는_보낸다():
     assert len(remote.runs) == 1          # 하나라도 갔으면 기록한다
 
 
+def test_앞의_센더가_죽어도_뒤의_센더를_부른다():
+    """순서에 의존하지 않는다."""
+    broken = FakeSender(name="broken", error=Permanent("HTTP 404"))
+    working = FakeSender(name="working")
+
+    _notify(_briefing([_summary()]), senders=[broken, working])
+
+    assert broken.calls == 1 and working.calls == 1
+
+
 def test_하나라도_갔으면_실패한_센더를_이력에_남긴다():
     broken = FakeSender(name="broken", error=Permanent("HTTP 404"))
     remote, _ = _notify(_briefing([_summary()]),
@@ -9022,19 +9151,19 @@ def _fail_all():
     senders = [FakeSender(name="a", error=Permanent("404")),
                FakeSender(name="b", error=Permanent("403"))]
 
-    with pytest.raises(AllSendersFailedError):
+    with pytest.raises(AllSendersFailedError) as 잡힘:
         notify(
             briefing=_briefing([_summary()]), ranked=_ranked(), raw=_raw(),
             remote=remote, briefing_date="2026-11-10", senders=senders,
             force=False, now=SENT_AT,
         )
-    return remote
+    return remote, 잡힘.value
 
 
 def test_전부_실패해도_실패_상태로_기록한다():
     """source_counts가 소스 침묵 경고의 유일한 입력이다. 실패한 날이
     기록에서 빠지면 그만큼 경고가 늦어진다."""
-    remote = _fail_all()
+    remote, _ = _fail_all()
 
     assert len(remote.runs) == 1
     assert remote.runs[0]["status"] == "failed"
@@ -9042,13 +9171,25 @@ def test_전부_실패해도_실패_상태로_기록한다():
     assert remote.runs[0]["source_counts"] == {"토스_기술블로그": 3, "조용한소스": 0}
 
 
+def test_실패_메시지가_거짓말하지_않는다():
+    """실행 기록은 status='failed'로 **남는다.** "이력을 남기지 않았다"고
+    쓰면 다음 사람이 runs 테이블을 보고 혼란에 빠진다.
+    """
+    _, 예외 = _fail_all()
+    메시지 = str(예외)
+
+    assert "이력은 남지 않" not in 메시지
+    assert "재실행" in 메시지
+
+
 def test_전부_실패하면_글을_저장하지_않는다():
-    assert _fail_all().saved == []
+    remote, _ = _fail_all()
+    assert remote.saved == []
 
 
 def test_실패_기록이_재실행을_막지_않는다():
     """last_sent_at이 status='sent'만 보므로 막히지 않아야 한다."""
-    remote = _fail_all()
+    remote, _ = _fail_all()
 
     assert remote.last_sent_at() is None
 
@@ -9065,8 +9206,8 @@ def test_실패_기록이_재실행을_막지_않는다():
 
 
 def test_실패한_센더를_이력의_에러에_남긴다():
-    errors = _fail_all().runs[0]["errors"]
-    names = [error.get("source") for error in errors]
+    remote, _ = _fail_all()
+    names = [error.get("source") for error in remote.runs[0]["errors"]]
 
     assert "sender:a" in names
     assert "sender:b" in names
@@ -9076,28 +9217,45 @@ def test_센더가_하나도_없으면_거부한다():
     """설정 실수로 조용히 아무 데도 안 보내는 것을 막는다."""
     with pytest.raises(ValueError, match="센더"):
         _notify(_briefing([_summary()]), senders=[])
+
+
+# --- 저장 실패 ---
+#
+# 전송은 됐는데 DB 저장이 실패하는 경우. 여기서 예외를 올려 버리면 실행
+# 기록이 남지 않고, 재실행이 **이미 보낸 브리핑을 다시 보낸다.**
+# 사용자에게 두 번 가는 것이 페이지가 비는 것보다 나쁘다.
+
+def test_저장이_실패해도_실행_기록은_남긴다():
+    store = FakeRemoteStore(save_error=RuntimeError("DB 연결 끊김"))
+    remote, _ = _notify(_briefing([_summary()]), store=store)
+
+    assert len(remote.runs) == 1
+    assert remote.runs[0]["status"] == "sent"
+
+
+def test_저장_실패를_이력의_에러에_남긴다():
+    store = FakeRemoteStore(save_error=RuntimeError("DB 연결 끊김"))
+    remote, _ = _notify(_briefing([_summary()]), store=store)
+
+    errors = remote.runs[0]["errors"]
+    assert any(error.get("source") == "save_articles" for error in errors)
+    assert any("DB 연결 끊김" in error.get("message", "") for error in errors)
+
+
+def test_저장이_실패해도_윈도우는_전진한다():
+    """전진하지 않으면 다음 실행이 같은 브리핑을 또 보낸다."""
+    store = FakeRemoteStore(save_error=RuntimeError("DB 연결 끊김"))
+    remote, _ = _notify(_briefing([_summary()]), store=store)
+
+    assert remote.last_sent_at() == SENT_AT
 ```
 
-- [ ] **Step 6: 가짜 센더를 `tests/fakes.py`에 추가**
+- [x] **Step 6: 가짜 센더를 `tests/fakes.py`에 추가**
 
-```python
-class FakeSender:
-    """호출 횟수를 세고, 필요하면 정해진 예외를 던진다."""
+`FakeSender`와, `FakeRemoteStore`에 `save_error`를 추가했다
+(전송은 됐는데 DB 저장이 실패하는 경우를 재현한다).
 
-    def __init__(self, name: str = "fake", error: Exception | None = None) -> None:
-        self.name = name
-        self._error = error
-        self.calls = 0
-        self.briefings: list = []
-
-    def send(self, *, briefing, raw) -> None:
-        self.calls += 1
-        self.briefings.append(briefing)
-        if self._error is not None:
-            raise self._error
-```
-
-- [ ] **Step 7: 실패를 확인**
+- [x] **Step 7: 실패를 확인**
 
 ```bash
 pytest tests/test_notify.py
@@ -9105,16 +9263,16 @@ pytest tests/test_notify.py
 
 Expected: FAIL — `ModuleNotFoundError: No module named 'pipeline.notify'`
 
-- [ ] **Step 8: 최소 구현 작성**
+- [x] **Step 8: 최소 구현 작성**
 
 `pipeline/notify.py`:
 
 ```python
 """04.5 전송: 센더로 내보내고 실행 이력을 남긴다.
 
-순서가 중요하다 — **하나라도 전송에 성공한 뒤에 이력을 남긴다.** 거꾸로 하면
-전송이 실패했는데 "이미 보냄"으로 기록되어, 원인을 고친 뒤 재실행이 막히고
-그날 브리핑이 사라진다.
+순서가 중요하다 — **하나라도 전송에 성공한 뒤에 `status='sent'` 이력을
+남긴다.** 거꾸로 하면 전송이 실패했는데 "이미 보냄"으로 기록되어, 원인을
+고친 뒤 재실행이 막히고 그날 브리핑이 사라진다.
 
 계획 1의 센더는 ConsoleSender 하나다. 계획 3에서 KakaoSender와
 SlackSender가 추가된다.
@@ -9127,8 +9285,8 @@ SlackSender가 추가된다.
 import argparse
 from datetime import datetime, timezone
 
-from pipeline.lib.sender import ConsoleSender, Sender
 from pipeline.lib.secrets import require
+from pipeline.lib.sender import ConsoleSender, Sender
 from pipeline.lib.store import LocalStore, RemoteStore, SupabaseStore
 from pipeline.lib.timeutil import KST
 from pipeline.models import Briefing, RankedBundle, RawBundle
@@ -9139,7 +9297,11 @@ class AlreadySentError(RuntimeError):
 
 
 class AllSendersFailedError(RuntimeError):
-    """모든 센더가 실패했다. 이력을 남기지 않았으므로 재실행할 수 있다."""
+    """모든 센더가 실패했다.
+
+    `status='failed'` 실행 기록은 **남는다**(소스 침묵 감지의 입력이므로).
+    `last_sent_at`이 `status='sent'`만 보기 때문에 재실행은 막히지 않는다.
+    """
 
 
 def notify(
@@ -9182,6 +9344,7 @@ def notify(
     if not force:
         last = remote.last_sent_at()
         if last is not None and last >= window_end:
+            # 센더를 부르기 전에 막는다. 부르고 나서 막으면 막은 의미가 없다.
             raise AlreadySentError(
                 f"이 윈도우(~{window_end.isoformat()})는 이미 전송됐다 "
                 f"(마지막 발송: {last.isoformat()}). "
@@ -9205,21 +9368,33 @@ def notify(
 
     if not delivered:
         # 아무 데도 못 보냈다. status='failed'로 **기록은 남기고** 예외를 올린다.
+        #
         # 기록을 남기는 이유: source_counts가 소스 침묵 경고의 유일한 입력이고,
         # 실패한 날이 빠지면 경고가 그만큼 늦어진다.
         # 재실행이 막히지 않는 이유: last_sent_at이 status='sent'만 보기 때문이다.
         record("failed", None, failures)
         detail = "; ".join(failure["message"] for failure in failures)
         raise AllSendersFailedError(
-            f"모든 센더가 실패했다 ({len(senders)}개). 전송 이력은 남지 않았으므로 "
+            f"모든 센더가 실패했다 ({len(senders)}개). "
+            f"실행 기록은 status='failed'로 남았고 전송 이력은 갱신되지 않았으므로, "
             f"원인을 고친 뒤 그대로 재실행하면 된다. {detail}"
         )
 
     if briefing.summaries:
-        remote.save_articles(
-            briefing_date=briefing_date,
-            summaries=briefing.summaries,
-        )
+        # 전송은 이미 됐다. 여기서 예외를 올리면 실행 기록이 남지 않고,
+        # 재실행이 **이미 보낸 브리핑을 다시 보낸다.** 사용자에게 두 번
+        # 가는 것이 페이지가 비는 것보다 나쁘다. 실패를 기록에 남기고 계속한다.
+        try:
+            remote.save_articles(
+                briefing_date=briefing_date,
+                summaries=briefing.summaries,
+            )
+        except Exception as error:  # noqa: BLE001 — 전송은 이미 성공했다
+            failures.append({
+                "source": "save_articles",
+                "kind": "transient",
+                "message": f"{type(error).__name__}: {error}",
+            })
 
     # 0건이어도 반드시 남긴다. 남기지 않으면 다음 윈도우가 계속 늘어나
     # 같은 항목을 반복 평가하게 된다.
@@ -9253,22 +9428,68 @@ if __name__ == "__main__":
     main()
 ```
 
-> **설명** — 센더가 여럿일 때 **언제 이력을 남기는지**가 설계 판단이다. 전부 실패하면 남기지 않아야 재실행이 되고, 하나라도 성공하면 남겨야 재실행이 성공한 센더에 두 번 보내지 않는다. 실패한 센더는 `runs.errors`에 `sender:<이름>`으로 기록해 나중에 추적한다.
+> **설명** — 센더가 여럿일 때 **언제 이력을 남기는지**가 설계 판단이다.
+> 전부 실패하면 `status='sent'`를 남기지 않아야 재실행이 되고, 하나라도
+> 성공하면 남겨야 재실행이 성공한 센더에 두 번 보내지 않는다. 실패한
+> 센더는 `runs.errors`에 `sender:<이름>`으로 기록해 나중에 추적한다.
 >
-> `except Exception`으로 센더를 감싸는 것은 의도적이다. 여기서는 "어떤 이유로든 한 센더가 죽어도 나머지는 보낸다"가 요구사항이므로 분류가 필요 없다. 반면 `lib/http.py`나 `enrich.py`에서는 분류가 **행동을 바꾸므로**(재시도 여부) 반드시 나눈다.
+> `except Exception`으로 센더를 감싸는 것은 의도적이다. 여기서는 "어떤
+> 이유로든 한 센더가 죽어도 나머지는 보낸다"가 요구사항이므로 분류가
+> 필요 없다. 반면 `lib/http.py`나 `enrich.py`에서는 분류가 **행동을
+> 바꾸므로**(재시도 여부) 반드시 나눈다.
 
-- [ ] **Step 9: 통과를 확인**
+- [x] **Step 9: 통과를 확인** → `28 passed`. 전체 `378 passed`.
+
+- [x] **Step 10: 실제로 전송하고 DB를 확인한다**
 
 ```bash
-pytest tests/test_notify.py
+python -m pipeline.notify
 ```
 
-Expected: `21 passed`
+**실측 (2026-11-12): 파이프라인의 핵심 루프가 닫혔다.**
 
-- [ ] **Step 10: 커밋**
+| | 실행 전 | 실행 후 |
+|---|---|---|
+| `last_sent_at` | `None` | `2026-11-12 06:12:17+00:00` |
+| `recent_headlines(14일)` | 0건 | **7건** |
+
+`runs` 기록:
+
+```
+status             sent
+sent_at            2026-11-12T06:12:17+00:00
+window_start       2026-11-07T16:20:25+00:00
+window_end         2026-11-11T16:20:25+00:00
+collected_count    240
+considered_count   10
+max_score          100
+published_count    7
+source_counts      소스 45개
+errors             0건
+input_tokens       None        ← 계획 3에서 연결한다
+```
+
+`articles` 7건, `article_bodies` 7건(trafilatura 6 · rss_excerpt 1).
+
+멱등성도 실제로 확인했다 — 같은 윈도우로 재실행하니 센더를 부르지 않고 막혔다:
+
+```
+AlreadySentError: 이 윈도우(~2026-11-11T16:20:25+00:00)는 이미 전송됐다
+(마지막 발송: 2026-11-12T06:12:17+00:00). 다시 보내려면 --force를 쓴다.
+```
+
+> **이 실행이 Task 16의 빈칸을 메웠다.** `recent_headlines`가 0건이라
+> 중복 판정 섹션이 프롬프트에서 생략되고 있었는데, 이제 7건이 들어 있어
+> **다음 채점부터 같은 사건 중복 판정이 실제로 돈다.**
+>
+> 그리고 윈도우가 전진했으므로 다음 수집은 96시간이 아니라 "마지막 발송
+> 이후"가 된다 — 설계한 루프가 처음으로 제대로 돌게 된다.
+
+- [x] **Step 11: 커밋**
 
 ```bash
-git add pipeline/lib/sender.py pipeline/notify.py tests/fakes.py tests/test_sender.py tests/test_notify.py
+git add pipeline/lib/sender.py pipeline/notify.py tests/fakes.py \
+        tests/test_sender.py tests/test_notify.py
 git commit -m "feat: 전송 — Sender 프로토콜, 터미널 출력, 센더별 격리, 실행 이력"
 ```
 

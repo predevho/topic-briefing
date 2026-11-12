@@ -14,10 +14,13 @@ class FakeRemoteStore:
         known: set[str] | None = None,
         headlines: list[str] | None = None,
         last_sent: datetime | None = None,
+        save_error: Exception | None = None,
     ) -> None:
         self._known = known or set()
         self._headlines = headlines or []
         self._last_sent = last_sent
+        # 전송은 됐는데 DB 저장이 실패하는 경우를 재현한다.
+        self._save_error = save_error
         self.runs: list[dict] = []
         self.saved: list[dict] = []
 
@@ -63,6 +66,8 @@ class FakeRemoteStore:
         })
 
     def save_articles(self, *, briefing_date: str, summaries: list) -> None:
+        if self._save_error is not None:
+            raise self._save_error
         self.saved.append({"briefing_date": briefing_date, "summaries": summaries})
 
 
@@ -92,3 +97,19 @@ class FakeLLM:
         if not self._responses:
             raise AssertionError("FakeLLM에 준비된 응답이 없다. responses를 더 넣는다.")
         return self._responses.pop(0), self._input_tokens
+
+
+class FakeSender:
+    """호출 횟수를 세고, 필요하면 정해진 예외를 던진다."""
+
+    def __init__(self, name: str = "fake", error: Exception | None = None) -> None:
+        self.name = name
+        self._error = error
+        self.calls = 0
+        self.briefings: list = []
+
+    def send(self, *, briefing, raw) -> None:
+        self.calls += 1
+        self.briefings.append(briefing)
+        if self._error is not None:
+            raise self._error
