@@ -9497,35 +9497,81 @@ git commit -m "feat: 전송 — Sender 프로토콜, 터미널 출력, 센더별
 
 ## Task 21: 중간 산출물 정리
 
-스펙 7.5의 "`data/` 90일 경과분 삭제" 항목이다. 날짜 디렉터리가 무한 증식하는 것을 막는다.
+스펙 7.5의 "`data/` 90일 경과분 삭제" 항목이다. 날짜 디렉터리가 무한
+증식하는 것을 막는다.
 
 **Files:**
 - Create: `pipeline/prune.py`
 - Create: `tests/test_prune.py`
 
-- [ ] **Step 1: 실패하는 테스트 작성**
+> **계획에서 고친 것** (테스트 5개 → 18개)
+>
+> ### 1. 삭제 경로가 테스트되지 않았다
+>
+> 계획은 `expired_dirs`(판단)만 테스트하고 `shutil.rmtree`를 부르는
+> `main()`은 테스트하지 않았다. **되돌릴 수 없는 작업에서 가장 중요한
+> 부분이 빠져 있었다.**
+>
+> `prune(root, *, today, dry_run)`으로 분리해 `tmp_path`로 실제 삭제를
+> 테스트한다 — 오래된 것은 지우고, 시드는 남고, dry_run은 아무것도 지우지
+> 않고, 파일은 건드리지 않는지.
+>
+> ### 2. `"20260101"` 디렉터리를 지울 수 있었다
+>
+> **Python 3.11부터 `date.fromisoformat`이 대시 없는 기본 ISO 형식도
+> 받는다.** `date.fromisoformat("20260101")`이 2026-01-01로 파싱된다.
+>
+> 우리는 항상 `YYYY-MM-DD`로 만들므로 그 형태가 아닌 이름은 **우리가 만든
+> 것이 아니다.** 그런데 계획의 코드는 파싱만 성공하면 지운다. 왕복 비교
+> (`when.isoformat() != name`)로 막았다. 되돌릴 수 없는 삭제라 좁게 잡는다.
+>
+> ### 3. 출력이 파일시스템 순서에 달려 있었다
+>
+> `expired_dirs`가 입력 순서로 반환해서, `Path.iterdir()`의 순서에 따라 같은
+> 상태에서 다른 목록이 나온다. 로그를 비교할 수 없다. 정렬해 돌려준다.
+
+- [x] **Step 1: 실패하는 테스트 작성**
 
 `tests/test_prune.py`:
 
 ```python
 from datetime import date
 
-from pipeline.prune import RETENTION_DAYS, SEED_DIR, expired_dirs
+from pipeline.prune import RETENTION_DAYS, SEED_DIR, expired_dirs, prune
 
+TODAY = date(2026, 11, 10)
+
+
+def _old(days: int) -> str:
+    """오늘로부터 days일 전의 디렉터리 이름."""
+    return date.fromordinal(TODAY.toordinal() - days).isoformat()
+
+
+# --- 대상 선별 ---
 
 def test_보존_기간을_넘긴_디렉터리를_고른다():
-    today = date(2026, 11, 10)
     names = ["2026-11-09", "2026-08-01", "2026-01-01"]
+    assert expired_dirs(names, today=TODAY) == ["2026-01-01", "2026-08-01"]
 
-    assert expired_dirs(names, today=today) == ["2026-08-01", "2026-01-01"]
+
+def test_결과가_정렬돼_있다():
+    """`Path.iterdir()`의 순서는 파일시스템에 달려 있다. 출력이 입력 순서를
+    따르면 같은 상태에서 다른 목록이 나와 로그를 비교할 수 없다.
+    """
+    뒤섞음 = ["2026-01-01", "2026-05-05", "2026-03-03"]
+    assert expired_dirs(뒤섞음, today=TODAY) == sorted(뒤섞음)
 
 
 def test_경계일은_남긴다():
-    today = date(2026, 11, 10)
-    boundary = (today.toordinal() - RETENTION_DAYS)
-    name = date.fromordinal(boundary).isoformat()
+    assert expired_dirs([_old(RETENTION_DAYS)], today=TODAY) == []
 
-    assert expired_dirs([name], today=today) == []
+
+def test_경계_하루_전은_지운다():
+    assert expired_dirs([_old(RETENTION_DAYS + 1)], today=TODAY) != []
+
+
+def test_오늘_디렉터리는_남긴다():
+    assert expired_dirs([TODAY.isoformat()], today=TODAY) == []
 
 
 def test_시드_디렉터리는_절대_지우지_않는다():
@@ -9534,14 +9580,102 @@ def test_시드_디렉터리는_절대_지우지_않는다():
 
 
 def test_날짜가_아닌_이름은_건너뛴다():
-    assert expired_dirs(["backup", ".DS_Store"], today=date(2026, 11, 10)) == []
+    assert expired_dirs(["backup", ".DS_Store"], today=TODAY) == []
+
+
+def test_날짜처럼_보이지만_아닌_이름도_건너뛴다():
+    assert expired_dirs(["2026-13-99", "2026-11", "20260101"], today=TODAY) == []
 
 
 def test_빈_목록도_처리한다():
-    assert expired_dirs([], today=date(2026, 11, 10)) == []
+    assert expired_dirs([], today=TODAY) == []
+
+
+# --- 실제 삭제 ---
+#
+# 계획에는 `main()`만 있어 **삭제 경로가 테스트되지 않았다.** 되돌릴 수 없는
+# 작업이라 여기가 가장 중요하다.
+
+def _make(root, name: str, 내용: str = "x") -> None:
+    d = root / name
+    d.mkdir(parents=True)
+    (d / "raw.json").write_text(내용, encoding="utf-8")
+
+
+def test_오래된_디렉터리를_지운다(tmp_path):
+    _make(tmp_path, _old(RETENTION_DAYS + 10))
+    _make(tmp_path, TODAY.isoformat())
+
+    지움 = prune(tmp_path, today=TODAY, dry_run=False)
+
+    assert 지움 == [_old(RETENTION_DAYS + 10)]
+    assert not (tmp_path / _old(RETENTION_DAYS + 10)).exists()
+    assert (tmp_path / TODAY.isoformat()).exists()
+
+
+def test_dry_run은_아무것도_지우지_않는다(tmp_path):
+    이름 = _old(RETENTION_DAYS + 10)
+    _make(tmp_path, 이름)
+
+    대상 = prune(tmp_path, today=TODAY, dry_run=True)
+
+    assert 대상 == [이름]
+    assert (tmp_path / 이름).exists()        # 그대로 있다
+
+
+def test_시드는_오래돼도_남는다(tmp_path):
+    """다시 만들 수 없다. 이 테스트가 깨지면 되돌릴 수 없는 손실이다."""
+    _make(tmp_path, SEED_DIR, 내용="시드 1923건")
+    _make(tmp_path, _old(RETENTION_DAYS + 10))
+
+    prune(tmp_path, today=date(2030, 1, 1), dry_run=False)
+
+    assert (tmp_path / SEED_DIR / "raw.json").read_text(encoding="utf-8") == "시드 1923건"
+
+
+def test_날짜가_아닌_디렉터리는_남는다(tmp_path):
+    _make(tmp_path, "backup")
+    prune(tmp_path, today=date(2030, 1, 1), dry_run=False)
+
+    assert (tmp_path / "backup").exists()
+
+
+def test_파일은_건드리지_않는다(tmp_path):
+    """root 바로 아래의 파일은 날짜 이름이어도 디렉터리가 아니다."""
+    (tmp_path / "2026-01-01").write_text("파일이다", encoding="utf-8")
+
+    지움 = prune(tmp_path, today=TODAY, dry_run=False)
+
+    assert 지움 == []
+    assert (tmp_path / "2026-01-01").exists()
+
+
+def test_root가_없으면_조용히_끝난다(tmp_path):
+    assert prune(tmp_path / "없는디렉터리", today=TODAY, dry_run=False) == []
+
+
+def test_지울_것이_없으면_빈_목록이다(tmp_path):
+    _make(tmp_path, TODAY.isoformat())
+    assert prune(tmp_path, today=TODAY, dry_run=False) == []
+
+
+def test_여러_개를_한_번에_지운다(tmp_path):
+    이름들 = [_old(RETENTION_DAYS + n) for n in (1, 50, 200)]
+    for 이름 in 이름들:
+        _make(tmp_path, 이름)
+
+    지움 = prune(tmp_path, today=TODAY, dry_run=False)
+
+    assert sorted(지움) == sorted(이름들)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_보존_기간이_90일이다():
+    """스펙 7.5의 값이다. 바꾸려면 스펙도 같이 고친다."""
+    assert RETENTION_DAYS == 90
 ```
 
-- [ ] **Step 2: 실패를 확인**
+- [x] **Step 2: 실패를 확인**
 
 ```bash
 pytest tests/test_prune.py
@@ -9549,12 +9683,24 @@ pytest tests/test_prune.py
 
 Expected: FAIL — `ModuleNotFoundError: No module named 'pipeline.prune'`
 
-- [ ] **Step 3: 최소 구현 작성**
+- [x] **Step 3: 최소 구현 작성**
 
 `pipeline/prune.py`:
 
 ```python
 """중간 산출물 정리: data/의 오래된 날짜 디렉터리를 지운다.
+
+스펙 7.5의 "`data/` 90일 경과분 삭제" 항목이다. 날짜 디렉터리가 무한
+증식하는 것을 막는다.
+
+**되돌릴 수 없는 작업이다.** 그래서 지우는 판단(`expired_dirs`)과 지우는
+행위(`prune`)를 분리해 양쪽을 테스트한다. `main()`은 배선과 출력만 맡는다.
+
+지우지 않는 것:
+- `_seed` — RSS에서 다시 얻을 수 없다(Task 14).
+- 날짜 형식이 아닌 이름 — 우리가 만든 것이 아니다.
+- 파일 — 날짜 이름이어도 디렉터리가 아니면 건드리지 않는다.
+- Supabase와 `docs/data/` — 영구 보관이다(스펙 7.5).
 
 실행:
   python -m pipeline.prune --dry-run   # 지울 목록만 본다
@@ -9573,12 +9719,17 @@ RETENTION_DAYS = 90
 
 
 def expired_dirs(names: list[str], *, today: date) -> list[str]:
-    """보존 기간을 넘긴 날짜 디렉터리 이름을 돌려준다."""
+    """보존 기간을 넘긴 날짜 디렉터리 이름을 **정렬해** 돌려준다.
+
+    정렬하는 이유: `Path.iterdir()`의 순서는 파일시스템에 달려 있다.
+    출력이 그 순서를 따르면 같은 상태에서 다른 목록이 나와 로그를 비교할 수 없다.
+    """
     cutoff = today.toordinal() - RETENTION_DAYS
     expired: list[str] = []
 
     for name in names:
         # 시드는 RSS에서 다시 얻을 수 없다. 어떤 경우에도 지우지 않는다.
+        # (날짜 형식이 아니라 아래에서도 걸리지만, 의도를 코드에 남긴다.)
         if name == SEED_DIR:
             continue
         try:
@@ -9586,10 +9737,36 @@ def expired_dirs(names: list[str], *, today: date) -> list[str]:
         except ValueError:
             # 날짜 형식이 아닌 디렉터리는 건드리지 않는다.
             continue
+        # **왕복 비교가 필요하다.** Python 3.11부터 `fromisoformat`이 대시 없는
+        # 기본 ISO 형식도 받는다 — `"20260101"`이 2026-01-01로 파싱된다.
+        # 우리는 항상 `YYYY-MM-DD`로 만들므로, 그 형태가 아닌 이름은 우리가
+        # 만든 것이 아니다. 되돌릴 수 없는 삭제라 좁게 잡는다.
+        if when.isoformat() != name:
+            continue
         if when.toordinal() < cutoff:
             expired.append(name)
 
-    return expired
+    return sorted(expired)
+
+
+def prune(root: Path, *, today: date, dry_run: bool) -> list[str]:
+    """`root` 아래의 만료된 날짜 디렉터리를 지운다.
+
+    지운(또는 dry_run이면 지울) 이름을 돌려준다. `root`가 없으면 빈 목록이다.
+    """
+    if not root.exists():
+        return []
+
+    # 디렉터리만 본다. 날짜 이름의 파일이 있어도 건드리지 않는다.
+    names = [entry.name for entry in root.iterdir() if entry.is_dir()]
+    targets = expired_dirs(names, today=today)
+
+    if not dry_run:
+        for name in targets:
+            # shutil.rmtree는 디렉터리와 그 안의 모든 것을 지운다.
+            shutil.rmtree(root / name)
+
+    return targets
 
 
 def main() -> None:
@@ -9597,53 +9774,83 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true", help="지울 목록만 출력")
     args = parser.parse_args()
 
-    root = Path(DEFAULT_ROOT)
+    root = DEFAULT_ROOT
     if not root.exists():
         print(f"{root}가 없다. 정리할 것이 없다.")
         return
 
-    names = sorted(entry.name for entry in root.iterdir() if entry.is_dir())
-    targets = expired_dirs(names, today=date.today())
+    targets = prune(root, today=date.today(), dry_run=args.dry_run)
 
     if not targets:
         print(f"보존 기간({RETENTION_DAYS}일)을 넘긴 디렉터리가 없다.")
         return
 
+    표시 = "지울 대상" if args.dry_run else "삭제"
     for name in targets:
-        if args.dry_run:
-            print(f"[지울 대상] {root / name}")
-        else:
-            # shutil.rmtree는 디렉터리와 그 안의 모든 것을 지운다.
-            shutil.rmtree(root / name)
-            print(f"[삭제] {root / name}")
+        print(f"[{표시}] {root / name}")
 
     if args.dry_run:
-        print(f"\n{len(targets)}개가 대상이다. --dry-run 없이 실행하면 삭제된다.")
+        print()
+        print(f"{len(targets)}개가 대상이다. --dry-run 없이 실행하면 삭제된다.")
+    else:
+        print()
+        print(f"{len(targets)}개를 삭제했다. (`{SEED_DIR}`는 보호된다)")
 
 
 if __name__ == "__main__":
     main()
 ```
 
-> **설명** — `date.toordinal()`은 날짜를 "서력 1년 1월 1일부터의 일수"인 정수로 바꾼다. 날짜 차이를 정수 비교로 처리할 수 있어 월말·윤년 계산이 필요 없다. `Path.iterdir()`는 디렉터리 안의 항목을 순회한다.
+> **설명** — `date.toordinal()`은 날짜를 "서력 1년 1월 1일부터의 일수"인
+> 정수로 바꾼다. 날짜 차이를 정수 비교로 처리할 수 있어 월말·윤년 계산이
+> 필요 없다. `Path.iterdir()`는 디렉터리 안의 항목을 순회한다.
+>
+> `entry.is_dir()`로 걸러내는 것이 중요하다. `data/2026-01-01`이라는
+> **파일**이 있어도 `rmtree`를 부르면 안 된다.
 
-- [ ] **Step 4: 통과를 확인**
+- [x] **Step 4: 통과를 확인**
 
 ```bash
 pytest tests/test_prune.py
 ```
 
-Expected: `5 passed`
+Expected: `18 passed`. 전체 `396 passed`.
 
-- [ ] **Step 5: 실제로 확인 (아직 지울 것이 없어야 정상)**
+- [x] **Step 5: 실제로 확인**
 
 ```bash
 python -m pipeline.prune --dry-run
 ```
 
-Expected: `보존 기간(90일)을 넘긴 디렉터리가 없다.`
+처음에는 아무것도 없었다(디렉터리가 하루·이틀 된 것들이라 정상):
 
-- [ ] **Step 6: 커밋**
+```
+보존 기간(90일)을 넘긴 디렉터리가 없다.
+```
+
+`main()`의 배선(`DEFAULT_ROOT`)까지 확인하려고 **가짜 옛 디렉터리로 실제
+삭제를 시험했다** (2026-11-12):
+
+```
+$ mkdir -p data/2020-01-01 && echo "지워질 것" > data/2020-01-01/raw.json
+
+$ python -m pipeline.prune --dry-run
+[지울 대상] data/2020-01-01
+1개가 대상이다. --dry-run 없이 실행하면 삭제된다.
+   → data/2020-01-01 그대로 있음
+
+$ python -m pipeline.prune
+[삭제] data/2020-01-01
+1개를 삭제했다. (`_seed`는 보호된다)
+
+$ ls data/
+2026-11-11  2026-11-12  _seed
+```
+
+**시드 체크섬이 Task 14의 백업과 동일했다**(`6eabe61b3120003e`) — 보호가
+실제로 작동한다.
+
+- [x] **Step 6: 커밋**
 
 ```bash
 git add pipeline/prune.py tests/test_prune.py
