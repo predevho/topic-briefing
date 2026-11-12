@@ -9864,218 +9864,141 @@ git commit -m "feat: 중간 산출물 90일 정리 (시드는 보호)"
 **Files:**
 - Create: `README.md`
 
-- [ ] **Step 1: 전체 테스트를 통과하는지 확인**
+- [x] **Step 1: 전체 테스트를 통과하는지 확인** → `396 passed`
 
-```bash
-pytest
+- [x] **Step 2: 파이프라인을 처음부터 끝까지 순차 실행**
+
+**실측 (2026-11-12): 두 경로를 모두 돌렸다.**
+
+### 경로 A — 물량이 있는 날 (Task 13~20에서 확인)
+
+| 단계 | 결과 | 시간 |
+|---|---|---|
+| collect | 240건 (96시간 윈도우) | 33초 |
+| rank | 240건 채점 → 10건 선별 | 65초 |
+| enrich | 본문 6 · 발췌 4 | 21초 |
+| summarize | 10건 → 7건 | 27초 |
+| notify | 전송 + `runs` 기록 | 2초 |
+
+### 경로 B — 조용한 날 (0건)
+
+`notify`가 윈도우를 전진시킨 직후라 윈도우가 **0.2시간**(13분)이었다.
+45개 소스 전부 0건 — 정상이다. 덕분에 **아직 검증하지 못한 0건 경로를
+토큰 없이** 끝까지 확인했다:
+
+```
+$ python -m pipeline.collect    →  수집 0건
+$ python -m pipeline.rank       →  채점 0건 → 선별 0건   (LLM 호출 없음)
+$ python -m pipeline.enrich     →  본문 확보 0건
+$ python -m pipeline.summarize  →  요약 0건 / 후보 0건   (LLM 호출 없음)
+                                   "보낼 만한 글이 없다. 이것도 정상 결과다."
+$ python -m pipeline.notify
+📡 11/12 (Thu) IT 브리핑 · 0건  (후보 0건)
+==============================================================================
+
+  후보 0건을 봤지만 기준을 넘는 글이 없습니다.
+  조용한 날입니다 — 시스템은 정상입니다.
 ```
 
-Expected: 모든 테스트 통과, 실패 0. (대략 130개 전후)
+`runs` 기록도 올바르다:
 
-- [ ] **Step 2: 파이프라인을 처음부터 끝까지 순차 실행**
-
-각 단계의 출력을 **반드시 눈으로 확인하고** 다음 단계로 넘어간다.
-
-```bash
-python -m pipeline.collect
+```
+status=sent  published_count=0  collected_count=0  considered_count=0
+max_score=None     ← 0이 아니라 NULL. "점수 없음"과 "0점"이 구분된다
 ```
 
-Expected: `수집 N건 → data/YYYY-MM-DD/raw.json`, 소스별 건수 목록. 최초 실행이면 윈도우가 96시간이라 수십~수백 건.
+- [x] **Step 3: 출력을 실제로 읽어본다** → 사용자 판단 완료 (Task 17 Step 6)
 
-```bash
-python -m pipeline.rank
+헤드라인 19~26자로 30자 제약 안에서 내용을 전달했고, 요점에 구체적 수치가
+들어왔다(예: "비용 52.4% 감소, Recall-Fail 0.77→0.86"). 상위 10건은 사용자가
+"괜찮다"로 판정했다.
+
+- [x] **Step 4: 멱등성을 확인**
+
+```
+$ python -m pipeline.notify
+AlreadySentError: 이 윈도우(~2026-11-12T06:25:13+00:00)는 이미 전송됐다
+(마지막 발송: 2026-11-12T06:26:26+00:00). 다시 보내려면 --force를 쓴다.
+
+$ python -m pipeline.notify --force
+  조용한 날입니다 — 시스템은 정상입니다.
+전송 완료 (2026-11-12)
 ```
 
-Expected: `채점 N건 → 선별 10건 → ...`, 선별된 10건의 점수·주제·제목·이유.
+센더를 **부르기 전에** 막는 것도 테스트로 고정했다
+(`test_이미_보냈으면_센더를_부르지도_않는다`).
 
-**여기서 선별 결과가 납득되지 않으면 멈춘다.** `config/interests.md`를 고치고 `python -m pipeline.rank`를 다시 돌린다 (수집은 재실행하지 않는다 — 이게 단계별 구조의 이득이다).
+- [x] **Step 5: Supabase에 데이터가 들어갔는지 확인**
 
-```bash
-python -m pipeline.enrich
+```
+articles 7건 · article_bodies 7건 · 일치: True
+runs 3건
 ```
 
-Expected: `본문 확보 10건`, 각 건의 글자 수. `[발췌]` 표시가 절반을 넘으면 본문 추출이 잘 안 되는 것이므로 어떤 소스에서 실패하는지 본다.
+**`article_bodies`가 `articles`와 같다** — Phase 3의 RAG 재료가 빠지지 않았다.
 
-```bash
-python -m pipeline.summarize
+- [x] **Step 6: 두 번째 실행에서 중복이 걸러지는지 확인**
+
+윈도우가 96시간 → **0.2시간**으로 좁아졌다(위 경로 B). `last_sent_at`이
+전진했기 때문이다. 이것이 파이프라인의 핵심 루프다.
+
+- [x] **Step 7: 에러 분류가 실제로 작동하는지 확인**
+
+**7-1. 죽은 소스가 `[설정]`으로 나오는지** — `sources.yaml`에 없는 주소를
+임시로 추가했다.
+
+```
+$ python scripts/check_feeds.py
+[설정] 테스트_죽은소스  https://example.com/this-feed-does-not-exist.xml HTTP 404
+고쳐야 할 소스 1개: 테스트_죽은소스
+일시 문제일 수 있는 소스 1개: Hacker_News_Best     ← 마침 실시간으로 502
 ```
 
-Expected: `요약 N건 / 후보 10건`, 헤드라인과 요점.
+**둘이 같은 실행에서 구분돼 나왔다.** 수집에서도 그렇다:
 
-**요약 품질이 납득되지 않으면 멈춘다.** `pipeline/summarize.py`의 `build_prompt`를 고치고 `python -m pipeline.summarize`만 다시 돌린다.
+```
+$ python -m pipeline.collect
+  [일시] Hacker_News_Best: https://hnrss.org/best?points=200 HTTP 502
+  [설정] 테스트_죽은소스: https://example.com/... HTTP 404
 
-```bash
-python -m pipeline.notify
+raw.json의 errors:
+  kind=transient  source=Hacker_News_Best      ← 재시도 후 기록
+  kind=config     source=테스트_죽은소스        ← 재시도 없음
 ```
 
-Expected: 터미널에 브리핑이 출력되고 마지막에 `전송 완료 (YYYY-MM-DD)`
+둘 다 `source_counts`에 0건으로 들어가 **소스 침묵 감지 데이터가 온전하다.**
+확인 후 `git checkout config/sources.yaml`으로 원복했다.
 
-- [ ] **Step 3: 출력을 실제로 읽어본다**
+**7-2. 본문을 못 가져오는 건이 폴백되는지** — `ranked.json`의 한 건 URL을
+없는 주소로 바꿨다.
 
-이게 계획 1의 결과물이다. 확인 항목:
+```
+$ python -m pipeline.enrich
+본문 확보 10건
+  [발췌]    39자  실행은 격리하고, 세션은 이어간다: 망분리 환경의 Agent Platform 설계
+  ...
+  5건이 발췌로 폴백됐다
+    토스_기술블로그: 접근 불가 — https://toss.tech/this-article-does-not-exist-404 HTTP 404
 
-- 헤드라인이 **30자 안에서 내용을 전달하는가** (카카오톡 제약이므로 여기서 확인해야 한다)
-- 요점 2~3개가 글의 핵심을 담는가, 아니면 제목 보강 수준인가
-- `왜:` 한 줄이 "그래서 뭐"에 답하는가
-- 점수와 출처를 보고 **"이게 왜 뽑혔는지" 납득되는가**
-- 하단 경고에 발췌 폴백·죽은 소스가 제대로 나오는가
-
-납득이 안 되면 **계획 2로 넘어가지 않는다.** `config/interests.md`와 `pipeline/summarize.py`의 프롬프트를 고치고 해당 단계만 재실행한다.
-
-- [ ] **Step 4: 멱등성을 확인**
-
-```bash
-python -m pipeline.notify
+19.7초 (앞선 정상 실행 21.4초)
 ```
 
-Expected: `AlreadySentError` — "이 윈도우는 이미 전송됐다 ... --force를 쓴다"
+**재시도 지연이 붙지 않았다** — 404는 `Permanent`이므로 1회로 끝난다.
+나머지 9건은 정상 처리됐다. 그리고 이 건의 발췌가 **39자**여서,
+"발췌 폴백이 때로는 실제로 얕다"는 경우도 함께 보여 준다(Netflix는 8,000자).
 
-```bash
-python -m pipeline.notify --force
-```
+- [x] **Step 8: `README.md` 작성**
 
-Expected: 브리핑이 한 번 더 출력된다.
+계획의 초안에 실측 수치와 반복되는 설계 규칙을 더했다. 특히:
 
-- [ ] **Step 5: Supabase에 데이터가 들어갔는지 확인**
+- 단계별 실측 소요 시간 표
+- `evaluate`의 두 모드(시드=소스 넓이 / 날짜=물량)와 분포가 다른 이유
+- `check_feeds.py`가 **피드 생존만** 본다는 것 (내용 적합성·발행 여부는 다른 방법)
+- "발췌로 요약한 건이 품질 저하라는 뜻은 아니다" (경고에 길이가 함께 나온다)
+- 반복해서 쓰인 설계 규칙 5개
+- 계획 3에서 메워야 할 구멍 2개 (`input_tokens`, 소스별 `quiet_days`)
 
-SQL Editor에서:
-
-```sql
-select briefing_date, count(*) as 건수 from public.articles group by 1 order by 1 desc;
-select sent_at, published_count, source_counts from public.runs order by sent_at desc limit 5;
-select count(*) as 본문_건수 from public.article_bodies;
-```
-
-Expected: `articles`에 발행 건수, `runs`에 실행 이력, `article_bodies`에 `articles`와 같은 건수.
-
-**`article_bodies`의 건수가 `articles`보다 적으면** 본문 저장이 누락된 것이므로 Phase 3의 RAG 재료가 빠진다. `SupabaseStore.save_articles`를 확인한다.
-
-- [ ] **Step 6: 두 번째 실행에서 중복이 걸러지는지 확인**
-
-```bash
-python -m pipeline.collect
-```
-
-Expected: 윈도우가 "마지막 발송 이후"로 좁아져 수집 건수가 크게 줄어든다. 앞서 발행한 글은 `known_urls`로 걸러진다.
-
-- [ ] **Step 7: 에러 분류가 실제로 작동하는지 확인**
-
-분류는 **일부러 깨뜨려봐야** 검증된다. 둘 다 원복이 쉽다.
-
-**7-1. 죽은 소스가 `[설정]`으로 나오는지**
-
-`config/sources.yaml`에 일부러 없는 주소를 하나 추가한다.
-
-```yaml
-  - name: 테스트_죽은소스
-    url: https://example.com/this-feed-does-not-exist.xml
-    kind: rss
-    weight: 1.0
-    lang: ko
-    enabled: true
-```
-
-```bash
-python scripts/check_feeds.py
-```
-
-Expected: `[설정] 테스트_죽은소스  https://example.com/... HTTP 404`
-
-**`[일시]`로 나오면 분류가 틀렸다.** 404는 영구 실패여야 한다.
-
-```bash
-python -m pipeline.collect
-```
-
-Expected: 출력 마지막에 `[설정] 테스트_죽은소스: ... HTTP 404`, 그리고 **나머지 소스는 정상 수집**된다.
-
-확인 후 `sources.yaml`에서 그 블록을 지운다.
-
-**7-2. 본문을 못 가져오는 소스가 폴백되는지**
-
-`config/sources.yaml`의 소스 하나에서 **RSS는 살아있지만 본문 페이지가 봇을 차단하는** 경우를 재현하기는 어렵다. 대신 `data/<날짜>/ranked.json`을 열어 `selected` 중 한 건의 `url`을 없는 주소로 바꾼 뒤 본문 단계만 다시 돌린다.
-
-```bash
-python -m pipeline.enrich
-```
-
-Expected: 그 건이 `[발췌]`로 표시되고, 하단 경고에 `접근 불가 — ... HTTP 404`가 나온다. **나머지 건은 정상으로 처리된다.**
-
-재시도로 몇 초 멈추면 안 된다 — 404는 `Permanent`이므로 1회로 끝나야 한다.
-
-확인 후 `python -m pipeline.rank`를 다시 돌려 `ranked.json`을 원복한다.
-
-- [ ] **Step 8: `README.md` 작성**
-
-````markdown
-# 토픽 컬럼 자동화
-
-매일 아침 IT 토픽을 수집·선별·요약해서 카카오톡으로 받는다.
-
-- 설계: `docs/superpowers/specs/2026-11-10-it-column-automation-design.md`
-- 계획 1 (현재): 파이프라인 — 수집·선별·요약, 결과는 터미널
-- 계획 2 (예정): 웹페이지 + 좋아요·클릭
-- 계획 3 (예정): 카카오톡 전송 + 슬랙 경고 + 경고 장치 + GitHub Actions
-
-## 준비
-
-```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
-cp .env.example .env     # 값을 채운다
-```
-
-## 매일 실행
-
-```bash
-python -m pipeline.collect      # 수집  → data/<날짜>/raw.json
-python -m pipeline.rank         # 선별  → ranked.json
-python -m pipeline.enrich       # 본문  → articles.json
-python -m pipeline.summarize    # 요약  → briefing.json
-python -m pipeline.notify       # 터미널 출력 + 발행 이력 기록
-```
-
-각 단계는 **단독 재실행이 가능하다.** 요약 프롬프트를 고쳤으면
-`python -m pipeline.summarize`만 다시 돌린다 — 수집과 선별 비용이 들지 않는다.
-
-## 품질 튜닝
-
-```bash
-python -m pipeline.evaluate --limit 40
-```
-
-시드 데이터로 선별을 돌려 결과를 표로 본다. 입력 표본이 고정이라
-`config/interests.md` 변경 효과만 비교된다.
-
-- 상위권에 보도자료·홍보 글이 있으면 → `interests.md`의 "낮게 평가"에 패턴 추가
-- 하위권에 읽고 싶은 글이 있으면 → "높게 평가"에 특징 추가
-
-## 점검
-
-```bash
-pytest                              # 전체 테스트
-python scripts/check_feeds.py       # 소스 피드 생존 확인
-python scripts/smoke_supabase.py    # DB 연결·권한 확인
-python scripts/smoke_llm.py         # Claude API 확인
-python -m pipeline.prune --dry-run  # 정리 대상 확인
-```
-
-## 알아둘 것
-
-- **수집 윈도우는 "마지막 발송 이후"**다 (상한 96시간). 주말을 쉬면 월요일이
-  자동으로 72시간이 되어 주말 해외 콘텐츠가 들어온다.
-- **건수는 고정이 아니다.** 점수 임계값(60)을 넘는 것만 보내므로 2건인 날도
-  0건인 날도 정상이다. 0건이어도 "조용한 날"이라고 출력된다.
-- **`notify`를 건너뛰면 안 된다.** 여기서 `runs`를 기록하고, 그게 다음 실행의
-  수집 윈도우 시작점이 된다. 안 돌리면 같은 구간을 계속 다시 수집한다.
-- **같은 윈도우는 두 번 보내지 않는다.** 다시 보내려면 `--force`.
-- **본문은 Supabase의 `article_bodies`에만 있다.** 리포지토리에 커밋하지 않고
-  공개 페이지에서도 읽히지 않는다. Phase 3의 RAG 재료다.
-- **`data/_seed/raw.json`은 지우지 않는다.** RSS는 과거를 제공하지 않으므로
-  다시 만들 수 없다. `~/briefing-seed-backup/`에 백업이 있다.
-````
-
-- [ ] **Step 9: 커밋**
+- [x] **Step 9: 커밋**
 
 ```bash
 git add README.md
@@ -10086,21 +10009,59 @@ git commit -m "docs: README — 실행 방법과 튜닝 절차"
 
 ## 완료 조건
 
-- [ ] `pytest`가 전부 통과한다
-- [ ] 파이프라인 5단계를 순차 실행하면 터미널에 브리핑이 출력된다
-- [ ] 출력된 헤드라인이 30자 안에서 내용을 전달한다 (카카오톡 제약 선검증)
-- [ ] 출력의 점수·출처·판단 이유를 보고 "왜 뽑혔는지" 납득된다
-- [ ] 같은 윈도우를 두 번 보내려 하면 거부된다
-- [ ] Supabase의 `articles`와 `article_bodies` 건수가 일치한다
-- [ ] anon 키로 `article_bodies`를 읽으면 권한 거부가 난다
-- [ ] 두 번째 수집에서 윈도우가 좁아지고 기존 글이 걸러진다
-- [ ] `python -m pipeline.evaluate`의 상위 10건 중 8건 이상이 "읽고 싶다"
-- [ ] `check_feeds.py` 출력에서 `[설정]`과 `[일시]`가 구분되어 나온다
-- [ ] `ranked.json`의 URL을 없는 주소로 바꾸고 `enrich`를 돌리면 **재시도 없이** 발췌로 폴백되고, 그 이유가 경고에 나온다
-- [ ] 센더를 빈 목록으로 주면 `notify`가 거부한다 (조용히 아무 데도 안 보내는 것 방지)
-- [ ] `runs` 테이블의 `errors`에 `kind`가 들어 있다
-- [ ] `smoke_supabase.py`의 5단계가 "키는 새지 않았다"로 끝난다
-- [ ] `pytest tests/test_timeutil.py`의 발송 요일 테스트 2개가 통과한다 (cron 한 칸 밀림 방지)
+**전부 충족 (2026-11-12 실측).**
+
+| | 조건 | 근거 |
+|---|---|---|
+| ✅ | `pytest`가 전부 통과한다 | `396 passed` |
+| ✅ | 파이프라인 5단계를 순차 실행하면 터미널에 브리핑이 출력된다 | Task 22 Step 2 — 물량 있는 날과 0건인 날 양쪽 |
+| ✅ | 출력된 헤드라인이 30자 안에서 내용을 전달한다 | 19~26자, 줄임 0건. `shorten`이 넘는 경우를 받아낸다 |
+| ✅ | 출력의 점수·출처·판단 이유를 보고 "왜 뽑혔는지" 납득된다 | 사용자 판정 완료 (Task 17 Step 6) |
+| ✅ | 같은 윈도우를 두 번 보내려 하면 거부된다 | `AlreadySentError`, 센더를 부르기 전에 막는다 |
+| ✅ | Supabase의 `articles`와 `article_bodies` 건수가 일치한다 | 7건 = 7건 |
+| ✅ | anon 키로 `article_bodies`를 읽으면 권한 거부가 난다 | `verify_anon_access.sh` — "anon 권한이 설계대로다" |
+| ✅ | 두 번째 수집에서 윈도우가 좁아지고 기존 글이 걸러진다 | 96시간 → **0.2시간**. 기존 글 제거는 `known_urls` 단위 테스트 |
+| ✅ | `evaluate`의 상위 10건 중 8건 이상이 "읽고 싶다" | 사용자 판정: 10건 통과, `interests.md` 수정 없음 |
+| ✅ | `check_feeds.py` 출력에서 `[설정]`과 `[일시]`가 구분되어 나온다 | 같은 실행에서 404(`[설정]`)와 502(`[일시]`)가 동시에 나왔다 |
+| ✅ | `ranked.json`의 URL을 없는 주소로 바꾸고 `enrich`를 돌리면 **재시도 없이** 발췌로 폴백되고, 그 이유가 경고에 나온다 | 19.7초(정상 실행 21.4초) — 지연이 붙지 않았다 |
+| ✅ | 센더를 빈 목록으로 주면 `notify`가 거부한다 | `test_센더가_하나도_없으면_거부한다` |
+| ✅ | `runs` 테이블의 `errors`에 `kind`가 들어 있다 | `kind=transient`, `kind=config` 실측 |
+| ✅ | `smoke_supabase.py`의 5단계가 "키는 새지 않았다"로 끝난다 | 통과. 테스트 행을 스스로 치워 `last_sent_at`도 그대로 |
+| ✅ | `pytest tests/test_timeutil.py`의 발송 요일 테스트가 통과한다 | `5 passed` |
+
+### 계획 1을 돌려 보고 알게 된 것
+
+**계획서가 코드보다 먼저 틀렸다.** 22개 태스크 중 **12개**에서 계획의
+테스트나 코드가 그대로는 동작하지 않았다. 유형이 셋이다.
+
+1. **규모가 바뀌면 다른 코드가 된다.** 단위 테스트는 항목 2~15건으로 돌아
+   전부 통과했는데, 실제 240건에서 출력이 `max_tokens`에 잘리고 SDK가
+   비스트리밍을 거부하고 가중치 상한이 상위 순서를 납작하게 만들었다
+   (Task 16). 계획은 "소스 11개"를 가정했고 실제는 45개였다.
+2. **외부 세계의 가정이 틀렸다.** `trafilatura`는 `<nav>menu</nav>`에
+   `'menu'`를 돌려주고(Task 18), `date.fromisoformat`은 `"20260101"`을
+   받고(Task 21), anthropic SDK는 `httpx`가 아니라 `httpx2`를 쓰고
+   (Task 15), 구조화된 출력의 스키마 제약은 **보장이 아니다**(Task 19).
+3. **문서가 거짓을 말했다.** `AllSendersFailedError`는 "이력을 남기지
+   않았다"고 하면서 바로 윗줄에서 기록을 남겼다(Task 20).
+
+**측정이 설계를 바꾼 경우가 넷이다.**
+
+- 시드의 소스별 최신 발행일을 보고 spec 8.4의 소스 침묵 임계값을
+  "3일 연속 0건"에서 소스별 `quiet_days`로 고쳤다 — 그대로면 느리지만
+  살아 있는 소스 5개가 영구히 경고를 띄운다 (Task 14).
+- 수집 제목을 읽고 국내 매체 2곳을 끄고 전자신문 주소를 바꿨다 —
+  "오피니언"이라 적어 둔 피드가 실제로는 "속보"였다 (Task 13 이후).
+- 균등 무작위 표본이 40건 중 25건을 두 소스에서 뽑는 것을 보고 소스별
+  상한을 넣었다 (Task 17).
+- 34자 헤드라인 하나가 요약 7건을 전부 날리는 것을 보고 "LLM 초안은
+  느슨하게, 우리 계약은 엄격하게, 경계에서 정규화" 규칙을 세워 `rank`까지
+  같이 고쳤다 (Task 19).
+
+**반대로, 측정해 보고 고치지 않은 것도 있다.** `reason`이 중앙값 9자로
+짧아 결함처럼 보였지만 점수대별로 나눠 보니 길이가 점수에 따라 늘어났다
+(80점 이상 18자 / 0~39점 7자). 2점짜리 "3분기 매출" 기사에 `"실적."`이면
+그게 맞는 길이다 — 증거 없이 제약을 더하지 않았다 (Task 16).
 
 ---
 
