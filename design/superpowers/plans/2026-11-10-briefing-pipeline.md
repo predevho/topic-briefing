@@ -10,7 +10,7 @@
 
 **Tech Stack:** Python 3.12, feedparser(RSS 파싱), trafilatura(본문 추출), httpx(HTTP), anthropic(Claude API), supabase(DB), PyYAML, pydantic(구조화된 출력 검증), pytest.
 
-**설계 스펙:** `docs/superpowers/specs/2026-11-10-it-column-automation-design.md`
+**설계 스펙:** `design/superpowers/specs/2026-11-10-it-column-automation-design.md`
 
 ---
 

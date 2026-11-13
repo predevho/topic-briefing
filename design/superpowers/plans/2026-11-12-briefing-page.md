@@ -19,7 +19,7 @@
 | 데이터 경로 | `render`가 `docs/data/*.json`을 생성 → 페이지가 fetch | **페이지가 Supabase를 직접 조회** | 공개 리포에 기사 데이터를 매일 영구 축적하지 않는다. 읽기·쓰기 클라이언트가 하나로 모인다 |
 | `pipeline/render.py` | Task 2 (약 490줄) | **삭제** | 위의 결과 |
 | 인증 | 없음 (`localStorage` 좋아요) | **읽기 공개 + 쓰기 로그인** | 좋아요 토글·기기 간 동일 표시가 가능해지고, 낯선 사람의 신호 오염이 닫힌다 |
-| 리포지토리 공개 | Task 1에서 전환 | **완료** (2026-11-13) | `docs/공개-전-점검.md` 참조 |
+| 리포지토리 공개 | Task 1에서 전환 | **완료** (2026-11-13) | `design/공개-전-점검.md` 참조 |
 | `docs/`의 설계 문서 | 그대로 둠 | **`design/`으로 옮긴다** (Task 1) | `docs/`가 웹 루트라 설계·계획 문서가 웹에서 열렸다 |
 
 초판에서 **그대로 남은 것**: 목업에서 확정한 색·글꼴·카드 구조(A 톤), Task 4(디자인 토큰), Task 6(카드), Task 7(오늘 화면), Task 8(아카이브), Task 9(라우팅). 네 태스크는 `fetchDay`·`fetchArchive`·`fetchLatest`·`NotFound`와 `Day`·`Archive` 타입만 쓰므로 **구현이 바뀌어도 한 글자도 바뀌지 않는다.** 그게 Task 5를 그 이름으로 유지하는 이유다.
@@ -220,8 +220,8 @@ div 메타               11.5px / Inter / #6B6862 — 출처 · 점수 · [좋�
 `docs/`가 GitHub Pages의 웹 루트가 되므로, 거기 있는 설계·계획 문서는 **브리핑 URL을 아는 사람에게 웹에서 열린다.** 배포 전에 옮긴다.
 
 **Files:**
-- Move: `docs/superpowers/` → `design/superpowers/`
-- Move: `docs/공개-전-점검.md` → `design/공개-전-점검.md`
+- Move: `design/superpowers/` → `design/superpowers/`
+- Move: `design/공개-전-점검.md` → `design/공개-전-점검.md`
 - Modify: `README.md`, `design/superpowers/specs/2026-11-10-it-column-automation-design.md`, `design/공개-전-점검.md` (경로 참조)
 
 - [ ] **Step 1: 옮긴다**
@@ -229,8 +229,8 @@ div 메타               11.5px / Inter / #6B6862 — 출처 · 점수 · [좋�
 ```bash
 cd "$(git rev-parse --show-toplevel)"
 mkdir -p design
-git mv docs/superpowers design/superpowers
-git mv docs/공개-전-점검.md design/공개-전-점검.md
+git mv design/superpowers design/superpowers
+git mv design/공개-전-점검.md design/공개-전-점검.md
 ```
 
 - [ ] **Step 2: `docs/`에 남은 것을 확인한다**
@@ -245,13 +245,13 @@ Expected: **아무것도 나오지 않는다.** 아직 빌드 산출물이 없�
 
 ```bash
 cd "$(git rev-parse --show-toplevel)"
-git ls-files -z | xargs -0 grep -ln 'docs/superpowers\|docs/공개-전-점검'
+git ls-files -z | xargs -0 grep -ln 'design/superpowers\|design/공개-전-점검'
 ```
 
-나온 파일에서 `docs/superpowers` → `design/superpowers`, `docs/공개-전-점검` → `design/공개-전-점검`으로 바꾼다.
+나온 파일에서 `design/superpowers` → `design/superpowers`, `design/공개-전-점검` → `design/공개-전-점검`으로 바꾼다.
 
 ```bash
-git ls-files -z | xargs -0 perl -pi -e 's{docs/superpowers}{design/superpowers}g; s{docs/공개-전-점검}{design/공개-전-점검}g'
+git ls-files -z | xargs -0 perl -pi -e 's{design/superpowers}{design/superpowers}g; s{design/공개-전-점검}{design/공개-전-점검}g'
 ```
 
 > `perl -pi`를 쓰는 이유: BSD `sed -i`는 빈 확장자 인자를 요구해 플랫폼마다 다르고, 한글 경로가 섞이면 zsh에서 따옴표 처리가 까다롭다.
@@ -259,7 +259,7 @@ git ls-files -z | xargs -0 perl -pi -e 's{docs/superpowers}{design/superpowers}g
 - [ ] **Step 4: 남은 참조가 없는지 확인한다**
 
 ```bash
-git ls-files -z | xargs -0 grep -n 'docs/superpowers\|docs/공개-전-점검'
+git ls-files -z | xargs -0 grep -n 'design/superpowers\|design/공개-전-점검'
 ```
 
 Expected: 아무것도 나오지 않는다.

@@ -2,11 +2,11 @@
 
 매일 아침 IT 토픽을 수집·선별·요약해서 카카오톡으로 받는다.
 
-- 설계: [`docs/superpowers/specs/2026-11-10-it-column-automation-design.md`](docs/superpowers/specs/2026-11-10-it-column-automation-design.md)
-- ERD: [`docs/superpowers/specs/2026-11-11-erd.md`](docs/superpowers/specs/2026-11-11-erd.md)
-- 요구사항 추적표: [`docs/superpowers/specs/2026-11-11-requirements.md`](docs/superpowers/specs/2026-11-11-requirements.md)
-- 구현 계획과 실측 기록: [`docs/superpowers/plans/2026-11-10-briefing-pipeline.md`](docs/superpowers/plans/2026-11-10-briefing-pipeline.md)
-- **공개 전 점검**: [`docs/공개-전-점검.md`](docs/공개-전-점검.md) — 이 리포지토리는 비공개다. 공개로 바꾸기 전에 읽는다
+- 설계: [`design/superpowers/specs/2026-11-10-it-column-automation-design.md`](design/superpowers/specs/2026-11-10-it-column-automation-design.md)
+- ERD: [`design/superpowers/specs/2026-11-11-erd.md`](design/superpowers/specs/2026-11-11-erd.md)
+- 요구사항 추적표: [`design/superpowers/specs/2026-11-11-requirements.md`](design/superpowers/specs/2026-11-11-requirements.md)
+- 구현 계획과 실측 기록: [`design/superpowers/plans/2026-11-10-briefing-pipeline.md`](design/superpowers/plans/2026-11-10-briefing-pipeline.md)
+- **공개 전 점검**: [`design/공개-전-점검.md`](design/공개-전-점검.md) — 이 리포지토리는 비공개다. 공개로 바꾸기 전에 읽는다
 
 | | 범위 | 상태 |
 |---|---|---|
