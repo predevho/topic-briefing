@@ -2459,6 +2459,25 @@ Expected: 397 passed
 | D4 | 충족 위치 → `계획 2 Task 3·13`, 상태 → ✅ |
 | **D8** | 검증에 한 줄 추가 → "계획 2 Task 2가 `runs.briefing_date`를 더해 페이지가 이 데이터에 도달한다. Task 15 Step 2에서 실측". 상태 → ✅ |
 
+**설계 스펙도 함께 갱신한다.** `design/superpowers/specs/2026-11-10-it-column-automation-design.md`가 아직 정적 JSON 방식을 본문으로 설명한다. Task 1에서 6.4 머리에 개정 포인터를 달아 두었지만, 본문은 여기서 고친다.
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+grep -n 'docs/data' design/superpowers/specs/2026-11-10-it-column-automation-design.md
+```
+
+| 위치 | 고칠 내용 |
+|---|---|
+| 3장 아키텍처 그림 | `docs/data/*.json → GitHub Pages` 화살표를 지우고, 페이지가 Supabase에서 읽는 화살표로 바꾼다 |
+| 3.1 단계 목록 | `render.py → docs/data/YYYY-MM-DD.json` 줄을 지운다 — 그 단계가 없다 |
+| 디렉터리 트리 | `docs/`의 설명을 "빌드 산출물 + robots.txt·.nojekyll·404.html"로, `design/`을 더한다 |
+| **6.4 웹페이지** | 본문을 직접 조회로 고치고, Task 1에서 단 개정 포인터를 지운다 |
+| 7.2 | "`docs/data/*.json`에는 요약·헤드라인·링크만 담고 본문은 넣지 않는다"를 "**리포지토리에 기사 데이터를 커밋하지 않는다**"로. 더 강한 보장이 됐다 |
+| 7.5 보관 정책 | `docs/data/*.json`의 영구 보관 항목을 지운다 — 그 파일이 없다 |
+| 8장 Actions 스케치 | "마지막: `docs/` 커밋·푸시"를 지운다 — 매일 커밋할 것이 없다 |
+
+`design/superpowers/plans/2026-11-10-briefing-pipeline.md`(계획 1)의 `docs/data/` 언급 1건도 같이 고친다. `pipeline/prune.py`의 독스트링은 Task 1에서 이미 고쳤다.
+
 - [ ] **Step 6: `README.md`를 갱신한다**
 
 "## 매일 실행" 절에 더한다.
