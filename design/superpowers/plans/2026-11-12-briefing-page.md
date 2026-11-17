@@ -2451,11 +2451,26 @@ Disallow: /
 
 ```bash
 cd "$(git rev-parse --show-toplevel)/web" && npm run build && cd ..
-grep -rl "sb_secret_" docs/assets/ 2>/dev/null && echo "⚠️  secret 키가 들어갔다" || echo "✓ secret 키 없음"
-grep -rlo "sb_publishable_[A-Za-z0-9_-]*" docs/assets/ 2>/dev/null | head -1
+bash scripts/verify_bundle.sh
 ```
 
-Expected: secret 키 없음. publishable 키는 **있어야 정상이다** — 없으면 `.env.local`이 빌드에 안 들어간 것이다.
+Expected: 5개 항목 전부 통과.
+
+> **2026-11-17: 초판의 검사가 거짓 경보를 냈다.** `grep -rl "sb_secret_"`로
+> 보면 **항상 걸린다** — supabase-js 자신이 키 형식을 판별하려고 그 리터럴을
+> 들고 있기 때문이다.
+>
+> ```js
+> e.startsWith(`sb_publishable_`) || e.startsWith(`sb_secret_`)
+> ```
+>
+> 키가 샜다고 착각하게 만드는 검사다. `scripts/verify_bundle.sh`는 두 가지로
+> 판정한다 — **`.env`의 실제 키 값**이 번들에 있는지(결정적), 그리고
+> `sb_secret_` 뒤에 키처럼 긴 문자열이 붙어 있는지(라이브러리 리터럴은
+> 바로 뒤가 백틱이라 걸리지 않는다). Anthropic 키도 같이 본다.
+>
+> publishable 키는 **있어야 정상이다** — 없으면 `.env.local`이 빌드에 안
+> 들어간 것이고, 배포하면 페이지가 빈다. 그것도 검사에 넣었다.
 
 - [ ] **Step 4: 커밋**
 
