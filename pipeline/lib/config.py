@@ -13,6 +13,9 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 DEFAULT_SOURCES_PATH = Path("config/sources.yaml")
+
+# 침묵 경고의 임계값 등급. 값은 pipeline/lib/guard.py의 QUIET_THRESHOLDS.
+QuietTier = Literal["fast", "weekly", "monthly", "none"]
 DEFAULT_INTERESTS_PATH = Path("config/interests.md")
 
 
@@ -24,6 +27,12 @@ class Source(BaseModel):
     kind: Literal["rss"]            # 지금은 rss만. 다른 방식이 생기면 여기 추가한다
     weight: float = Field(gt=0)     # LLM 점수에 곱한다
     lang: Literal["ko", "en"]
+    # 침묵 경고의 임계값 등급. 소스의 **관측된 최대공백**으로 정한다
+    # (중앙값이 아니다 — 몰아서 쓰는 소스가 있다. 뱅크샐러드: 중앙 2일, 최대 265일).
+    # 기본 fast: 새 소스는 자주 쓸 것으로 보고, 오탐이 나면 한 칸 올린다.
+    # Literal이라 오타("weekley")는 로딩에서 거부된다 — 조용히 기본값으로
+    # 떨어지면 그 소스는 엉뚱한 기준으로 감시된다.
+    quiet_tier: QuietTier = "fast"
     enabled: bool = True
 
     @field_validator("url")

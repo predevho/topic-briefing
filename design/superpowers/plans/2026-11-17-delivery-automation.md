@@ -1450,8 +1450,45 @@ git commit -m "feat: SlackSender — 경고 전용, send 메서드 없음"
 
 **지표를 바꾼다.** "N일 연속 0건"이 아니라 **"그 소스에서 마지막으로 글이 온 날로부터 경과일"**이다. 0건은 수집 윈도우(최대 96시간) 기준이라 주간 소스는 7일 중 5일이 0건이고, "연속" 카운트가 소스의 실제 상태와 어긋난다.
 
+> **2026-11-17 실행 중 고친 것 — 원안은 지금 떠야 할 경고를 놓친다.**
+>
+> 원안은 runs에서 한 번도 양수가 아니었던 소스를 `None`(경고 안 함)으로
+> 둔다. "새 소스와 죽은 소스를 구별할 수 없다"는 이유였다. 그런데 runs는
+> **2026-11-12부터만** 있다. 그 전부터 조용하던 소스는 다시 글을 쓰기 전까지
+> 영원히 `None`이다 — 가드가 잡아야 할 바로 그 경우다.
+>
+> 실측(2026-11-17):
+>
+> | | |
+> |---|---|
+> | 11/12 실제 실행에서 0건인 소스 | 45개 중 **16개** |
+> | 원안으로 판정 | **경고 없음** |
+> | 시드를 더해 판정 | **하이퍼커넥트 209일째 (기준 200일)** |
+> | 하이퍼커넥트 실제 피드 | 정상 수신, 리다이렉트 없음, 최신 글 **2026-04-22** |
+>
+> 경고는 진짜다 — 수집기 문제가 아니라 블로그가 실제로 멈췄다.
+>
+> **해결: 시드의 마지막 글 날짜를 출발점으로 쓴다.** 시드(`data/_seed/raw.json`,
+> 400일 윈도우)는 각 소스의 진짜 마지막 글을 안다. 다만 `data/`는 gitignore라
+> Actions에 없으므로 `scripts/seed_last_seen.py`가 45줄만 뽑아
+> `config/seed_last_seen.json`에 커밋한다. "마지막으로 본 날"은 runs의 양수인
+> 날과 시드 날짜 중 **늦은 쪽**이다. 둘 다 없으면 여전히 `None`(새 소스).
+>
+> 대안으로 수집이 매번 피드의 최신 글 날짜를 기록하게 하는 방법(runs에 새
+> 컬럼)도 있었다. 새 소스도 첫날부터 판정되지만 collect·RawBundle·record_run·
+> 마이그레이션을 건드린다. 임계값이 30/90/200일이라 정밀도 차이는 의미가
+> 없고, 시드로 빈틈이 닫히므로 작은 쪽을 골랐다.
+>
+> 하나 더: 원안 `days_since_seen`은 runs가 **내림차순이라고 가정**하고 첫
+> 양수를 돌려줬다. 질의가 정렬을 빠뜨리면 오래된 날짜를 집어 거짓 경고가
+> 뜬다. 양수인 날 중 `max`를 쓰도록 전제를 없앴다.
+>
+> 테스트 14개(원안 6개). Task 12의 `guard_warnings`도 `seed=`를 넘기도록
+> 고쳤다 — 그대로 두면 Task 12에서 빈틈이 되살아난다.
+
 **Files:**
 - Create: `pipeline/lib/guard.py`
+- Create: `scripts/seed_last_seen.py`, `config/seed_last_seen.json`
 - Modify: `pipeline/lib/config.py` (`Source`에 `quiet_tier`)
 - Test: `tests/test_guard.py`
 
@@ -1631,7 +1668,7 @@ def silent_sources(
 .venv/bin/python -m pytest tests/test_guard.py -v
 ```
 
-Expected: 6 passed
+Expected: 14 passed. 전체 456개.
 
 - [ ] **Step 6: 커밋**
 
@@ -2095,6 +2132,7 @@ from pipeline.lib.config import Source, load_sources
 from pipeline.lib.guard import (
     BUDGET_WARN_RATIO,
     SPIKE_FACTOR,
+    load_seed_last_seen,
     month_cost_usd,
     silent_sources,
     token_expiring,
@@ -2145,7 +2183,12 @@ def guard_warnings(
     lines: list[str] = []
     runs = remote.recent_runs(days=400)
 
-    for name, gap, limit in silent_sources(sources, runs, today=today):
+    # **seed를 반드시 넘긴다.** 빠뜨리면 runs가 시작되기 전부터 조용하던
+    # 소스(2026-11-17: 하이퍼커넥트 209일)를 영원히 못 잡는다(Task 8).
+    # runs는 최고 임계값(200일)보다 길게 받는다 — 400일.
+    for name, gap, limit in silent_sources(
+        sources, runs, today=today, seed=load_seed_last_seen()
+    ):
         lines.append(f"소스 침묵: {name} — {gap}일째 (기준 {limit}일)")
 
     found = remote.kakao_refresh_token()
