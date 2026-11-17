@@ -565,6 +565,45 @@ git commit -m "feat: runs.output_tokens + notify 토큰 배선"
 
 최초 인증은 `scripts/kakao_auth.py`로 끝났다(2026-11-17). 여기서는 **매일 쓰는 쪽**만 만든다.
 
+> **2026-11-17 실행 중 고친 것 — `classify_status` 호출이 깨져 있었다.**
+>
+> 아래 Step 3의 원래 코드는 이랬다.
+>
+> ```python
+> raise classify_status(response.status_code, f"카카오 토큰: {response.text}")
+> ```
+>
+> 실제 시그니처는 `classify_status(status, *, url, retry_after=None, detail="")`다.
+> 실측으로 두 가지가 터진다.
+>
+> ```
+> classify_status() takes 1 positional argument but 2 were given
+> 204에서 raise: exceptions must derive from BaseException
+> ```
+>
+> 1. 두 번째 인자가 **키워드 전용**이라 위치 인자로 넘기면 `TypeError`다.
+>    `url=`은 필수인데 넘기지도 않았다.
+> 2. `classify_status`는 **스스로 던지고 `None`을 돌려준다.**
+>    `raise classify_status(...)`는 2xx에서 `raise None`이 된다.
+>    `if status != 200` 가드가 있어 200은 피하지만, 201·204가 오면
+>    `TypeError`로 바뀌어 원인이 가려진다.
+>
+> `pipeline/lib/llm.py:134`가 올바른 호출 방식을 이미 쓰고 있었다 —
+> 문장으로 부르고 `url=`·`detail=`을 키워드로 넘긴다.
+>
+> 겸해서 두 구멍을 더 메웠다. 둘 다 **분류되지 않은 예외가 새는** 경로다.
+> 매일 07:00에 사람 없이 도는 코드에서 그것은 "왜 안 왔지"로 시작하는
+> 아침이 된다.
+>
+> - **전송 실패를 잡지 않았다.** 토큰 엔드포인트 시간 초과는 교과서적인
+>   일시 실패인데 `httpx.TimeoutException`이 그대로 샌다. `http.fetch`가
+>   하듯 `Transient`로 올린다.
+> - **`.json()`이 터질 수 있다.** 프록시나 점검 페이지가 200에 HTML을
+>   실어 보내면 `JSONDecodeError`가 분류 없이 샌다. `Permanent`로 올린다.
+>
+> 그래서 `_post`를 `post_form`으로 공개 이름으로 바꿨다. 실패 분류가
+> 테스트할 가치가 있는 단위이고, 밑줄 이름은 테스트에서 부르기 어색하다.
+
 **Files:**
 - Create: `pipeline/lib/kakao.py`
 - Test: `tests/test_kakao.py`
@@ -621,6 +660,21 @@ def test_회전된_토큰만_저장한다():
     assert should_store(KakaoTokens(access_token="AT")) is False
 ```
 
+**실제로는 8개를 썼다.** 위 3개에 실패 경로 다섯을 더했다 —
+`tests/test_kakao.py` 참조.
+
+| 더한 테스트 | 왜 |
+|---|---|
+| `test_access_token이_없으면_영구_실패다` | 카카오가 **HTTP 200**으로 `{"error": "invalid_grant"}`를 돌려준다. 상태 코드만 보면 성공으로 읽힌다. 계획서에 가드는 있었는데 테스트가 없었다 |
+| `test_인증_실패는_영구다` | 401 → `Permanent`. 키 오타는 재시도해도 같다 |
+| `test_서버_오류는_일시적이다` | 500 → `Transient`. 분류를 틀리면 그날 브리핑이 안 간다 |
+| `test_시간_초과는_일시적이다` | 위 머리말의 전송 실패 구멍 |
+| `test_JSON이_아닌_응답은_영구다` | 위 머리말의 `.json()` 구멍 |
+
+테스트는 두 층을 따로 본다. `access_token`은 `post`를 주입해 **응답
+해석**만 보고, `post_form`은 `send`를 주입해 **HTTP 실패 분류**를 본다
+(`http.fetch`의 `get` 주입과 같은 방식이다).
+
 - [ ] **Step 2: 실패를 확인한다**
 
 ```bash
@@ -648,10 +702,15 @@ from typing import Callable
 import httpx
 
 from pipeline.lib.http import classify_status
-from pipeline.lib.retry import Permanent
+from pipeline.lib.retry import Permanent, Transient
 
 TOKEN_URL = "https://kauth.kakao.com/oauth/token"
 FORM = "application/x-www-form-urlencoded;charset=utf-8"
+
+# 토큰 교환은 한 번에 끝나야 한다. fetch의 20초와 같게 둔다.
+TOKEN_TIMEOUT = 20.0
+
+PostFn = Callable[..., httpx.Response]
 
 
 @dataclass(frozen=True)
@@ -662,13 +721,51 @@ class KakaoTokens:
     refresh_token_expires_in: int | None = None
 
 
-def _post(url: str, data: dict, headers: dict, timeout: float) -> dict:
-    response = httpx.post(url, data=data, headers=headers, timeout=timeout)
-    if response.status_code != 200:
-        # 토큰 발급 실패는 대부분 설정 문제다(키 오타, 앱 설정 변경).
-        # 재시도해도 같은 결과이므로 Permanent로 올린다.
-        raise classify_status(response.status_code, f"카카오 토큰: {response.text}")
-    return response.json()
+def _httpx_post(
+    url: str, data: dict[str, str], headers: dict[str, str], timeout: float
+) -> httpx.Response:
+    return httpx.post(url, data=data, headers=headers, timeout=timeout)
+
+
+def post_form(
+    url: str,
+    *,
+    data: dict[str, str],
+    headers: dict[str, str],
+    timeout: float = TOKEN_TIMEOUT,
+    send: PostFn = _httpx_post,
+) -> dict:
+    """폼을 POST하고 JSON을 돌려준다. 실패는 분류해 던진다.
+
+    `send`는 테스트에서 갈아끼우는 자리다. `http.fetch`의 `get`과 같은
+    방식이다 — 실패 경로를 실제 네트워크 없이 확인할 수 있어야 한다.
+    """
+    try:
+        response = send(url, data, headers, timeout)
+    except httpx.TimeoutException as error:
+        raise Transient(f"{url} 시간 초과: {error}") from error
+    except httpx.RequestError as error:
+        raise Transient(
+            f"{url} 전송 실패: {type(error).__name__}: {error}"
+        ) from error
+
+    # **스스로 던진다.** `raise classify_status(...)`가 아니다 — 반환값이
+    # None이라 2xx에서 `raise None`이 되어 TypeError로 바뀐다.
+    classify_status(
+        response.status_code,
+        url=url,
+        detail=response.text[:200],
+    )
+
+    try:
+        return response.json()
+    except ValueError as error:
+        # 점검 페이지나 프록시가 200에 HTML을 실어 보내는 경우다.
+        # 그냥 두면 JSONDecodeError가 분류 없이 새어 나간다.
+        raise Permanent(
+            f"{url} 응답이 JSON이 아니다 (HTTP {response.status_code}): "
+            f"{response.text[:200]}"
+        ) from error
 
 
 def access_token(
@@ -676,7 +773,7 @@ def access_token(
     refresh_token: str,
     client_id: str,
     client_secret: str,
-    post: Callable[..., dict] = _post,
+    post: Callable[..., dict] = post_form,
 ) -> KakaoTokens:
     payload = post(
         TOKEN_URL,
@@ -687,8 +784,10 @@ def access_token(
             "refresh_token": refresh_token,
         },
         headers={"Content-Type": FORM},
-        timeout=20.0,
+        timeout=TOKEN_TIMEOUT,
     )
+
+    # 카카오는 HTTP 200으로 `{"error": "invalid_grant"}`를 돌려줄 수 있다.
     if "access_token" not in payload:
         raise Permanent(f"카카오 응답에 access_token이 없다: {sorted(payload)}")
     return KakaoTokens(
@@ -713,7 +812,8 @@ def should_store(tokens: KakaoTokens) -> bool:
 .venv/bin/python -m pytest tests/test_kakao.py -v
 ```
 
-Expected: 3 passed
+Expected: 8 passed (계획서 원안은 3개였다. 위 표 참조)
+전체는 416개 (Task 3 이후 408 + 8)
 
 - [ ] **Step 5: 커밋**
 
