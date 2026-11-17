@@ -206,7 +206,7 @@ def rank(
 
     # 재시도는 llm.parse 안에서 끝난다 — 전송 계층은 SDK가, 스키마 실패는
     # 래퍼가 1회 담당한다. 여기서 또 감싸면 이중 재시도가 된다.
-    sheet, _tokens = llm.parse(
+    sheet, tokens = llm.parse(
         prompt=prompt,
         output_format=ScoreSheet,
         effort=RANK_EFFORT,
@@ -262,6 +262,7 @@ def rank(
         # 0으로 두면 "최고 0점"과 "수집 없음"이 구분되지 않는다.
         # 상한 있는 값을 쓴다 — 0건인 날 화면이 "최고 117점"이면 안 된다.
         max_score=ranked[0].score if ranked else None,
+        tokens=tokens,
     )
 
 

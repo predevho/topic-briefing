@@ -494,3 +494,38 @@ def test_정규화한_값이_all_scores에_들어간다():
 
     assert bundle.all_scores[0].score == 100
     assert bundle.all_scores[0].topic == "other"
+
+
+# --- 토큰 기록 ---
+#
+# 크레딧 가드(계획 3)가 읽는다. 버리면 나중에 복구할 방법이 없다.
+
+def test_선별이_쓴_토큰을_번들에_싣는다():
+    llm = FakeLLM(
+        responses=[ScoreSheet(scores=[ScoreItem(index=0, score=70, reason="r", topic="AI")])],
+        input_tokens=42135,
+        output_tokens=1820,
+    )
+
+    bundle = rank(
+        items=[_item(0)], interests="i", recent_headlines=[],
+        weights={"토스_기술블로그": 1.0}, llm=llm,
+        window_start=WINDOW[0], window_end=WINDOW[1],
+    )
+
+    assert bundle.tokens is not None
+    assert bundle.tokens.input == 42135
+    assert bundle.tokens.output == 1820
+
+
+def test_수집이_0건이면_토큰이_None이다():
+    """LLM을 부르지 않은 날이다. 0으로 두면 "안 썼다"가 되어 크레딧
+    가드가 거짓 안심을 한다 — "모른다"와 "0"은 다르다.
+    """
+    bundle = rank(
+        items=[], interests="i", recent_headlines=[], weights={},
+        llm=FakeLLM(responses=[]),
+        window_start=WINDOW[0], window_end=WINDOW[1],
+    )
+
+    assert bundle.tokens is None

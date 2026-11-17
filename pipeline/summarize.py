@@ -134,7 +134,7 @@ def summarize(*, articles: ArticlesBundle, llm: LLM) -> Briefing:
 
     prompt = build_prompt(articles=candidates)
     # 재시도는 llm.parse 안에서 끝난다 (rank.py와 같은 이유).
-    sheet, _tokens = llm.parse(
+    sheet, tokens = llm.parse(
         prompt=prompt,
         output_format=SummarySheet,
         effort=SUMMARIZE_EFFORT,
@@ -173,6 +173,7 @@ def summarize(*, articles: ArticlesBundle, llm: LLM) -> Briefing:
         window_end=articles.window_end,
         summaries=summaries[:MAX_SUMMARIES],
         considered=len(candidates),
+        tokens=tokens,
     )
 
 

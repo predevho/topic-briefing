@@ -365,3 +365,51 @@ def test_긴_헤드라인이_와도_브리핑을_잃지_않는다():
 
     assert len(briefing.summaries) == 2
     assert all(len(s.headline) <= HEADLINE_MAX for s in briefing.summaries)
+
+
+# --- 토큰 기록 ---
+
+def test_요약이_쓴_토큰을_번들에_싣는다():
+    """크레딧 가드(계획 3)가 rank의 것과 합쳐 월 비용을 센다."""
+    llm = FakeLLM(
+        responses=[SummarySheet(summaries=[_draft(0)])],
+        input_tokens=37432,
+        output_tokens=2400,
+    )
+
+    briefing = summarize(articles=_bundle([_article(0)]), llm=llm)
+
+    assert briefing.tokens is not None
+    assert briefing.tokens.input == 37432
+    assert briefing.tokens.output == 2400
+
+
+def test_기사가_없으면_토큰이_None이다():
+    """LLM을 부르지 않은 날이다. 0으로 두면 크레딧 가드가 거짓 안심을 한다.
+
+    **"기사가 없다"와 "기준을 넘긴 글이 없다"는 다르다.** 조기 반환은
+    앞의 경우만이다 — 10건이 전부 기준 미달이어도 요약은 호출된다.
+    임계값은 LLM의 **출력**을 거르는 데 쓰이기 때문이다. 2026-11-17에
+    이 테스트가 그 구별을 가르쳐 줬다.
+    """
+    briefing = summarize(articles=_bundle([]), llm=FakeLLM(responses=[]))
+
+    assert briefing.summaries == []
+    assert briefing.tokens is None
+
+
+def test_전부_기준_미달이어도_토큰은_기록된다():
+    """호출은 일어났다. 결과가 비었다고 비용이 0인 것은 아니다."""
+    llm = FakeLLM(
+        responses=[SummarySheet(summaries=[_draft(0)])],
+        input_tokens=12000,
+        output_tokens=800,
+    )
+
+    briefing = summarize(
+        articles=_bundle([_article(0, score=SCORE_THRESHOLD - 1)]), llm=llm
+    )
+
+    assert briefing.summaries == []
+    assert briefing.tokens is not None
+    assert briefing.tokens.input == 12000

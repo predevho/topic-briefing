@@ -327,15 +327,54 @@ def test_요약이_쓴_토큰을_번들에_싣는다():
     assert briefing.tokens.output == 2400
 ```
 
-- [ ] **Step 6: 전체 테스트**
+- [ ] **Step 6: 0건 경계를 함께 본다**
+
+두 단계 모두 조기 반환이 있고, 그 경로에서는 `tokens`가 `None`이어야 한다 — **0이 아니다.** 0으로 두면 크레딧 가드가 "안 썼다"로 읽어 거짓 안심을 한다.
+
+```python
+def test_수집이_0건이면_토큰이_None이다():
+    bundle = rank(
+        items=[], interests="i", recent_headlines=[], weights={},
+        llm=FakeLLM(responses=[]),
+        window_start=WINDOW[0], window_end=WINDOW[1],
+    )
+    assert bundle.tokens is None
+```
+
+> **`summarize`의 조기 반환 조건을 오해하기 쉽다** (2026-11-17 실측).
+> `if not candidates`는 **기사 번들이 비었을 때**이지 "기준을 넘긴 글이
+> 없을 때"가 아니다. `SCORE_THRESHOLD`는 LLM의 **출력**을 거르는 데
+> 쓰이므로, 10건이 전부 기준 미달이어도 **호출은 일어나고 토큰은
+> 기록된다.** 둘을 구별하는 테스트를 같이 둔다.
+
+```python
+def test_기사가_없으면_토큰이_None이다():
+    briefing = summarize(articles=_bundle([]), llm=FakeLLM(responses=[]))
+    assert briefing.tokens is None
+
+
+def test_전부_기준_미달이어도_토큰은_기록된다():
+    """호출은 일어났다. 결과가 비었다고 비용이 0인 것은 아니다."""
+    llm = FakeLLM(
+        responses=[SummarySheet(summaries=[_draft(0)])],
+        input_tokens=12000, output_tokens=800,
+    )
+    briefing = summarize(
+        articles=_bundle([_article(0, score=SCORE_THRESHOLD - 1)]), llm=llm
+    )
+    assert briefing.summaries == []
+    assert briefing.tokens.input == 12000
+```
+
+- [ ] **Step 7: 전체 테스트**
 
 ```bash
 .venv/bin/python -m pytest -q
 ```
 
-Expected: 401 passed
+Expected: 404 passed (399 + 새 5)
 
-- [ ] **Step 7: 커밋**
+- [ ] **Step 8: 커밋**
 
 ```bash
 git add pipeline/models.py pipeline/rank.py pipeline/summarize.py tests/

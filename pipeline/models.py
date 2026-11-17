@@ -126,6 +126,9 @@ class RankedBundle(Contract):
     # 가중치 적용 후 최고 점수. 0건인 날 화면이 "최고 54점 / 기준 60점"을
     # 보여주는 데 쓴다 — 0건이면 articles가 비어서 다른 데서 알 수 없다.
     max_score: int | None = None
+    # 이 단계가 쓴 토큰. 크레딧 가드(계획 3)가 읽는다.
+    # None은 "LLM을 부르지 않았다"다 — 0과 다르다.
+    tokens: TokenUsage | None = None
 
 
 # --- 03 본문 ---
@@ -183,3 +186,6 @@ class Briefing(Contract):
     window_end: str
     summaries: list[Summary]    # 0건이 정상 상태다
     considered: int             # 요약 후보로 올린 건수 (적중률 추적용)
+    # 이 단계가 쓴 토큰. 크레딧 가드(계획 3)가 읽는다.
+    # None은 "LLM을 부르지 않았다"다 — 0과 다르다.
+    tokens: TokenUsage | None = None
