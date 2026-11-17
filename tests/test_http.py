@@ -7,6 +7,7 @@ from pipeline.lib.http import (
     fetch,
     parse_retry_after,
     post_form,
+    post_json,
 )
 from pipeline.lib.retry import Permanent, Transient
 
@@ -231,3 +232,52 @@ def test_POST_응답이_JSON이_아니면_영구다():
     """
     with pytest.raises(Permanent, match="JSON"):
         _post(lambda *a, **k: _post_response(200, text="<html>maintenance</html>"))
+
+
+# --- post_json ---
+#
+# 슬랙 웹훅용이다. 본문이 JSON이고 응답은 JSON이 아니라 텍스트("ok")다.
+# 분류 규칙은 post_form과 같다.
+
+SECRET_URL = "https://hooks.slack.test/services/T000/B000/secret"
+
+
+def _json_response(status: int, **kwargs) -> httpx.Response:
+    kwargs.setdefault("request", httpx.Request("POST", SECRET_URL))
+    return httpx.Response(status, **kwargs)
+
+
+def test_JSON_POST가_본문_텍스트를_돌려준다():
+    def fake(url, payload, timeout):
+        assert url == SECRET_URL
+        assert payload == {"text": "hi"}
+        return _json_response(200, text="ok")
+
+    assert post_json(SECRET_URL, payload={"text": "hi"}, send=fake) == "ok"
+
+
+def test_JSON_POST_실패_메시지에_URL_대신_label을_쓴다():
+    """404 no_service는 웹훅이 폐기된 것이다 — 고쳐야 하므로 영구다.
+
+    메시지에 URL이 들어가면 안 된다. 웹훅 URL은 그 자체가 비밀이다.
+    """
+    with pytest.raises(Permanent) as caught:
+        post_json(
+            SECRET_URL, payload={}, label="Slack webhook",
+            send=lambda *a, **k: _json_response(404, text="no_service"),
+        )
+
+    message = str(caught.value)
+    assert "Slack webhook" in message
+    assert "no_service" in message
+    assert "secret" not in message
+
+
+def test_JSON_POST_시간_초과도_label로_알린다():
+    def slow(*a, **k):
+        raise httpx.TimeoutException("too slow")
+
+    with pytest.raises(Transient) as caught:
+        post_json(SECRET_URL, payload={}, label="Slack webhook", send=slow)
+
+    assert "secret" not in str(caught.value)

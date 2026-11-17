@@ -1246,9 +1246,42 @@ git commit -m "test: 발송 확인 스크립트가 실제 브리핑을 싣는다
 
 **브리핑 전문을 보내지 않는다**(스펙 6.2). 읽는 자리는 페이지이고, 채널이 둘이면 포맷터를 둘 유지해야 한다.
 
+> **2026-11-17 실행 중 고친 것 — 셋.** 아래 원안 코드를 그대로 쓰지 않았다.
+>
+> **1. 경고 채널이 조용히 죽는다.** 원안 `_http_post`는 `httpx.post`의 응답을
+> 그냥 돌려주고 상태를 보지 않았다. 웹훅이 폐기되면(404 `no_service`) 아무것도
+> 도착하지 않는데 `warn()`은 성공으로 끝난다. 이 채널이 있는 이유가 "카톡이
+> 죽어도 알 수 있게"인데, 그 채널 자신이 조용히 죽는 구조였다.
+> `lib/http.py`에 `post_json`을 두고 Task 4·5의 `post_form`과 **전송·분류
+> 부분(`_classified`)을 공유**한다. 슬랙은 응답이 JSON이 아니라 텍스트
+> `ok`라서 반환형만 다르다. 200인데 본문이 `ok`가 아니면(프록시 HTML)
+> `Permanent`로 올린다.
+>
+> "경고 전송 실패가 브리핑을 막지 않게"는 **호출부(Task 12)가 감싸서** 한다.
+> 삼키는 것과 막지 않는 것은 다르다.
+>
+> **2. 웹훅 URL이 실패 메시지에 실린다.** 이 URL은 그 자체가 비밀이다 —
+> 가진 사람은 누구나 채널에 글을 쓸 수 있다. `classify_status`는 메시지에
+> URL을 넣고, 그 메시지는 `runs.errors`와 Actions 로그로 간다. 리포가
+> 퍼블릭이라 로그도 공개다. `post_json(label=...)`로 메시지에는
+> `"Slack webhook"`만 쓴다. (Actions는 등록된 Secret을 로그에서 가리지만
+> 그건 한 겹이다. `runs.errors`는 가리지 않는다.)
+>
+> **3. 이스케이프가 없다.** 슬랙은 `<`, `>`, `&`를 엔티티로 바꾸라고 한다.
+> 경고에는 **외부 사이트의 오류 본문**이 섞인다(`SourceError.message`).
+> 안 바꾸면 `<!channel>`이 채널 멘션이 되고 `<http://x|토스>`가 링크로
+> 위장한다. `&`를 **먼저** 바꾼다 — 나중에 바꾸면 `&lt;`가 `&amp;lt;`가 된다.
+>
+> 테스트 7개(원안 4개) + `post_json` 3개. `isinstance(SlackSender(...), Sender)`가
+> 거짓인 것도 확인한다 — `notify`가 실제로 쓰는 검사가 그것이다.
+>
+> `.env.example`에 `SLACK_WEBHOOK_URL`과, 빠져 있던 `KAKAO_REST_API_KEY`·
+> `KAKAO_CLIENT_SECRET`을 더했다. Task 14의 Secrets 체크리스트가 이 파일이다.
+
 **Files:**
 - Create: `pipeline/lib/slack.py`
-- Test: `tests/test_slack.py`
+- Modify: `pipeline/lib/http.py` (`post_json`, `_classified`)
+- Test: `tests/test_slack.py`, `tests/test_http.py`
 
 - [ ] **Step 1: 실패하는 테스트를 쓴다**
 
@@ -1364,7 +1397,7 @@ class SlackSender:
 .venv/bin/python -m pytest tests/test_slack.py -v
 ```
 
-Expected: 4 passed
+Expected: 7 passed. 전체 442개.
 
 - [ ] **Step 5: 실제로 한 번 보낸다**
 
