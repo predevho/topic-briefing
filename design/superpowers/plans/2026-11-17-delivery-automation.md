@@ -1683,6 +1683,26 @@ git commit -m "feat: 소스 침묵 가드 — 경과일 기준, 등급별 임계
 
 시드(2026-11-12, 1,923건) 측정에서 나온 배정이다. 괄호는 **관측된 최대공백**.
 
+> **2026-11-17 실행: 하이퍼커넥트를 monthly → none으로 옮겼다(사용자 결정).**
+>
+> 시드로 다시 계산하면서 **현재 공백**(마지막 글 → 시드 날짜)도 넣어 봤다.
+> 글 사이 최대공백은 89일(monthly)인데 현재 공백이 204일이라 none 구간이다.
+> Task 8에서 실제 피드로 확인했다 — 2026-04-22 이후 멈췄고 11/17 기준
+> 209일이다. monthly로 두면 연결하는 날부터 **매일 같은 경고**가 뜨고,
+> 매일 뜨는 경고는 안 읽게 된다(스펙 8.4). 수집은 계속한다.
+>
+> 재계산에서 GeekNews·바이라인네트워크가 "날짜 1~2개"라 none으로 나왔지만
+> **틀린 판정이었다.** 피드가 최근 20건만 보여 준다 — GeekNews는 하루에
+> 20건, 바이라인은 이틀에 20건이다. 표본을 "날짜 수"로 세면 고빈도 소스가
+> 저빈도로 보인다. 원안의 fast가 맞다. Lil_Log(2건)·스포카(1건)는 정말 드물다.
+>
+> 결과: **fast 25 / weekly 10 / monthly 4 / none 6**. 실제 runs + 시드로
+> 판정하면 11/17 경고 없음. 기준에 가장 가까운 것은 Kubernetes_Blog
+> (19일 / 30일), Slack_Engineering(125일 / 200일).
+>
+> 예전 주석의 `quiet_days 후보값` 5곳(옛 이름)을 실제 등급과 이유로 바꿨다.
+> 실제 배정을 고정하는 테스트(`test_실제_소스_목록의_등급_배정`)도 더했다.
+
 **Files:**
 - Modify: `config/sources.yaml`
 - Test: `tests/test_config.py`
@@ -1693,9 +1713,9 @@ git commit -m "feat: 소스 침묵 가드 — 경과일 기준, 등급별 임계
 
 **`weekly` (10개)** — 당근_기술블로그(41), Dropbox_Tech(37), Shopify_Engineering(36), Sebastian_Raschka(32), Airbnb_Engineering(28), Grab_Engineering(28), Google_Research_Blog(24), Google_DeepMind_Blog(20), 네이버_D2(20), 카카오_기술블로그(19)
 
-**`monthly` (5개)** — 쏘카_기술블로그(119), Slack_Engineering(108), 인프런_기술블로그(92), 하이퍼커넥트_기술블로그(89), Discord_Engineering(52)
+**`monthly` (4개)** — 쏘카_기술블로그(119), Slack_Engineering(108), 인프런_기술블로그(92), Discord_Engineering(52)
 
-**`none` (5개)** — Canva_Engineering(275), 뱅크샐러드_기술블로그(265), 데브시스터즈_기술블로그(201), Lil_Log(표본 2건), 스포카_기술블로그(표본 1건)
+**`none` (6개)** — Canva_Engineering(275), 뱅크샐러드_기술블로그(265), 데브시스터즈_기술블로그(201), **하이퍼커넥트_기술블로그(최대 89 · 현재 공백 209)**, Lil_Log(표본 2건), 스포카_기술블로그(표본 1건)
 
 각 항목에 이유를 주석으로 남긴다.
 
@@ -1730,14 +1750,14 @@ from pipeline.lib.config import load_sources
 tiers = Counter(s.quiet_tier for s in load_sources())
 print(dict(tiers))
 assert tiers['weekly'] == 10, tiers
-assert tiers['monthly'] == 5, tiers
-assert tiers['none'] == 5, tiers
+assert tiers['monthly'] == 4, tiers
+assert tiers['none'] == 6, tiers
 assert tiers['fast'] == 25, tiers
-print('배정 확인: fast 25 / weekly 10 / monthly 5 / none 5 = 45')
+print('배정 확인: fast 25 / weekly 10 / monthly 4 / none 6 = 45')
 "
 ```
 
-Expected: `배정 확인: fast 25 / weekly 10 / monthly 5 / none 5 = 45`
+Expected: `배정 확인: fast 25 / weekly 10 / monthly 4 / none 6 = 45`
 
 - [ ] **Step 3: 모르는 등급을 거부하는 테스트**
 
@@ -1765,7 +1785,7 @@ def test_등급을_안_적으면_fast다():
 .venv/bin/python -m pytest -q
 ```
 
-Expected: 421 passed
+Expected: 459 passed (원안 421은 Task 1~8의 추가 테스트 전 숫자다)
 
 - [ ] **Step 5: 커밋**
 

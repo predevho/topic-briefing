@@ -70,11 +70,13 @@ sources:
     lang: ko
     enabled: true
 
+  # 침묵 등급 weekly(기준 90일) — 시드 최대공백 19일.
   - name: 카카오_기술블로그
     url: https://tech.kakao.com/feed
     kind: rss
     weight: 1.3
     lang: ko
+    quiet_tier: weekly
     enabled: true
 
   # 피드가 비어 있다 — 200에 유효한 RSS지만 <item>이 0개다(블로그엔 글이 있다).
@@ -93,11 +95,13 @@ sources:
     lang: ko
     enabled: true
 
+  # 침묵 등급 weekly(기준 90일) — 시드 최대공백 21일.
   - name: 네이버_D2
     url: https://d2.naver.com/d2.atom
     kind: rss
     weight: 1.3
     lang: ko
+    quiet_tier: weekly
     enabled: true
 
   - name: LY_기술블로그
@@ -107,11 +111,13 @@ sources:
     lang: ko
     enabled: true
 
+  # 침묵 등급 weekly(기준 90일) — 시드 최대공백 41일.
   - name: 당근_기술블로그
     url: https://medium.com/feed/daangn
     kind: rss
     weight: 1.3
     lang: ko
+    quiet_tier: weekly
     enabled: true
 
   # 끔 — 최신 글이 2024-10-14 (13개월 전).
@@ -123,28 +129,36 @@ sources:
     lang: ko
     enabled: false
 
+  # 침묵 등급 none — 시드 최대공백 265일. 이 간격이 정상이라 침묵이
+  # 정보를 담지 않는다. 가드에서 빼고 분기에 한 번 check_feeds.py로 본다.
   - name: 뱅크샐러드_기술블로그
     url: https://corp.banksalad.com/blog/rss.xml
     kind: rss
     weight: 1.2
     lang: ko
+    quiet_tier: none
     enabled: true
 
-  # 느리지만 살아 있다 — 마지막 발행 203일 전(2026-04-22). 분기에 한 편 정도.
-  # quiet_days 후보값: 다음 글까지 수백 일이 정상이므로 침묵 경고에서
-  # 제외하거나 임계값을 따로 둔다(spec 8.4).
+  # 침묵 등급 none — 글 사이 최대공백은 89일인데 2026-04-22 이후 멈췄다
+  # (2026-11-17 기준 209일, 실제 피드로 확인). 계획 원안은 monthly였지만 그러면
+  # 매일 같은 경고가 뜨고, 매일 뜨는 경고는 안 읽게 된다(spec 8.4). 감시에서 뺀다.
+  # 수집은 계속한다 — 되살아나면 글은 그대로 들어온다.
   - name: 하이퍼커넥트_기술블로그
     url: https://hyperconnect.github.io/feed.xml
     kind: rss
     weight: 1.2
     lang: ko
+    quiet_tier: none
     enabled: true
 
+  # 침묵 등급 none — 시드 최대공백 201일. 이 간격이 정상이라 침묵이
+  # 정보를 담지 않는다. 가드에서 빼고 분기에 한 번 check_feeds.py로 본다.
   - name: 데브시스터즈_기술블로그
     url: https://tech.devsisters.com/rss.xml
     kind: rss
     weight: 1.2
     lang: ko
+    quiet_tier: none
     enabled: true
 
   # 403. 피드가 자동 접근을 거부한다. UA를 바꿔 우회하지 않고 끈다.
@@ -156,20 +170,22 @@ sources:
     enabled: false
 
   # 느리지만 살아 있다 — 마지막 발행 108일 전(2026-07-26).
-  # quiet_days 후보값: 다음 글까지 수백 일이 정상이므로 침묵 경고에서
-  # 제외하거나 임계값을 따로 둔다(spec 8.4).
+  # 침묵 등급 monthly(기준 200일) — 시드 최대공백 119일. 몰아서 쓴다.
   - name: 쏘카_기술블로그
     url: https://tech.socar.kr/rss.xml
     kind: rss
     weight: 1.2
     lang: ko
+    quiet_tier: monthly
     enabled: true
 
+  # 침묵 등급 monthly(기준 200일) — 시드 최대공백 92일. 몰아서 쓴다.
   - name: 인프런_기술블로그
     url: https://tech.inflab.com/rss.xml
     kind: rss
     weight: 1.2
     lang: ko
+    quiet_tier: monthly
     enabled: true
 
   # 403. 위와 같은 이유로 끈다.
@@ -181,13 +197,14 @@ sources:
     enabled: false
 
   # 느리지만 살아 있다 — 마지막 발행 244일 전(2026-03-12). 분기~반년에 한 편.
-  # quiet_days 후보값: 다음 글까지 수백 일이 정상이므로 침묵 경고에서
-  # 제외하거나 임계값을 따로 둔다(spec 8.4).
+  # 침묵 등급 none — 400일에 1편. 침묵이 정보를 담지 않는다.
+  # 가드에서 빼고 분기에 한 번 check_feeds.py로 본다.
   - name: 스포카_기술블로그
     url: https://spoqa.github.io/rss
     kind: rss
     weight: 1.1
     lang: ko
+    quiet_tier: none
     enabled: true
 
   # =========================================================
@@ -236,42 +253,51 @@ sources:
     lang: en
     enabled: true
 
+  # 침묵 등급 weekly(기준 90일) — 시드 최대공백 37일.
   - name: Dropbox_Tech
     url: https://dropbox.tech/feed
     kind: rss
     weight: 1.2
     lang: en
+    quiet_tier: weekly
     enabled: true
 
   # 느리지만 살아 있다 — 마지막 발행 119일 전(2026-07-14).
-  # quiet_days 후보값: 다음 글까지 수백 일이 정상이므로 침묵 경고에서
-  # 제외하거나 임계값을 따로 둔다(spec 8.4).
+  # 침묵 등급 monthly(기준 200일) — 시드 최대공백 108일. 몰아서 쓴다.
   - name: Slack_Engineering
     url: https://slack.engineering/feed/
     kind: rss
     weight: 1.2
     lang: en
+    quiet_tier: monthly
     enabled: true
 
+  # 침묵 등급 weekly(기준 90일) — 시드 최대공백 36일.
   - name: Shopify_Engineering
     url: https://shopify.engineering/blog.atom
     kind: rss
     weight: 1.2
     lang: en
+    quiet_tier: weekly
     enabled: true
 
+  # 침묵 등급 none — 시드 최대공백 275일. 이 간격이 정상이라 침묵이
+  # 정보를 담지 않는다. 가드에서 빼고 분기에 한 번 check_feeds.py로 본다.
   - name: Canva_Engineering
     url: https://www.canva.dev/blog/engineering/feed.xml
     kind: rss
     weight: 1.1
     lang: en
+    quiet_tier: none
     enabled: true
 
+  # 침묵 등급 weekly(기준 90일) — 시드 최대공백 28일.
   - name: Airbnb_Engineering
     url: https://medium.com/feed/airbnb-engineering
     kind: rss
     weight: 1.2
     lang: en
+    quiet_tier: weekly
     enabled: true
 
   - name: Pinterest_Engineering
@@ -281,18 +307,22 @@ sources:
     lang: en
     enabled: true
 
+  # 침묵 등급 weekly(기준 90일) — 시드 최대공백 28일.
   - name: Grab_Engineering
     url: https://engineering.grab.com/feed.xml
     kind: rss
     weight: 1.1
     lang: en
+    quiet_tier: weekly
     enabled: true
 
+  # 침묵 등급 monthly(기준 200일) — 시드 최대공백 52일. 몰아서 쓴다.
   - name: Discord_Engineering
     url: https://discord.com/blog/rss.xml
     kind: rss
     weight: 1.1
     lang: en
+    quiet_tier: monthly
     enabled: true
 
   # =========================================================
@@ -315,18 +345,22 @@ sources:
     lang: en
     enabled: true
 
+  # 침묵 등급 weekly(기준 90일) — 시드 최대공백 25일.
   - name: Google_Research_Blog
     url: https://research.google/blog/rss/
     kind: rss
     weight: 1.1
     lang: en
+    quiet_tier: weekly
     enabled: true
 
+  # 침묵 등급 weekly(기준 90일) — 시드 최대공백 21일.
   - name: Google_DeepMind_Blog
     url: https://deepmind.google/blog/rss.xml
     kind: rss
     weight: 1.1
     lang: en
+    quiet_tier: weekly
     enabled: true
 
   - name: Hugging_Face_Blog
@@ -353,21 +387,24 @@ sources:
     lang: en
     enabled: true
 
+  # 침묵 등급 weekly(기준 90일) — 시드 최대공백 32일.
   - name: Sebastian_Raschka
     url: https://magazine.sebastianraschka.com/feed
     kind: rss
     weight: 1.2
     lang: en
+    quiet_tier: weekly
     enabled: true
 
   # 느리지만 살아 있다 — 마지막 발행 130일 전(2026-07-04). 400일에 2편 — 원래 이 속도다.
-  # quiet_days 후보값: 다음 글까지 수백 일이 정상이므로 침묵 경고에서
-  # 제외하거나 임계값을 따로 둔다(spec 8.4).
+  # 침묵 등급 none — 400일에 2편. 침묵이 정보를 담지 않는다.
+  # 가드에서 빼고 분기에 한 번 check_feeds.py로 본다.
   - name: Lil_Log
     url: https://lilianweng.github.io/index.xml
     kind: rss
     weight: 1.2
     lang: en
+    quiet_tier: none
     enabled: true
 
   # 끔 — 최신 글이 2025-01-16 — 22개월 무발행.

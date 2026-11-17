@@ -135,3 +135,39 @@ def test_관심사_프로필이_비어_있으면_거부한다(tmp_path):
 
     with pytest.raises(ValueError, match="비어"):
         load_interests(path)
+
+
+# --- 침묵 등급 ---
+
+def test_모르는_침묵_등급을_거부한다():
+    """오타가 조용히 기본값으로 떨어지면 그 소스는 엉뚱한 기준으로 감시된다."""
+    with pytest.raises(ValidationError):
+        Source(
+            name="s", url="https://e.com/r", kind="rss",
+            weight=1.0, lang="ko", quiet_tier="weekley",   # 오타
+        )
+
+
+def test_등급을_안_적으면_fast다():
+    source = Source(name="s", url="https://e.com/r", kind="rss", weight=1.0, lang="ko")
+
+    assert source.quiet_tier == "fast"
+
+
+def test_실제_소스_목록의_등급_배정():
+    """config/sources.yaml의 배정을 고정한다(계획 3 Task 9, 시드 실측).
+
+    계획 원안은 monthly 5 / none 5였다. 하이퍼커넥트를 none으로 옮겼다 —
+    2026-04-22 이후 멈춰 2026-11-17 기준 209일이고, monthly(200일)로 두면
+    매일 같은 경고가 뜬다.
+    """
+    from collections import Counter
+
+    sources = load_sources()
+    tiers = Counter(s.quiet_tier for s in sources)
+
+    assert tiers == {"fast": 25, "weekly": 10, "monthly": 4, "none": 6}
+    by_name = {s.name: s.quiet_tier for s in sources}
+    assert by_name["하이퍼커넥트_기술블로그"] == "none"
+    # 피드가 최근 20건만 보여 날짜가 적어 보이지만 하루 20건씩 쓰는 곳이다.
+    assert by_name["GeekNews"] == "fast"
