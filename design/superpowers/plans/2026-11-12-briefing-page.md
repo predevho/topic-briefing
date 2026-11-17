@@ -624,6 +624,23 @@ npm ls --depth=0
 
 출력된 버전을 이 계획 문서의 이 자리에 적어 둔다. **락파일을 커밋하므로** 나중에 "무엇이 깨졌나"를 추적할 수 있다.
 
+**2026-11-17 실측** (node v26.0.0 / npm 11.12.1):
+
+| 패키지 | 버전 |
+|---|---|
+| react / react-dom | 19.3.1 |
+| vite | 8.3.8 |
+| typescript | 7.0.2 |
+| @vitejs/plugin-react | 6.3.0 |
+| tailwindcss / @tailwindcss/vite | 4.3.5 |
+| @supabase/supabase-js | 2.119.0 |
+| oxlint | 1.94.0 |
+
+> **계획서를 쓸 때 가정한 것보다 스택이 새롭다.** 두 가지를 알아 둔다.
+>
+> - 스캐폴드가 **eslint 대신 oxlint**를 넣는다. `npm run lint`가 oxlint를 부른다. 설정 파일이 없어도 기본 규칙으로 돈다.
+> - `npm run build`가 `tsc -b && vite build`다 — **타입 검사를 통과하지 못하면 번들이 나오지 않는다.** TypeScript 7.0이라 이전 메이저보다 추론이 엄격한 자리가 있다. Task 5 이후 `any`를 쓰지 않고 `as`로 좁히는 코드가 그래서다.
+
 - [ ] **Step 4: `web/vite.config.ts`**
 
 ```typescript
