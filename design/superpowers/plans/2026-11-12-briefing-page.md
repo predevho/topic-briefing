@@ -1675,7 +1675,10 @@ export default function App() {
   return <Today day={state.day} />
 }
 
-function Shell({ children }: { children: React.ReactNode }) {
+// React.ReactNode로 쓰면 안 된다 — react-jsx 변환에서는 React가 스코프에
+// 없고, verbatimModuleSyntax라 타입은 import type으로 가져와야 한다.
+// 파일 맨 위에 `import type { ReactNode } from 'react'`를 더한다.
+function Shell({ children }: { children: ReactNode }) {
   return (
     <main className="mx-auto max-w-[1340px] px-[22px] pt-7">
       <p className="m-0 font-meta text-[13px] text-muted">{children}</p>
@@ -1707,8 +1710,19 @@ Expected: 차이 없음
 cd web && npm run dev
 ```
 
-브라우저에서 `http://localhost:5173/2026-11-12`를 연다. dev 서버는 `base`가
-`/`이므로 경로가 바로 먹는다.
+**`base`는 dev 서버에도 적용된다.** 초판이 "dev 서버는 base가 `/`"라고
+적었는데 틀렸다 — `vite.config.ts`의 `base: '/topic-briefing/'`이 개발
+중에도 그대로 먹으므로 경로에 그것이 붙는다.
+
+| 열어 볼 주소 | 기대 |
+|---|---|
+| `http://localhost:5173/topic-briefing/` | 최신 브리핑 |
+| `http://localhost:5173/topic-briefing/2026-11-12` | 그 날짜 |
+| `http://localhost:5173/topic-briefing/archive` | 아카이브 |
+| `http://localhost:5173/topic-briefing/1999-01-01` | 없다는 안내 |
+
+2026-11-17 실측: 네 경로 모두 동작했다. 요구사항 O10도 함께 봤다 —
+1024px에서 2열, 375px에서 1열, 가로 넘침 없음.
 
 Expected: 그 날짜의 브리핑이 뜬다. 없는 날짜(`/1999-01-01`)는 "그 날짜의
 브리핑이 없습니다."

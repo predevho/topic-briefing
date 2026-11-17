@@ -1,106 +1,79 @@
 import { useEffect, useState } from 'react'
-import { signOut, useSession } from './lib/auth'
-import { fetchLatest } from './lib/data'
-import { recordClick } from './lib/likes'
-import type { Day } from './lib/types'
-import Card from './components/Card'
-import SignIn from './components/SignIn'
+import type { ReactNode } from 'react'
+import { NotFound, fetchArchive, fetchDay, fetchLatest } from './lib/data'
+import type { Archive as ArchiveData, Day } from './lib/types'
+import ArchiveView from './components/Archive'
+import Today from './components/Today'
 
-/**
- * 플레이스홀더다. Task 9(라우팅)가 `/`, `/:date`, `/archive`를 읽어
- * Today·Archive를 띄우는 실제 App으로 교체하고, Task 7이 0건 분기와
- * 2열 레이아웃을 가진 제대로 된 오늘 화면을 만든다.
- *
- * 지금은 Task 11·12·6(좋아요·메모·카드)을 실제 데이터로 확인하는
- * 역할만 한다.
- */
+const DATE = /^\d{4}-\d{2}-\d{2}$/
+
+/** base('/topic-briefing/')를 떼고 남은 첫 조각. */
+function route(): string {
+  const base = import.meta.env.BASE_URL
+  const path = window.location.pathname
+  const rest = path.startsWith(base)
+    ? path.slice(base.length)
+    : path.replace(/^\//, '')
+  return rest.replace(/\/$/, '')
+}
+
+type State =
+  | { kind: 'loading' }
+  | { kind: 'day'; day: Day }
+  | { kind: 'archive'; archive: ArchiveData }
+  | { kind: 'error'; message: string }
+
 export default function App() {
-  const { session, loading } = useSession()
-  const [asking, setAsking] = useState(false)
-  const [day, setDay] = useState<Day | null>(null)
-  const [error, setError] = useState<string | null>(null)
+  const [state, setState] = useState<State>({ kind: 'loading' })
 
   useEffect(() => {
-    let alive = true
-    fetchLatest()
-      .then((found) => {
-        if (alive) setDay(found)
-      })
-      .catch((problem: unknown) => {
-        if (alive) {
-          setError(problem instanceof Error ? problem.message : String(problem))
-        }
-      })
-    return () => {
-      alive = false
+    const slug = route()
+
+    const load = async (): Promise<State> => {
+      if (slug === 'archive') {
+        return { kind: 'archive', archive: await fetchArchive() }
+      }
+      if (DATE.test(slug)) {
+        return { kind: 'day', day: await fetchDay(slug) }
+      }
+      return { kind: 'day', day: await fetchLatest() }
     }
+
+    load().then(setState, (error: unknown) => {
+      const message =
+        error instanceof NotFound
+          ? '그 날짜의 브리핑이 없습니다.'
+          : '브리핑을 불러오지 못했습니다.'
+      setState({ kind: 'error', message })
+    })
   }, [])
 
+  if (state.kind === 'loading') {
+    return <Shell>불러오는 중…</Shell>
+  }
+  if (state.kind === 'error') {
+    return (
+      <Shell>
+        {state.message}
+        <br />
+        <a href={import.meta.env.BASE_URL} className="text-accent underline">
+          오늘로 가기
+        </a>
+      </Shell>
+    )
+  }
+  if (state.kind === 'archive') {
+    return <ArchiveView archive={state.archive} />
+  }
+  return <Today day={state.day} />
+}
+
+// React.ReactNode로 쓰면 안 된다 — react-jsx 변환에서는 React가 스코프에
+// 없고, verbatimModuleSyntax라 타입은 import type으로 가져와야 한다.
+function Shell({ children }: { children: ReactNode }) {
   return (
-    <main className="mx-auto max-w-[680px] px-[22px] py-10">
-      <header className="border-b border-rule pb-4">
-        <h1 className="font-serif text-[22px] font-semibold leading-[1.4]">
-          브리핑
-        </h1>
-
-        <p className="mt-1.5 font-meta text-[12.5px] text-muted">
-          {loading
-            ? '세션 확인 중…'
-            : session
-              ? '로그인됨 — 좋아요와 메모를 쓸 수 있습니다'
-              : '로그인하지 않음 — 읽기는 이 상태로도 됩니다'}
-        </p>
-
-        {!loading && !session && !asking && (
-          <button
-            type="button"
-            onClick={() => setAsking(true)}
-            className="mt-1.5 font-meta text-[12.5px] font-medium text-accent"
-          >
-            로그인
-          </button>
-        )}
-
-        {!loading && session && (
-          <button
-            type="button"
-            onClick={() => void signOut()}
-            className="mt-1.5 font-meta text-[12.5px] text-muted underline"
-          >
-            로그아웃
-          </button>
-        )}
-
-        {asking && (
-          <SignIn
-            onDone={() => setAsking(false)}
-            onCancel={() => setAsking(false)}
-          />
-        )}
-      </header>
-
-      {error && (
-        <p className="mt-6 font-meta text-[13px] text-warn">{error}</p>
-      )}
-
-      {day && (
-        <>
-          <p className="mt-6 font-meta text-[12px] text-muted-2">
-            {day.date} · 후보 {day.considered ?? '?'}건 중 {day.articles.length}건
-          </p>
-
-          <div className="mt-4 flex flex-col">
-            {day.articles.map((article) => (
-              <div
-                key={article.id}
-                className="border-t border-rule py-[26px] first:border-t-0 first:pt-0"
-              >
-                <Card article={article} onOpen={(a) => recordClick(a.id)} />
-              </div>
-            ))}
-          </div>
-        </>
-      )}
+    <main className="mx-auto max-w-[1340px] px-[22px] pt-7">
+      <p className="m-0 font-meta text-[13px] text-muted">{children}</p>
     </main>
   )
 }

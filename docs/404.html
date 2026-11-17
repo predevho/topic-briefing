@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+    <!--
+      요구사항 D4의 절반. robots.txt는 크롤링을, 이 메타는 이미 수집된
+      페이지의 색인을 막는다. 둘 다 둔다 — 스펙 7.2가 "아무도 모르는 URL"을
+      전제로 하므로 검색에 뜨면 그 전제가 깨진다.
+    -->
+    <meta name="robots" content="noindex, nofollow, noarchive" />
+
+    <title>IT 브리핑</title>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <!--
+      본문은 Noto Serif KR(400, 600), 메타·UI는 Inter(400, 500).
+      목업에서 확정한 조합이다.
+    -->
+    <link
+      href="https://fonts.googleapis.com/css2?family=Noto+Serif+KR:wght@400;600&family=Inter:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <script type="module" crossorigin src="/topic-briefing/assets/index-jhF-jKkn.js"></script>
+    <link rel="stylesheet" crossorigin href="/topic-briefing/assets/index-DVa31Fst.css">
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>
