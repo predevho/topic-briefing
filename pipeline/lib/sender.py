@@ -207,20 +207,33 @@ class KakaoSender:
         # cron이 22:20 UTC(=07:20 KST 다음날)라서 예외가 아니라 매 실행이
         # 그렇다. ConsoleSender와 같은 규칙으로 KST로 바꿔 읽는다.
         when = datetime.fromisoformat(briefing.window_end).astimezone(KST)
+        briefing_date = when.date().isoformat()
 
         text = build_kakao_text(
-            briefing_date=when.date().isoformat(),
+            briefing_date=briefing_date,
             headlines=[s.headline for s in briefing.summaries[:KAKAO_TOP_N]],
             total=len(briefing.summaries),
         )
 
+        # **메시지에 링크가 둘이고, 우리가 정할 수 있는 것은 하나다.**
+        #
+        #   [전체 보기] 버튼   → 여기서 정한다 → **그 날짜** 고정 주소
+        #   하단 "IT 브리핑 >" → 카카오 콘솔의 등록 웹 도메인 → 호스트 루트
+        #
+        # 콘솔은 경로를 무시한다(2026-11-17 실측). 그래서 하단 행은 항상
+        # 루트로 가고, 루트는 최신 브리핑을 보여 준다. 둘을 억지로 같게 둘
+        # 이유가 없다 — 버튼은 **그날 것**, 하단은 **오늘 것**이다.
+        #
+        # 날짜를 박는 쪽이 더 쓸모 있다. 사흘 뒤에 다시 눌러도 그날 브리핑이
+        # 열린다. 루트로 두면 그때의 최신이 열려 메시지와 내용이 어긋난다.
+        day_url = f"{self._page.rstrip('/')}/{briefing_date}"
+
         template = {
             "object_type": "text",
             "text": text,
-            # 두 주소를 같게 둔다. 그리고 이 호스트가 카카오 콘솔의
-            # [제품 링크 관리] → [웹 도메인]에 등록돼 있어야 한다 —
-            # 없으면 발송은 성공하고 버튼만 죽는다(스펙 6.1).
-            "link": {"web_url": self._page, "mobile_web_url": self._page},
+            # 호스트가 카카오 콘솔의 [제품 링크 관리] → [웹 도메인]에 등록돼
+            # 있어야 한다 — 없으면 발송은 성공하고 링크만 죽는다(스펙 6.1).
+            "link": {"web_url": day_url, "mobile_web_url": day_url},
             "button_title": "전체 보기",
         }
 

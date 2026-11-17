@@ -337,5 +337,47 @@ def test_발송_본문이_form으로_나간다():
     assert "template_object" in sent["data"]
     template = json.loads(sent["data"]["template_object"])
     assert template["object_type"] == "text"
-    assert template["link"]["web_url"] == "https://x.test/"
+    assert template["link"]["web_url"] == "https://x.test/2026-11-11"
     assert sent["headers"]["Authorization"] == "Bearer AT"
+
+
+def test_버튼은_그날짜_고정주소를_가리킨다():
+    """메시지에 링크가 둘인데 우리가 정할 수 있는 것은 버튼뿐이다.
+
+    하단 "IT 브리핑 >" 행은 카카오 콘솔의 등록 웹 도메인이 정하고 콘솔은
+    경로를 무시한다(2026-11-17 실측) — 항상 호스트 루트, 즉 최신 브리핑이다.
+    그러니 버튼까지 루트로 두면 링크 둘이 같은 곳으로 간다.
+
+    버튼에 날짜를 박으면 사흘 뒤에 눌러도 그날 브리핑이 열린다.
+    루트면 그때의 최신이 열려 메시지 내용과 어긋난다.
+    """
+    sent = {}
+
+    def fake_post(url, data, headers, timeout):
+        sent.update(data=data)
+        return {"result_code": 0}
+
+    KakaoSender(
+        access_token="AT", page_url="https://x.test", post=fake_post
+    ).send(briefing=_briefing([_summary()]), raw=_raw())
+
+    link = json.loads(sent["data"]["template_object"])["link"]
+    # window_end가 2026-11-10T22:20Z이므로 KST로 11일이다.
+    assert link["web_url"] == "https://x.test/2026-11-11"
+    assert link["mobile_web_url"] == link["web_url"]
+
+
+def test_PAGE_URL_끝의_슬래시가_겹치지_않는다():
+    """.env에 슬래시를 붙여 적는 사람이 있다. //가 되면 라우트가 어긋난다."""
+    sent = {}
+
+    def fake_post(url, data, headers, timeout):
+        sent.update(data=data)
+        return {"result_code": 0}
+
+    KakaoSender(
+        access_token="AT", page_url="https://x.test/", post=fake_post
+    ).send(briefing=_briefing([_summary()]), raw=_raw())
+
+    link = json.loads(sent["data"]["template_object"])["link"]
+    assert link["web_url"] == "https://x.test/2026-11-11"
