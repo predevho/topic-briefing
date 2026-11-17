@@ -58,6 +58,7 @@ def notify(
     def record(status: str, sent_at: datetime | None, extra: list[dict]) -> None:
         """실행 이력을 남긴다. 성공·실패 양쪽에서 같은 값을 쓴다."""
         remote.record_run(
+            briefing_date=briefing_date,
             window_start=window_start,
             window_end=window_end,
             status=status,

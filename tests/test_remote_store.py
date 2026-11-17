@@ -27,6 +27,7 @@ def test_기록한_실행의_시각을_돌려준다():
     sent = datetime(2026, 11, 10, 22, 20, tzinfo=timezone.utc)
 
     fake.record_run(
+        briefing_date="2026-11-11",
         window_start=datetime(2026, 11, 9, 22, 20, tzinfo=timezone.utc),
         window_end=sent,
         status="sent",
@@ -48,6 +49,7 @@ def test_실패한_실행은_마지막_발송으로_세지_않는다():
     fake = FakeRemoteStore()
 
     fake.record_run(
+        briefing_date="2026-11-11",
         window_start=datetime(2026, 11, 9, 22, 20, tzinfo=timezone.utc),
         window_end=datetime(2026, 11, 10, 22, 20, tzinfo=timezone.utc),
         status="failed",
@@ -74,3 +76,31 @@ def test_이미_발행한_URL을_알려준다():
 def test_최근_헤드라인을_돌려준다():
     fake = FakeRemoteStore(headlines=["어제 그 글", "그제 그 글"])
     assert fake.recent_headlines(days=14) == ["어제 그 글", "그제 그 글"]
+
+
+def test_실행_이력에_브리핑_날짜를_남긴다():
+    """0건인 날은 articles 행이 없으므로 runs가 그 날짜의 유일한 기록이다.
+
+    날짜 컬럼이 없으면 페이지가 "조용한 날"과 "파이프라인이 안 돈 날"을
+    구별할 수 없다. window_end를 KST로 변환해서 추측할 수는 있지만,
+    브라우저 질의에 타임존 변환을 넣으면 인덱스를 못 타고 경계에서
+    조용히 틀린다 (요구사항 D8).
+    """
+    fake = FakeRemoteStore()
+
+    fake.record_run(
+        briefing_date="2026-11-13",
+        window_start=datetime(2026, 11, 12, 22, 20, tzinfo=timezone.utc),
+        window_end=datetime(2026, 11, 13, 22, 20, tzinfo=timezone.utc),
+        status="sent",
+        sent_at=datetime(2026, 11, 13, 22, 20, tzinfo=timezone.utc),
+        collected_count=240,
+        considered_count=10,
+        max_score=52,          # 기준 60점에 못 미친 날
+        published_count=0,
+        source_counts={"토스_기술블로그": 3},
+        input_tokens=42135,
+        errors=[],
+    )
+
+    assert fake.runs[0]["briefing_date"] == "2026-11-13"

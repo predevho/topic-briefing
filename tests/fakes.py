@@ -36,6 +36,7 @@ class FakeRemoteStore:
     def record_run(
         self,
         *,
+        briefing_date: str,
         window_start: datetime,
         window_end: datetime,
         status: str,
@@ -52,6 +53,7 @@ class FakeRemoteStore:
         if status == "sent":
             self._last_sent = sent_at
         self.runs.append({
+            "briefing_date": briefing_date,
             "window_start": window_start,
             "window_end": window_end,
             "status": status,

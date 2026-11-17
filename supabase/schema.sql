@@ -1,11 +1,12 @@
 -- IT 브리핑 Phase 1 스키마
 --
 -- 공개/비공개 경계가 이 파일의 핵심이다:
---   articles        — 요약·링크. anon 읽기 허용 (공개 페이지가 읽는다)
---   article_bodies  — 기사 본문. anon 접근 전면 차단 (재배포가 되면 안 된다)
---   runs            — 실행 이력. anon 접근 차단
---   reactions/clicks — anon 삽입만 허용 (계획 2)
---   notes           — anon 읽기·삽입 허용 (내 메모, 내 페이지) (계획 2)
+--   articles        — 요약·링크. **컬럼 단위** 읽기 허용 (reason 제외)
+--   article_bodies  — 기사 본문. 접근 전면 차단 (재배포가 되면 안 된다)
+--   runs            — 실행 이력. **컬럼 단위** 읽기 (errors·input_tokens 제외)
+--   reactions       — authenticated만. 자기 행만 읽기·삽입·삭제
+--   clicks          — anon 삽입(user_id null) + authenticated 자기 행 삽입
+--   notes           — authenticated만. 자기 행만 읽기·삽입 (추가 전용)
 --   kakao_auth      — 토큰. anon 접근 차단 (계획 3)
 --
 -- 모든 식별자는 소문자. 시각은 timestamptz. 길이 제한 없는 text.
@@ -56,6 +57,11 @@ create table if not exists public.article_bodies (
 -- 실행 이력. 윈도우 계산·멱등성 판정·소스 침묵 감지가 모두 이걸 읽는다.
 create table if not exists public.runs (
   id               bigint generated always as identity primary key,
+  -- 0건인 날은 articles 행이 하나도 없다. 이 컬럼이 그 날짜의 유일한
+  -- 기록이고, 페이지가 "조용한 날"과 "안 돈 날"을 구별하는 근거다.
+  -- window_end를 KST로 변환해 추측할 수도 있지만, 브라우저 질의에
+  -- 타임존 변환을 넣으면 인덱스를 못 타고 경계에서 조용히 틀린다.
+  briefing_date    date        not null,
   window_start     timestamptz not null,
   window_end       timestamptz not null,
   -- 전송 성공 시각. status='failed'인 행에서는 NULL이다.
@@ -147,6 +153,7 @@ create index if not exists notes_article_id_idx     on public.notes (article_id)
 
 -- user_id도 외래 키다. Phase 2가 "내 것만" 거르는 질의를 쓰므로 인덱스를
 -- 둔다. 지금은 전부 NULL이어서 인덱스가 거의 비어 있다 — 비용이 없다.
+create index if not exists runs_briefing_date_idx on public.runs (briefing_date desc);
 create index if not exists reactions_user_id_idx on public.reactions (user_id);
 create index if not exists clicks_user_id_idx    on public.clicks (user_id);
 create index if not exists notes_user_id_idx     on public.notes (user_id);
@@ -180,36 +187,108 @@ revoke all on public.clicks         from anon, authenticated;
 revoke all on public.notes          from anon, authenticated;
 revoke all on public.kakao_auth     from anon, authenticated;
 
--- articles: 공개 페이지가 읽는다
-grant select on public.articles to anon;
+-- 읽기는 익명 공개, 쓰기는 로그인한 사용자만 (계획 2).
+-- 정책에 drop if exists를 붙여 이 파일을 다시 돌릴 수 있게 둔다 —
+-- create policy에는 IF NOT EXISTS가 없다.
+
+-- articles: 공개 페이지가 읽는다. **컬럼 단위**로 준다 — reason(LLM의
+-- 판단 근거)은 페이지에 쓰지 않으므로 내보내지 않는다. 테이블 통째로
+-- 주면 ?select=reason으로 읽힌다.
+grant select (id, briefing_date, url, source, published_at,
+              headline, bullets, why_it_matters, topic, score)
+  on public.articles to anon, authenticated;
+
+drop policy if exists articles_public_read on public.articles;
 create policy articles_public_read on public.articles
   for select to anon using (true);
 
--- reactions/clicks: 삽입만. 조회는 service_role(= 나)만 한다.
--- identity 컬럼은 시퀀스 권한을 따로 주지 않아도 삽입된다(serial과 다름).
--- with check (user_id is null): anon이 삽입하는 행은 user_id가 반드시
--- 비어 있어야 한다. 이것이 없으면 인증을 켠 뒤에 anon 키로 남의 user_id를
--- 적어 넣을 수 있다 — 위장 경로를 처음부터 막는다. 인증된 사용자는
--- 그때 별도 정책(auth.uid() = user_id)으로 삽입한다.
-grant insert on public.reactions to anon;
-create policy reactions_public_insert on public.reactions
-  for insert to anon with check (user_id is null);
+-- authenticated는 anon과 **다른 역할**이다. 따로 주지 않으면 로그인하는
+-- 순간 화면이 빈다.
+drop policy if exists articles_auth_read on public.articles;
+create policy articles_auth_read on public.articles
+  for select to authenticated using (true);
 
-grant insert on public.clicks to anon;
+-- runs: 0건인 날의 수치를 페이지가 읽는다 (요구사항 D8).
+-- errors(내부 오류 메시지)·input_tokens·window_*·id는 주지 않는다.
+grant select (briefing_date, status, collected_count, considered_count,
+              max_score, published_count, source_counts)
+  on public.runs to anon, authenticated;
+
+drop policy if exists runs_public_read on public.runs;
+create policy runs_public_read on public.runs
+  for select to anon using (status = 'sent');
+
+drop policy if exists runs_auth_read on public.runs;
+create policy runs_auth_read on public.runs
+  for select to authenticated using (status = 'sent');
+
+-- briefing_index: 아카이브가 **날짜당 한 행**만 받는다. 기사 전체를 받아
+-- 브라우저에서 집계하면 PostgREST의 기본 상한(1000행)에 조용히 걸린다.
+--
+-- security_invoker = true: 뷰가 호출자의 권한으로 돈다. 그래서 위의 컬럼
+-- grant와 RLS가 그대로 적용된다. 기본값(definer)은 RLS를 우회한다.
+create or replace view public.briefing_index
+  with (security_invoker = true) as
+select
+  briefing_date,
+  count(*)::int                                as count,
+  -- 그 날짜의 최고 점수 헤드라인. 아카이브가 "<lead> 외 N건"으로 그린다.
+  (array_agg(headline order by score desc))[1] as lead
+from public.articles
+group by briefing_date;
+
+grant select on public.briefing_index to anon, authenticated;
+
+-- clicks: 로그인 전에도 눌린다. anon은 user_id가 빈 행만, 로그인
+-- 사용자는 자기 id로 넣는다.
+-- identity 컬럼은 시퀀스 권한을 따로 주지 않아도 삽입된다(serial과 다름).
+-- with check (user_id is null): anon이 남의 user_id를 적어 넣는 위장
+-- 경로를 막는다.
+grant insert on public.clicks to anon, authenticated;
+
+drop policy if exists clicks_public_insert on public.clicks;
 create policy clicks_public_insert on public.clicks
   for insert to anon with check (user_id is null);
 
--- notes: 내 메모를 내 페이지에서 쓰고 읽는다.
--- 다수 사용자로 가면 이 select 정책은 남의 메모까지 노출하므로
--- auth.uid() = user_id로 좁혀야 한다 (스펙 2.1 참조).
-grant select, insert on public.notes to anon;
-create policy notes_public_read on public.notes
-  for select to anon using (true);
-create policy notes_public_insert on public.notes
-  for insert to anon with check (user_id is null);
+drop policy if exists clicks_own_insert on public.clicks;
+create policy clicks_own_insert on public.clicks
+  for insert to authenticated with check ((select auth.uid()) = user_id);
 
--- article_bodies / runs / kakao_auth: anon 정책을 만들지 않는다.
--- 권한도 회수했고 정책도 없으므로 이중으로 차단된다.
+-- reactions: **로그인한 사용자만.** anon에 주지 않는다 — ERD 3.2.1이
+-- 걱정한 "낯선 사람의 클릭이 내 기준을 바꾼다"를 닫는다.
+--
+-- (select auth.uid())로 감싸는 이유: 행마다 재평가되지 않고 한 번만
+-- 계산된다. auth.uid() = user_id로 바로 쓰면 행 수만큼 호출된다.
+grant select, insert, delete on public.reactions to authenticated;
+
+drop policy if exists reactions_own_read on public.reactions;
+create policy reactions_own_read on public.reactions
+  for select to authenticated using ((select auth.uid()) = user_id);
+
+drop policy if exists reactions_own_insert on public.reactions;
+create policy reactions_own_insert on public.reactions
+  for insert to authenticated with check ((select auth.uid()) = user_id);
+
+-- DELETE는 먼저 SELECT로 행을 찾는다. 위의 read 정책이 그것을 받친다 —
+-- 없으면 delete가 조용히 0행을 지운다.
+drop policy if exists reactions_own_delete on public.reactions;
+create policy reactions_own_delete on public.reactions
+  for delete to authenticated using ((select auth.uid()) = user_id);
+
+-- notes: 로그인한 사용자만, **추가 전용**. UPDATE·DELETE를 주지 않으므로
+-- 수정 이력이 남고, 화면은 가장 최근 행을 읽어 제자리 수정처럼 보인다.
+grant select, insert on public.notes to authenticated;
+
+drop policy if exists notes_own_read on public.notes;
+create policy notes_own_read on public.notes
+  for select to authenticated using ((select auth.uid()) = user_id);
+
+drop policy if exists notes_own_insert on public.notes;
+create policy notes_own_insert on public.notes
+  for insert to authenticated with check ((select auth.uid()) = user_id);
+
+-- article_bodies / kakao_auth: anon·authenticated 정책을 만들지 않는다.
+-- 권한도 회수했고 정책도 없으므로 이중으로 차단된다 (요구사항 D2).
 
 -- ---------------------------------------------------------------
 -- 파이프라인(service_role) 권한

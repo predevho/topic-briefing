@@ -81,6 +81,8 @@ class RemoteStore(Protocol):
     def record_run(
         self,
         *,
+        # 0건인 날은 articles 행이 없다. 이 컬럼이 그 날짜의 유일한 기록이다.
+        briefing_date: str,
         window_start: datetime,
         window_end: datetime,
         status: str,                 # "sent" | "failed"
@@ -155,6 +157,8 @@ class SupabaseStore:
     def record_run(
         self,
         *,
+        # 0건인 날은 articles 행이 없다. 이 컬럼이 그 날짜의 유일한 기록이다.
+        briefing_date: str,
         window_start: datetime,
         window_end: datetime,
         status: str,
@@ -168,6 +172,7 @@ class SupabaseStore:
         errors: list[dict],
     ) -> None:
         self._db.table("runs").insert({
+            "briefing_date": briefing_date,
             "window_start": window_start.isoformat(),
             "window_end": window_end.isoformat(),
             "status": status,

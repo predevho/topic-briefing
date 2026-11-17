@@ -157,7 +157,7 @@ div 메타               11.5px / Inter / #6B6862 — 출처 · 점수 · [좋�
 
 | 파일 | 책임 |
 |---|---|
-| `supabase/migrations/2026-11-13-page-direct-read.sql` | 컬럼 단위 grant, `runs.briefing_date`, 인증 RLS |
+| `supabase/migrations/2026-11-17-page-direct-read.sql` | 컬럼 단위 grant, `runs.briefing_date`, 인증 RLS |
 | `supabase/schema.sql` | 위를 반영한 현재 스키마 (새 프로젝트가 같은 결과를 얻는다) |
 | `supabase/verify_permissions.sql` | 권한 점검 질의 갱신 |
 | `pipeline/lib/store.py` | `record_run`에 `briefing_date` 추가 |
@@ -294,7 +294,7 @@ git push origin main
 이 태스크가 **계획 1의 완료된 스키마와 `record_run`을 고친다.** 이 계획에서 유일하게 그렇게 하는 부분이고, 이유는 "제약 2"와 "제약 4"에 있다.
 
 **Files:**
-- Create: `supabase/migrations/2026-11-13-page-direct-read.sql`
+- Create: `supabase/migrations/2026-11-17-page-direct-read.sql`
 - Modify: `supabase/schema.sql`
 - Modify: `supabase/verify_permissions.sql`
 - Modify: `pipeline/lib/store.py`, `pipeline/notify.py`, `scripts/smoke_supabase.py`
@@ -391,7 +391,7 @@ Expected: 397 passed (기존 396 + 새 1건)
 
 - [ ] **Step 6: 마이그레이션 SQL**
 
-`supabase/migrations/2026-11-13-page-direct-read.sql`:
+`supabase/migrations/2026-11-17-page-direct-read.sql`:
 
 ```sql
 -- 페이지가 Supabase를 직접 조회하도록 권한을 다시 그린다 (계획 2).
@@ -521,8 +521,8 @@ create policy clicks_own_insert on public.clicks
 cd "$(git rev-parse --show-toplevel)"
 # MCP의 execute_sql이나 대시보드 SQL 편집기에 붙여 넣는다.
 # supabase CLI가 연결돼 있으면:
-#   supabase db query < supabase/migrations/2026-11-13-page-direct-read.sql
-cat supabase/migrations/2026-11-13-page-direct-read.sql
+#   supabase db query < supabase/migrations/2026-11-17-page-direct-read.sql
+cat supabase/migrations/2026-11-17-page-direct-read.sql
 ```
 
 적용 뒤 어드바이저를 돌린다.
@@ -655,7 +655,7 @@ export default defineConfig({
 
 ```
 # 브라우저용 publishable 키. 비밀이 아니다 — 빌드된 JS에 그대로 들어간다.
-# 실제 방어는 RLS다(supabase/migrations/2026-11-13-page-direct-read.sql).
+# 실제 방어는 RLS다(supabase/migrations/2026-11-17-page-direct-read.sql).
 VITE_SUPABASE_URL=https://xxxxx.supabase.co
 VITE_SUPABASE_PUBLISHABLE_KEY=sb_publishable_...
 ```

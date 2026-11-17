@@ -17,3 +17,6 @@ venv/
 # Node
 node_modules/
 web/dist/
+
+# Supabase CLI 캐시 (버전 확인용. 프로젝트 설정이 아니다)
+supabase/.temp/

@@ -59,6 +59,9 @@ def main() -> None:
 
     print("2) 실행 이력 쓰기...")
     store.record_run(
+        # 실제 날짜가 아닌 값. 5번 정리가 실패해도 페이지가 이것을
+        # "0건인 날"로 그리지 않는다.
+        briefing_date="2099-01-01",
         window_start=now - timedelta(hours=24),
         window_end=now,
         status="sent",
