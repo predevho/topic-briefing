@@ -1798,9 +1798,37 @@ git commit -m "feat: 소스 45개에 침묵 등급 배정 (시드 실측 기준)
 
 ## Task 10: `lib/guard` — 토큰 만료
 
+> **2026-11-17 실행 중 찾은 것 — Task 6에서 내가 넣은 버그.**
+>
+> 발송 확인 스크립트(`scripts/kakao_send_test.py`)는 토큰이 회전되면
+> `refresh_token_expires_in`에 쓰고 있었다. 실제 컬럼은
+> `refresh_token_expires_at`(**시각**)이고 그런 컬럼은 없다. 회전이 한 번도
+> 일어나지 않아 드러나지 않았다. 첫 회전 날 카카오가 새 토큰을 **이미 발급한
+> 뒤에** 저장이 실패했을 것이다. `updated_at`도 트리거가 없어 빠져 있었다.
+>
+> 실제 DB로 확인했다 — 어떤 행에도 맞지 않는 `id = -1`로 UPDATE를 보내면
+> 데이터는 그대로이고 컬럼 이름만 검사된다:
+>
+> ```
+> 예전 코드: Could not find the 'refresh_token_expires_in' column of 'kakao_auth'
+> 고친 코드: 통과 (갱신 0행)
+> ```
+>
+> 원인은 **"초 → 시각" 변환을 두 곳에서 따로 쓴 것**이다. `lib/kakao.py`에
+> `rotated_expiry(tokens, now=)`를 두고 스크립트와 Task 12가 함께 쓴다.
+> Task 12 원안의 `seconds=tokens.refresh_token_expires_in or 0`도 이걸로
+> 바꿨다 — 동작은 같지만(수명이 없으면 지금 = 바로 경고) 이유가 한 곳에
+> 적힌다.
+>
+> 현재 토큰: 만료 2027-01-16, 59일 남음 → 가드 조용함. 정상이면 남은 일수가
+> 30일 아래로 거의 내려가지 않는다 — 1개월 미만이 되면 갱신 때 새 토큰(60일)이
+> 와서 저장되기 때문이다. 14일 경고는 회전 저장이 2주 넘게 실패했거나
+> 파이프라인이 한 달 넘게 멈췄다는 뜻이다.
+
 **Files:**
-- Modify: `pipeline/lib/guard.py`
-- Test: `tests/test_guard.py`
+- Modify: `pipeline/lib/guard.py`, `pipeline/lib/kakao.py` (`rotated_expiry`)
+- Modify: `scripts/kakao_send_test.py` (잘못된 컬럼)
+- Test: `tests/test_guard.py`, `tests/test_kakao.py`
 
 - [ ] **Step 1: 실패하는 테스트를 쓴다**
 
@@ -1870,7 +1898,7 @@ def token_expiring(expires_at: datetime, *, now: datetime) -> int | None:
 .venv/bin/python -m pytest tests/test_guard.py -k token -v
 ```
 
-Expected: 4 passed
+Expected: 5 passed (+ test_kakao의 rotated_expiry 2개). 전체 466개.
 
 - [ ] **Step 5: 커밋**
 
@@ -2158,7 +2186,7 @@ from pipeline.lib.guard import (
     token_expiring,
     token_spike,
 )
-from pipeline.lib.kakao import access_token, should_store
+from pipeline.lib.kakao import access_token, rotated_expiry, should_store
 from pipeline.lib.llm import MODEL
 from pipeline.lib.sender import KakaoSender
 from pipeline.lib.slack import SlackSender
@@ -2257,11 +2285,12 @@ Expected: 423 passed
             client_secret=env["KAKAO_CLIENT_SECRET"],
         )
         # 회전된 토큰이 왔을 때만 저장한다 — 한 달에 한 번쯤이다.
+        # 초 → 시각 변환은 rotated_expiry 한 곳에서만 한다(Task 10).
         if should_store(tokens):
-            expires = datetime.now(timezone.utc) + timedelta(
-                seconds=tokens.refresh_token_expires_in or 0
+            remote.save_kakao_refresh_token(
+                tokens.refresh_token,
+                rotated_expiry(tokens, now=datetime.now(timezone.utc)),
             )
-            remote.save_kakao_refresh_token(tokens.refresh_token, expires)
         senders.append(
             KakaoSender(access_token=tokens.access_token, page_url=env["PAGE_URL"])
         )

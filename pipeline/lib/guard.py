@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 from pipeline.lib.config import Source
@@ -106,3 +106,29 @@ def silent_sources(
         if gap is not None and gap >= limit:
             found.append((source.name, gap, limit))
     return found
+
+
+# --- 토큰 만료 ---
+#
+# 카카오 refresh_token은 60일이다(2026-11-17 실측: refresh_token_expires_in
+# 5,184,000초). 만료가 1개월 미만이면 갱신 때 새 토큰이 오고, 저장하면 수명이
+# 다시 60일이 된다. 그래서 **정상이면 남은 일수가 30일 아래로 거의 내려가지
+# 않는다.** 이 경고가 뜨면 회전 저장이 2주 넘게 실패했거나 파이프라인이 한 달
+# 넘게 멈춘 것이다.
+
+# 재인증은 브라우저에서 사람이 해야 한다(scripts/kakao_auth.py).
+# 2주면 주말을 두 번 지나므로 바쁜 주에도 처리할 시간이 있다.
+TOKEN_WARN_DAYS = 14
+
+
+def token_expiring(expires_at: datetime, *, now: datetime) -> int | None:
+    """만료까지 남은 일수. 여유가 있으면 None.
+
+    음수를 그대로 돌려준다 — "3일 지났다"가 "0일 남았다"보다 정확하고,
+    이미 끊긴 상태와 곧 끊길 상태는 다른 조치를 부른다.
+
+    `.days`는 내림이다 — 13일 23시간은 13일. 남은 시간을 짧게 말하는 쪽이라
+    경고에는 맞는 방향이다.
+    """
+    days = (expires_at - now).days
+    return days if days <= TOKEN_WARN_DAYS else None

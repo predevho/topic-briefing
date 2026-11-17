@@ -18,6 +18,7 @@ HTTP는 `lib/http.py`의 `post_form`에 맡긴다. 전송과 실패 분류가 �
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Callable
 
 from pipeline.lib.http import DEFAULT_TIMEOUT, FORM, post_form
@@ -73,3 +74,19 @@ def should_store(tokens: KakaoTokens) -> bool:
     한 달에 29번은 같은 값을 다시 쓰는 셈이다.
     """
     return tokens.refresh_token is not None
+
+
+def rotated_expiry(tokens: KakaoTokens, *, now: datetime) -> datetime:
+    """회전된 refresh_token의 만료 **시각**. kakao_auth.refresh_token_expires_at에 쓴다.
+
+    카카오는 남은 **초**(refresh_token_expires_in)를 주고 테이블은 **시각**을
+    담는다. 변환을 여기 한 곳에서만 한다 — 두 곳에서 하다가 발송 확인
+    스크립트가 없는 컬럼(refresh_token_expires_in)에 쓰는 버그가 났다(2026-11-17).
+
+    카카오는 새 refresh_token과 수명을 함께 준다. 수명만 빠졌으면 **모르는 값을
+    60일로 지어내지 않고** now를 돌려준다. 그러면 토큰 가드가 바로 "0일 남음"을
+    알려 사람이 재인증한다 — 안전한 쪽으로 틀린다. 토큰 자체는 저장해야 한다.
+    """
+    if tokens.refresh_token_expires_in is None:
+        return now
+    return now + timedelta(seconds=tokens.refresh_token_expires_in)

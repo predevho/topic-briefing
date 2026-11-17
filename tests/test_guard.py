@@ -176,3 +176,42 @@ def test_커밋된_시드_파일이_말이_된다():
 
     assert len(seed) >= 40
     assert all(day <= date(2026, 11, 12) for day in seed.values())
+
+
+# --- 토큰 만료 ---
+#
+# 카카오 refresh_token은 60일이다(2026-11-17 실측). 만료가 1개월 미만이면
+# 갱신 때 새 토큰이 오고, 그걸 저장하면 수명이 다시 60일로 늘어난다.
+# 그래서 **정상이면 남은 일수가 30일 아래로 거의 내려가지 않는다.** 14일 경고는
+# 회전 저장이 2주 넘게 실패했거나 파이프라인이 한 달 넘게 멈췄다는 뜻이다.
+
+from datetime import datetime, timedelta, timezone
+
+from pipeline.lib.guard import TOKEN_WARN_DAYS, token_expiring
+
+NOW = datetime(2026, 11, 17, 22, 20, tzinfo=timezone.utc)
+
+
+def test_14일_안이면_알린다():
+    assert token_expiring(NOW + timedelta(days=10), now=NOW) == 10
+
+
+def test_정확히_14일이면_알린다():
+    assert token_expiring(NOW + timedelta(days=14), now=NOW) == 14
+
+
+def test_여유가_있으면_알리지_않는다():
+    """매일 알리면 그게 알림 피로다. 60일 남은 날에는 조용해야 한다."""
+    assert token_expiring(NOW + timedelta(days=60), now=NOW) is None
+    assert token_expiring(NOW + timedelta(days=15), now=NOW) is None
+
+
+def test_이미_만료됐으면_음수로_알린다():
+    """'3일 지났다'가 '0일 남았다'보다 정확하다. 이미 끊긴 상태와 곧 끊길
+    상태는 다른 조치를 부른다."""
+    assert token_expiring(NOW - timedelta(days=3), now=NOW) == -3
+
+
+def test_임계값이_14일이다():
+    """재인증은 브라우저에서 사람이 해야 한다. 2주면 주말을 두 번 지난다."""
+    assert TOKEN_WARN_DAYS == 14

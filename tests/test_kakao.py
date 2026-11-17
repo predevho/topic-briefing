@@ -66,3 +66,36 @@ def test_회전된_토큰만_저장한다():
     """매일 저장하면 쓸데없이 쓰기가 생긴다. 한 달에 한 번이면 된다."""
     assert should_store(KakaoTokens(access_token="AT", refresh_token="NEW")) is True
     assert should_store(KakaoTokens(access_token="AT")) is False
+
+
+# --- 회전된 토큰의 만료 시각 ---
+
+from datetime import datetime, timedelta, timezone
+
+from pipeline.lib.kakao import rotated_expiry
+
+NOW = datetime(2026, 12, 20, 22, 20, tzinfo=timezone.utc)
+
+
+def test_회전된_토큰의_만료는_받은_초만큼_뒤다():
+    """kakao_auth.refresh_token_expires_at은 **시각**이다. 카카오는 남은
+    **초**를 준다. 변환을 한 곳에서만 한다 — 두 곳에서 하다가 Task 6 스크립트가
+    없는 컬럼(refresh_token_expires_in)에 쓰는 버그가 났다.
+    """
+    tokens = KakaoTokens(
+        access_token="AT", refresh_token="NEW", refresh_token_expires_in=5184000
+    )
+
+    assert rotated_expiry(tokens, now=NOW) == NOW + timedelta(days=60)
+
+
+def test_수명이_안_왔으면_지금으로_둔다():
+    """카카오는 새 refresh_token과 수명을 함께 준다. 수명만 빠지면 **모르는
+    값을 60일로 지어내지 않는다.** 지금으로 두면 토큰 가드가 바로 "0일
+    남음"으로 알려 사람이 재인증한다 — 안전한 쪽으로 틀린다.
+
+    토큰 자체는 저장해야 한다. 버리면 새로 받은 토큰을 잃는다.
+    """
+    tokens = KakaoTokens(access_token="AT", refresh_token="NEW")
+
+    assert rotated_expiry(tokens, now=NOW) == NOW

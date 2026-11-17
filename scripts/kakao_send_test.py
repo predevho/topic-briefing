@@ -37,7 +37,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from pipeline.lib.kakao import access_token, should_store
+from pipeline.lib.kakao import access_token, rotated_expiry, should_store
 from pipeline.lib.sender import (
     KAKAO_MAX_TEXT,
     KakaoSender,
@@ -146,12 +146,20 @@ def main() -> int:
     if should_store(tokens):
         # 왔는데 저장하지 않으면 다음 달에 로그인이 끊긴다. 이 스크립트가
         # secret 키를 쥔 유일한 곳이므로 여기서 저장한다.
+        #
+        # **컬럼은 refresh_token_expires_at(시각)이다.** 2026-11-17까지 여기서
+        # refresh_token_expires_in(없는 컬럼)에 쓰고 있었다 — 회전이 한 번도
+        # 일어나지 않아 드러나지 않았고, 첫 회전 날 새 토큰을 받고도 저장에서
+        # 실패했을 것이다. 변환은 rotated_expiry 한 곳에서 한다.
+        # updated_at은 트리거가 없어 직접 넣는다(kakao_auth.py와 같다).
+        now = datetime.now(timezone.utc)
+        expires_at = rotated_expiry(tokens, now=now)
         client.table("kakao_auth").update(
             {"refresh_token": tokens.refresh_token,
-             "refresh_token_expires_in": tokens.refresh_token_expires_in}
+             "refresh_token_expires_at": expires_at.isoformat(),
+             "updated_at": now.isoformat()}
         ).eq("id", 1).execute()
-        print(f"   ✓ refresh_token이 회전됐다 — 저장했다 "
-              f"(만료 {tokens.refresh_token_expires_in}초)")
+        print(f"   ✓ refresh_token이 회전됐다 — 저장했다 (만료 {expires_at:%Y-%m-%d})")
     else:
         print("   refresh_token 회전 없음 (만료가 1개월 넘게 남았다 — 정상)")
 
