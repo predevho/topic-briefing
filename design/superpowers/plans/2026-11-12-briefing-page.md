@@ -1192,6 +1192,69 @@ git add web/src/lib/types.ts web/src/lib/supabase.ts web/src/lib/data.ts
 git commit -m "feat: Supabase 직접 조회 — 날짜별 브리핑과 아카이브"
 ```
 
+### 실행 중 발견한 것 (2026-11-17) — 같은 날짜에 runs 행이 여러 개다
+
+**실제 데이터로 돌려 보지 않으면 절대 안 잡히는 버그였다.**
+
+`runs`에 `2026-11-12`가 **3행** 있었다. 계획 1 개발 중 `--force`로 여러 번
+돌린 흔적이고, 수치가 서로 달랐다.
+
+```
+collected=240 considered=10 max=100 published=7   ← 실제 발송
+collected=0   considered=0  max=null published=0
+collected=0   considered=0  max=null published=0
+```
+
+두 곳이 깨졌다.
+
+| | 고치기 전 | 정답 |
+|---|---|---|
+| `fetchArchive().days` | **3** | 1 |
+| `fetchArchive().total` | **21** | 7 |
+| `fetchDay()`의 수치 | 빈 행을 집을 수 있다 | 실제 발송 행 |
+
+`fetchDay`가 더 위험하다. 정렬 없는 `.limit(1)`이 빈 행을 집으면 **실제로
+240건 수집해 7건 발행한 날에 "수집 0건, 최고 점수 없음"이 뜬다** —
+`runs.briefing_date`를 넣어서 막으려던 바로 그 거짓말이다.
+
+**`sent_at` 순으로 정렬하면 틀린다.** 실측에서 실제 발송이 **가장
+먼저**였고 빈 행들이 뒤에 왔다. `published_count` 내림차순이 "실제로
+발행한 실행"을 집는다. 같은 값이면 어느 쪽이든 같은 글을 발행한 것이므로
+무해하다. 이 컬럼은 이미 grant돼 있어 **DB를 다시 건드릴 필요가 없다.**
+
+`fetchArchive`는 `Set`으로 날짜 중복을 뺀다. `runs`를 기준으로 삼는 것은
+그대로다 — 0건인 날이 목록에서 사라지지 않으려면 그래야 한다.
+
+**검증은 브라우저에서 모듈을 직접 불러서 한다.** 쿼리를 다시 짜서 맞춰
+보면 내 이해를 검증하는 것이지 코드를 검증하는 것이 아니다.
+
+```bash
+cd "$(git rev-parse --show-toplevel)/web" && npm run dev
+```
+
+브라우저 콘솔 (`base`가 `/topic-briefing/`이므로 경로에 주의한다):
+
+```javascript
+const { fetchLatest, fetchArchive, fetchDay, NotFound } =
+  await import('/topic-briefing/src/lib/data.ts')
+console.log(await fetchLatest())
+console.log(await fetchArchive())
+```
+
+2026-11-17 실측 결과:
+
+| 확인한 것 | 값 |
+|---|---|
+| `fetchArchive().days` / `.total` | 1 / 7 |
+| `fetchLatest().collected` | **240** (빈 행이 아니라 실제 발송 행) |
+| `fetchLatest()`의 점수 순서 | 100 → 96 (내림차순) |
+| `'reason' in articles[0]` | **false** — 컬럼 grant가 클라이언트에서도 확인됐다 |
+| `fetchDay('1999-01-01')` | `NotFound` |
+
+> **남은 검증**: 0건인 날의 분기(`articles` 없음 + `runs` 있음)는 그런
+> 날짜가 아직 없어서 확인하지 못했다. Task 15 Step 2가 임시 행을 넣어
+> 확인한다.
+
 ---
 
 ## Task 6: 카드 컴포넌트
