@@ -16,6 +16,7 @@ from pydantic import BaseModel, ValidationError
 
 from pipeline.lib.http import classify_status
 from pipeline.lib.retry import Permanent, Transient
+from pipeline.models import TokenUsage
 
 # 스펙 결정: 선별·요약 모두 Opus. Max 플랜 크레딧으로 비용 제약이 없으므로
 # 품질 기준으로만 고른다. 바꾸려면 이 한 줄만 고친다.
@@ -89,8 +90,8 @@ class LLM(Protocol):
         output_format: type[TOut],
         effort: Effort,
         max_tokens: int = DEFAULT_MAX_TOKENS,
-    ) -> tuple[TOut, int]:
-        """구조화된 출력을 받는다. (파싱된 결과, 입력 토큰 수)를 돌려준다."""
+    ) -> tuple[TOut, TokenUsage]:
+        """구조화된 출력을 받는다. (파싱된 결과, 토큰 사용량)을 돌려준다."""
         ...
 
 
@@ -257,7 +258,7 @@ class AnthropicLLM:
         output_format: type[TOut],
         effort: Effort,
         max_tokens: int = DEFAULT_MAX_TOKENS,
-    ) -> tuple[TOut, int]:
+    ) -> tuple[TOut, TokenUsage]:
         return retry_on_schema(
             lambda: self._parse_once(
                 prompt=prompt,
@@ -274,7 +275,7 @@ class AnthropicLLM:
         output_format: type[TOut],
         effort: Effort,
         max_tokens: int,
-    ) -> tuple[TOut, int]:
+    ) -> tuple[TOut, TokenUsage]:
         # beta.messages.*를 쓴다. 비-beta 쪽에는 betas·fallbacks 인자가
         # 없어서 거부 폴백을 넘길 수 없다
         # (test_parse에_필요한_인자가_모두_있다가 고정한다).
@@ -324,4 +325,7 @@ class AnthropicLLM:
         )
         assert parsed is not None     # classify_response가 None이면 던진다
 
-        return parsed, response.usage.input_tokens
+        return parsed, TokenUsage(
+            input=response.usage.input_tokens,
+            output=response.usage.output_tokens,
+        )

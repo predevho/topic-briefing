@@ -279,7 +279,9 @@ def test_가짜_LLM이_인터페이스를_만족한다():
 
     result, tokens = fake.parse(prompt="아무거나", output_format=Answer, effort="low")
     assert result.value == 7
-    assert tokens > 0
+    # parse는 이제 TokenUsage를 돌려준다 — 입력만 세면 비용을 낮잡는다.
+    assert tokens.input > 0
+    assert tokens.output > 0
 
 
 def test_가짜_LLM이_받은_프롬프트를_기록한다():
@@ -486,3 +488,29 @@ def test_스키마_위반은_재시도된다():
 
     assert retry_on_schema(flaky) == "두 번째에 통과"
     assert len(calls) == 2
+
+
+# --- 토큰 사용량 ---
+
+def test_parse가_입력과_출력_토큰을_모두_돌려준다():
+    """크레딧 가드가 둘 다 필요하다. 지금은 입력만 돌려주고 출력은 버린다.
+
+    출력 토큰이 더 비싸다 — opus-5-5 기준 입력 $4 / 출력 $20 per MTok.
+    출력을 빼고 세면 비용을 크게 낮잡는다.
+    """
+    from pipeline.models import TokenUsage
+
+    usage = TokenUsage(input=1000, output=250)
+
+    assert usage.input == 1000
+    assert usage.output == 250
+
+
+def test_토큰_사용량을_더할_수_있다():
+    """rank와 summarize가 각각 쓴 것을 notify가 합쳐 기록한다."""
+    from pipeline.models import TokenUsage
+
+    total = TokenUsage(input=1000, output=250) + TokenUsage(input=40, output=900)
+
+    assert total.input == 1040
+    assert total.output == 1150

@@ -115,16 +115,21 @@ Expected: FAIL — `ImportError: cannot import name 'TokenUsage'`
 
 `Topic` 정의 바로 아래, `class Contract` 앞에 넣는다.
 
+> **`Contract`를 상속한다** — `BaseModel`이 아니다. 이 파일에는 이미
+> `frozen=True, extra="forbid"`를 가진 `Contract` 기반 클래스가 있고,
+> 모든 계약 모델이 그것을 쓴다. 설정을 따로 적으면 둘이 갈라진다.
+> 그래서 삽입 위치도 **`Contract` 정의 뒤**다.
+
 ```python
-class TokenUsage(BaseModel):
+class TokenUsage(Contract):
     """한 번의 LLM 호출이 쓴 토큰.
 
-    models.py에 두는 이유: llm.py가 models.py를 import해도 순환이 생기지
-    않는다(models.py는 stdlib과 pydantic만 import한다). 반대 방향으로 두면
-    순환이 된다.
-    """
+    **출력도 센다.** opus-5-5 기준 입력 $4 / 출력 $20 per MTok이라
+    출력이 5배 비싸다 — 입력만 세면 비용을 크게 낮잡는다.
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    models.py에 두는 이유: llm.py가 여기를 import해도 순환이 생기지
+    않는다(이 파일은 stdlib과 pydantic만 import한다). 반대로 두면 순환이다.
+    """
 
     input: int = Field(ge=0)
     output: int = Field(ge=0)
@@ -221,7 +226,25 @@ class FakeLLM:
 .venv/bin/python -m pytest -q
 ```
 
-Expected: 399 passed (기존 397 + 새 2). **실패가 나면 `_tokens`를 받는 쪽이 int를 기대하는 것이다** — Task 2에서 고친다. 지금은 `rank`·`summarize`가 값을 버리므로 통과해야 한다.
+Expected: **먼저 1건 실패한다.** `tests/test_llm.py::test_가짜_LLM이_인터페이스를_만족한다`가 `assert tokens > 0`으로 int를 가정하고 있다 (2026-11-17 실측).
+
+```
+TypeError: '>' not supported between instances of 'TokenUsage' and 'int'
+```
+
+계약이 바뀐 결과이므로 테스트를 새 계약에 맞춘다.
+
+```python
+    result, tokens = fake.parse(prompt="아무거나", output_format=Answer, effort="low")
+    assert result.value == 7
+    # parse는 이제 TokenUsage를 돌려준다 — 입력만 세면 비용을 낮잡는다.
+    assert tokens.input > 0
+    assert tokens.output > 0
+```
+
+고친 뒤 다시 돌린다. Expected: 399 passed (기존 397 + 새 2).
+
+`rank`·`summarize`는 값을 `_tokens`로 버리므로 이 단계에서 깨지지 않는다 — Task 2에서 받아 쓴다.
 
 - [ ] **Step 9: 커밋**
 

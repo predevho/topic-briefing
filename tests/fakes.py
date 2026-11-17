@@ -7,6 +7,8 @@ HTTP·DB 모킹 라이브러리 대신 이것을 쓴다. 모킹은 "내가 쓴 �
 
 from datetime import datetime
 
+from pipeline.models import TokenUsage
+
 
 class FakeRemoteStore:
     def __init__(
@@ -80,9 +82,14 @@ class FakeLLM:
     테스트할 수 있다.
     """
 
-    def __init__(self, responses: list, input_tokens: int = 1000) -> None:
+    def __init__(
+        self,
+        responses: list,
+        input_tokens: int = 1000,
+        output_tokens: int = 250,
+    ) -> None:
         self._responses = list(responses)
-        self._input_tokens = input_tokens
+        self._usage = TokenUsage(input=input_tokens, output=output_tokens)
         self.prompts: list[str] = []
         # 호출할 때 넘긴 인자도 기록한다. effort와 max_tokens는 비용과
         # 잘림을 좌우하므로 "무엇을 넘겼는가"가 테스트 대상이다.
@@ -98,7 +105,7 @@ class FakeLLM:
         })
         if not self._responses:
             raise AssertionError("FakeLLM에 준비된 응답이 없다. responses를 더 넣는다.")
-        return self._responses.pop(0), self._input_tokens
+        return self._responses.pop(0), self._usage
 
 
 class FakeSender:

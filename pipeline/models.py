@@ -37,6 +37,27 @@ class Contract(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
 
+class TokenUsage(Contract):
+    """한 번의 LLM 호출이 쓴 토큰.
+
+    **출력도 센다.** opus-5-5 기준 입력 $4 / 출력 $20 per MTok이라
+    출력이 5배 비싸다 — 입력만 세면 비용을 크게 낮잡는다.
+
+    models.py에 두는 이유: llm.py가 여기를 import해도 순환이 생기지
+    않는다(이 파일은 stdlib과 pydantic만 import한다). 반대로 두면 순환이다.
+    """
+
+    input: int = Field(ge=0)
+    output: int = Field(ge=0)
+
+    def __add__(self, other: "TokenUsage") -> "TokenUsage":
+        """여러 호출을 합산한다. notify가 rank와 summarize의 것을 더한다."""
+        return TokenUsage(
+            input=self.input + other.input,
+            output=self.output + other.output,
+        )
+
+
 # --- 01 수집 ---
 
 class RawItem(Contract):
