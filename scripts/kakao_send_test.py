@@ -20,7 +20,8 @@ import httpx
 
 TOKEN_URL = "https://kauth.kakao.com/oauth/token"
 SEND_URL = "https://kapi.kakao.com/v2/api/talk/memo/default/send"
-PAGE = "https://predevho.github.io/topic-briefing/"
+# 페이지 주소는 .env의 PAGE_URL에서 읽는다. 계획 3의 KakaoSender도
+# 같은 값을 쓰므로 하드코딩하지 않는다.
 
 
 def load_env() -> dict[str, str]:
@@ -35,6 +36,13 @@ def load_env() -> dict[str, str]:
 
 def main() -> int:
     env = load_env()
+
+    page = env.get("PAGE_URL", "").strip()
+    if not page:
+        raise SystemExit(
+            ".env에 PAGE_URL이 없다.\n"
+            "Vercel 프로덕션 주소를 넣는다. 예: PAGE_URL=https://xxx.vercel.app"
+        )
 
     from supabase import create_client
 
@@ -76,7 +84,7 @@ def main() -> int:
             "카카오 발송 경로가 동작합니다.\n"
             "브리핑은 계획 3에서 이 자리에 들어갑니다."
         ),
-        "link": {"web_url": PAGE, "mobile_web_url": PAGE},
+        "link": {"web_url": page, "mobile_web_url": page},
         "button_title": "전체 보기",
     }
 

@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # 빌드 산출물에 비밀이 섞여 들어갔는지 확인한다.
 #
-# 왜 필요한가: docs/assets/*.js는 공개 리포에 커밋되고 공개 URL에서
-# 서빙된다. publishable 키는 **들어가야 정상**이고(브라우저가 Supabase에
-# 직접 붙는다), secret 키는 **절대 들어가면 안 된다**(RLS를 우회한다).
+# 왜 필요한가: 번들은 공개 URL에서 서빙된다. publishable 키는
+# **들어가야 정상**이고(브라우저가 Supabase에 직접 붙는다), secret 키는
+# **절대 들어가면 안 된다**(RLS를 우회한다).
+#
+# 산출물은 web/dist다. Vercel이 푸시를 받고 직접 빌드하므로 커밋하지
+# 않는다 — 그래서 배포 전에 로컬에서 이 검사를 돌려야 한다.
 #
 # 2026-11-17: 단순히 `grep sb_secret_`로 보면 **거짓 경보가 난다.**
 # supabase-js 자신이 키 형식을 판별하려고 그 리터럴을 들고 있다:
@@ -20,8 +23,8 @@ set -uo pipefail
 
 cd "$(dirname "$0")/.."
 
-if ! ls docs/assets/*.js >/dev/null 2>&1; then
-  echo "★ docs/assets에 번들이 없다. 먼저 'cd web && npm run build'를 돌린다."
+if ! ls web/dist/assets/*.js >/dev/null 2>&1; then
+  echo "★ web/dist/assets에 번들이 없다. 먼저 'cd web && npm run build'를 돌린다."
   exit 1
 fi
 
@@ -41,7 +44,7 @@ secret = env.get("SUPABASE_SECRET_KEY", "")
 anthropic = env.get("ANTHROPIC_API_KEY", "")
 publishable = env.get("VITE_SUPABASE_PUBLISHABLE_KEY", "")
 
-files = sorted(Path("docs/assets").glob("*"))
+files = sorted(Path("web/dist/assets").glob("*"))
 blob = "\n".join(
     f.read_text(encoding="utf-8", errors="replace") for f in files if f.is_file()
 )

@@ -5,8 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "prebuild": "rm -rf ../docs/assets",
-    "build": "tsc -b && vite build && cp ../docs/index.html ../docs/404.html",
+    "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview"
   },

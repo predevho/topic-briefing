@@ -7,7 +7,7 @@ import Today from './components/Today'
 
 const DATE = /^\d{4}-\d{2}-\d{2}$/
 
-/** base('/topic-briefing/')를 떼고 남은 첫 조각. */
+/** base를 떼고 남은 첫 조각. Vercel에서는 base가 '/'라 경로 그대로다. */
 function route(): string {
   const base = import.meta.env.BASE_URL
   const path = window.location.pathname
