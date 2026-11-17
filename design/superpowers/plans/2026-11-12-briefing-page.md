@@ -666,6 +666,27 @@ export default defineConfig({
 })
 ```
 
+- [ ] **Step 4b: `package.json`에 `prebuild`를 더한다**
+
+**2026-11-17 실측으로 추가한 단계다.** `emptyOutDir: false`의 부작용이
+있다 — 해시가 붙은 옛 번들이 `docs/assets/`에 **계속 쌓인다.** 그대로
+두면 죽은 번들이 커밋되고 서빙되며, `ls docs/assets/*.css`가 여러 개를
+잡아 검증 스크립트도 깨진다.
+
+npm은 `build` 앞에 `prebuild`를 자동으로 돌린다. `assets`만 비우므로
+`.nojekyll`·`robots.txt`·`404.html`은 그대로 남는다 — 그것들을 지우면
+안 되는 것이 `emptyOutDir: false`의 애초 이유다.
+
+```json
+  "scripts": {
+    "dev": "vite",
+    "prebuild": "rm -rf ../docs/assets",
+    "build": "tsc -b && vite build",
+    "lint": "oxlint",
+    "preview": "vite preview"
+  },
+```
+
 - [ ] **Step 5: 환경 변수**
 
 `web/.env.example` (커밋한다):
@@ -861,10 +882,68 @@ Expected: 오류 없이 끝나고 `docs/assets/`에 CSS·JS가 생긴다.
 - [ ] **Step 5: 커밋**
 
 ```bash
-git add web/src/index.css web/index.html web/src/main.tsx
-git rm --cached web/src/App.css 2>/dev/null || true
+git add web/src/index.css web/index.html web/src/main.tsx web/src/App.tsx
+git rm web/src/App.css web/src/assets/hero.png web/src/assets/react.svg \
+       web/src/assets/vite.svg web/public/icons.svg web/public/favicon.svg
 git commit -m "feat: A 톤 디자인 토큰 + 색인 차단 메타"
 ```
+
+### 실행 중 발견한 것 (2026-11-17)
+
+**1. `@theme`이 아니라 `@theme static`이어야 한다.**
+
+Tailwind v4는 `@theme`의 변수를 **쓰인 것만** 산출물에 내보낸다(트리
+셰이킹). 실측하니 색 토큰 13개 중 **3개만** CSS에 남았다 — `paper`·`ink`는
+이 파일의 `body` 규칙이, `accent`는 `focus-visible` 규칙이 쓰기 때문이다.
+
+문제는 뒤쪽 태스크의 컴포넌트가 유틸리티 클래스와 **인라인
+`var(--color-...)`를 섞어 쓴다**는 것이다(Task 11의 `LikeButton`, Task
+12의 메모 저장 버튼). Tailwind는 TSX의 인라인 `var()`를 읽지 못하므로
+그 토큰이 유틸리티로 안 쓰이면 **조용히 빠지고 색만 사라진다.** 빌드는
+성공하고 에러도 없다.
+
+`static`은 쓰임과 무관하게 전부 내보낸다. 늘어나는 양은 CSS 0.2 kB다.
+
+**2. 스캐폴드의 `App.tsx`를 함께 고쳐야 한다.**
+
+Step 3이 `App.css`를 지우라고 하는데, 스캐폴드의 `App.tsx`가 그것을
+import한다(`import './App.css'`). 지우기만 하면 **Step 4의 빌드가
+실패한다.** Vite 로고 이미지 3개와 `public/icons.svg`·`favicon.svg`도
+같이 import·참조하므로 함께 치운다 — 공개 사이트에 Vite 브랜딩을 올릴
+이유가 없다.
+
+`App.tsx`는 **최소 플레이스홀더**로 둔다. Task 9(라우팅)가 실제 내용을
+쓴다. 그래야 이 커밋도 빌드된다.
+
+```tsx
+export default function App() {
+  return (
+    <main className="mx-auto max-w-[680px] px-[22px] py-10">
+      <h1 className="font-serif text-[22px] font-semibold leading-[1.4]">
+        브리핑
+      </h1>
+      <p className="mt-2 font-meta text-[13px] text-muted">
+        디자인 토큰을 적용했다. 화면은 Task 7부터 붙는다.
+      </p>
+    </main>
+  )
+}
+```
+
+**3. 토큰이 산출물에 도달했는지 직접 확인한다.**
+
+"빌드가 된다"로는 1번이 잡히지 않는다. 빌드된 CSS를 열어 변수를 센다.
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+CSS=$(ls docs/assets/*.css)
+for t in paper ink ink-2 muted muted-2 rule rule-soft panel tag edge quote accent warn; do
+  grep -q -- "--color-$t:" "$CSS" || echo "★ --color-$t 없음"
+done
+```
+
+Expected: 아무것도 출력되지 않는다. `ls`가 CSS를 여러 개 잡으면 Task 3
+Step 4b의 `prebuild`가 빠진 것이다.
 
 ---
 
