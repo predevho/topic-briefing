@@ -2095,19 +2095,24 @@ export default function LikeButton({ articleId, className = '' }: Props) {
 
 - [ ] **Step 3: 로그인·로그아웃 시 캐시를 버린다**
 
-`web/src/lib/supabase.ts` 끝에 더한다. 사용자가 바뀌면 좋아요 집합도 달라지므로 캐시를 들고 있으면 안 된다.
+`web/src/lib/likes.ts` **끝에** 더한다. 사용자가 바뀌면 좋아요 집합도 달라지므로 캐시를 들고 있으면 안 된다.
 
 ```typescript
-import { resetLikes } from './likes'
-
-// 로그인·로그아웃 때 좋아요 캐시를 버린다. 들고 있으면 로그아웃한 뒤에도
+// 로그인·로그아웃 때 캐시를 버린다. 들고 있으면 로그아웃한 뒤에도
 // 하트가 채워진 채로 남는다.
 supabase.auth.onAuthStateChange((event) => {
   if (event === 'SIGNED_IN' || event === 'SIGNED_OUT') resetLikes()
 })
 ```
 
-> **순환 import를 주의한다.** `likes.ts`가 `supabase.ts`를 import하고 그 역도 생긴다. ES 모듈이 순환을 허용하지만 평가 순서에 따라 `resetLikes`가 아직 정의되지 않을 수 있다. 위 코드는 콜백 **안에서만** 부르므로 안전하다 — 모듈 평가가 끝난 뒤에 실행된다.
+> **2026-11-17 수정: 이 구독을 `supabase.ts`가 아니라 `likes.ts`에 둔다.**
+> 초판은 `supabase.ts`가 `resetLikes`를 import하게 했는데, `likes.ts`가
+> 이미 `supabase.ts`를 import하므로 **순환 import**가 된다. ES 모듈이
+> 순환을 허용하긴 하지만 평가 순서에 기대는 코드가 되고, 번들러가 어떤
+> 순서로 평가할지는 보장되지 않는다.
+>
+> 캐시의 주인이 `likes.ts`이므로 구독도 거기 두는 것이 맞고, 그러면
+> 순환이 **아예 생기지 않는다.**
 
 - [ ] **Step 4: 직접 눌러 확인한다**
 
