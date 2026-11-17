@@ -41,15 +41,18 @@ python -m pipeline.notify       # 터미널 출력 + 발행 이력 기록
 **페이지는 아무것도 하지 않아도 갱신된다.** `notify`가 Supabase에 쓰면
 페이지가 열릴 때 직접 조회한다 — 빌드도 커밋도 필요 없다(스펙 6.4의 분리).
 
-> <https://predevho.github.io/topic-briefing/>
+> <https://topic-briefing.vercel.app/>
 
 프론트엔드 **코드**를 바꿨을 때만 배포한다.
 
 ```bash
 cd web && npm run build && cd ..
-bash scripts/verify_bundle.sh                  # secret 키가 안 섞였는지
-git add docs/ && git commit -m "build: 페이지 갱신" && git push
+bash scripts/verify_bundle.sh     # secret 키가 안 섞였는지 (배포 전 필수)
+git push                          # Vercel이 푸시를 받고 직접 빌드한다
 ```
+
+빌드 산출물은 커밋하지 않는다. 로컬 빌드는 **검사를 돌리기 위한** 것이다 —
+Vercel이 빌드한 것을 나중에 보는 것보다 올리기 전에 보는 쪽이 낫다.
 
 각 단계는 **단독 재실행이 가능하다.** 요약 프롬프트를 고쳤으면
 `python -m pipeline.summarize`만 다시 돌린다 — 수집과 선별 비용이 들지 않는다.
