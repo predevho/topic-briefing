@@ -21,3 +21,6 @@ web/dist/
 # Supabase CLI 캐시 (버전 확인용. 프로젝트 설정이 아니다)
 supabase/.temp/
 web/.env.local
+
+# JetBrains IDE 설정 — 로컬 환경이다.
+.idea/
