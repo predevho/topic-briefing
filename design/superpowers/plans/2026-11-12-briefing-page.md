@@ -930,6 +930,25 @@ export default function App() {
 }
 ```
 
+**4. 뒤쪽 태스크의 클래스 이름이 토큰과 어긋나 있었다.**
+
+초판이 `bg-bg`와 `border-line`을 썼는데 토큰 이름은 `paper`와 `rule`이다.
+**빌드는 통과하고 에러도 없다** — Tailwind는 모르는 유틸리티를 그냥
+만들지 않고 넘어가므로 배경과 테두리만 조용히 빠진다. 2026-11-17에
+전수 검사해서 고쳤다.
+
+새 컴포넌트를 쓸 때마다 확인한다.
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+grep -ohE '(text|bg|border|fill|stroke)-[a-z0-9-]+' web/src -r | sort -u
+```
+
+정의된 색 토큰은 열셋이다 — `paper` `ink` `ink-2` `muted` `muted-2`
+`rule` `rule-soft` `panel` `tag` `edge` `quote` `accent` `warn`.
+이 밖의 이름이 나오면 Tailwind 기본 유틸리티(`border-l-2` 같은 두께)이거나
+오타다.
+
 **3. 토큰이 산출물에 도달했는지 직접 확인한다.**
 
 "빌드가 된다"로는 1번이 잡히지 않는다. 빌드된 CSS를 열어 변수를 센다.
@@ -1806,7 +1825,7 @@ export default function SignIn({ onDone, onCancel }: Props) {
   return (
     <form
       onSubmit={submit}
-      className="mt-3 rounded-md border border-line bg-panel p-3.5"
+      className="mt-3 rounded-md border border-rule bg-panel p-3.5"
     >
       <p className="mb-2.5 text-[12.5px] leading-[1.5] text-muted">
         좋아요와 메모는 기기당 한 번만 로그인하면 됩니다. 읽기는 로그인이
@@ -1820,7 +1839,7 @@ export default function SignIn({ onDone, onCancel }: Props) {
         placeholder="이메일"
         autoComplete="username"
         required
-        className="mb-2 w-full rounded border border-edge bg-bg px-2.5 py-2 text-[13.5px]"
+        className="mb-2 w-full rounded border border-edge bg-paper px-2.5 py-2 text-[13.5px]"
       />
       <input
         type="password"
@@ -1829,7 +1848,7 @@ export default function SignIn({ onDone, onCancel }: Props) {
         placeholder="비밀번호"
         autoComplete="current-password"
         required
-        className="mb-2.5 w-full rounded border border-edge bg-bg px-2.5 py-2 text-[13.5px]"
+        className="mb-2.5 w-full rounded border border-edge bg-paper px-2.5 py-2 text-[13.5px]"
       />
 
       {error && (
@@ -2260,13 +2279,13 @@ export default function Note({ articleId }: Props) {
       )}
 
       {open && session && (
-        <div className="mt-1.5 rounded-md border border-line bg-panel p-3">
+        <div className="mt-1.5 rounded-md border border-rule bg-panel p-3">
           <textarea
             value={note.text}
             onChange={(event) => setNote({ ...note, text: event.target.value })}
             rows={3}
             placeholder="이 글에 대해 남길 메모"
-            className="mb-2 w-full resize-y rounded border border-edge bg-bg px-2.5 py-2 text-[13.5px] leading-[1.6]"
+            className="mb-2 w-full resize-y rounded border border-edge bg-paper px-2.5 py-2 text-[13.5px] leading-[1.6]"
           />
 
           {note.tags.length > 0 && (
@@ -2302,7 +2321,7 @@ export default function Note({ articleId }: Props) {
               setTagInput('')
             }}
             placeholder="태그 (쉼표나 엔터로 구분)"
-            className="mb-2.5 w-full rounded border border-edge bg-bg px-2.5 py-1.5 text-[12.5px]"
+            className="mb-2.5 w-full rounded border border-edge bg-paper px-2.5 py-1.5 text-[12.5px]"
           />
 
           <div className="flex items-center gap-2.5">
