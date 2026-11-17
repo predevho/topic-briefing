@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
-import { NotFound, fetchArchive, fetchDay, fetchLatest } from './lib/data'
+import { NotFound, fetchArchive, fetchDay } from './lib/data'
 import type { Archive as ArchiveData, Day } from './lib/types'
 import ArchiveView from './components/Archive'
 import Today from './components/Today'
@@ -29,14 +29,19 @@ export default function App() {
   useEffect(() => {
     const slug = route()
 
+    // 루트(/)는 **전체 목록**이다. 날짜 주소만 그날 브리핑을 연다.
+    //
+    // 카톡 메시지의 하단 "IT 브리핑 >" 행은 카카오 콘솔의 등록 도메인이
+    // 정하고, 콘솔은 경로를 무시한다(2026-11-17 실측) — 항상 루트로 온다.
+    // [전체 보기] 버튼은 날짜 주소로 오므로, 루트까지 "최신 하루"를 보여 주면
+    // 두 링크가 같은 것을 연다. 루트를 목록으로 두어 둘이 다른 일을 한다.
+    //
+    // /archive는 예전 링크를 위해 남긴다. 그 밖의 경로도 목록으로 보낸다.
     const load = async (): Promise<State> => {
-      if (slug === 'archive') {
-        return { kind: 'archive', archive: await fetchArchive() }
-      }
       if (DATE.test(slug)) {
         return { kind: 'day', day: await fetchDay(slug) }
       }
-      return { kind: 'day', day: await fetchLatest() }
+      return { kind: 'archive', archive: await fetchArchive() }
     }
 
     load().then(setState, (error: unknown) => {
@@ -57,7 +62,7 @@ export default function App() {
         {state.message}
         <br />
         <a href={import.meta.env.BASE_URL} className="text-accent underline">
-          오늘로 가기
+          전체 브리핑으로
         </a>
       </Shell>
     )

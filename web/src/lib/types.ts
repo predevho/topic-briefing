@@ -13,6 +13,9 @@ export type Article = {
   published_at: string
   topic: string
   score: number
+  // 그날 브리핑 안의 순번(1부터). 카톡 번호와 같다. 2026-11-17 이전 행은
+  // 마이그레이션이 채웠지만, 타입은 DB대로 null을 허용한다.
+  position: number | null
 }
 
 export type Day = {

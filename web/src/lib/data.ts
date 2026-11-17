@@ -8,7 +8,7 @@ export const THRESHOLD = 60
 
 // articles에서 읽는 컬럼. reason을 넣으면 컬럼 단위 grant 때문에 질의가 실패한다.
 const ARTICLE_COLUMNS =
-  'id, url, source, published_at, headline, bullets, why_it_matters, topic, score'
+  'id, url, source, published_at, headline, bullets, why_it_matters, topic, score, position'
 
 // runs에서 읽는 컬럼. errors·input_tokens·window_*는 grant가 없다.
 // published_count는 화면에 쓰지 않고 **정렬에만** 쓴다 — 아래 RUN_ORDER 참조.
@@ -50,6 +50,10 @@ export async function fetchDay(date: string): Promise<Day> {
       .from('articles')
       .select(ARTICLE_COLUMNS)
       .eq('briefing_date', date)
+      // **순번이 먼저다.** 카톡이 매긴 "1. 2. 3."과 같은 순서여야 한다.
+      // 점수만으로 정렬하면 동점 사이가 어긋난다(2026-11-12: 100점 3건).
+      // 순번이 없는 행(null)은 뒤로 보내고 점수순으로 물러선다.
+      .order('position', { ascending: true, nullsFirst: false })
       .order('score', { ascending: false }),
     // maybeSingle()을 쓰지 않는다 — 같은 날짜에 행이 둘이면 **던진다.**
     // 실측으로 그런 날이 실제로 있었다(RUN_ORDER 주석 참조).
@@ -133,20 +137,4 @@ export async function fetchArchive(): Promise<Archive> {
     days: dates.length,
     total: dates.reduce((sum, entry) => sum + entry.count, 0),
   }
-}
-
-/** 최신 브리핑. 아카이브 전체를 받지 않고 날짜 하나만 찾는다. */
-export async function fetchLatest(): Promise<Day> {
-  const { data, error } = await supabase
-    .from('runs')
-    .select('briefing_date')
-    .order('briefing_date', { ascending: false })
-    .limit(1)
-
-  if (error) fail('최신 브리핑 날짜를 읽지 못했다', error)
-
-  const latest = data?.[0]?.briefing_date as string | undefined
-  if (!latest) throw new NotFound('아직 발행한 브리핑이 없다')
-
-  return fetchDay(latest)
 }

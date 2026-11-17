@@ -2,9 +2,14 @@ import type { Article } from '../lib/types'
 import LikeButton from './LikeButton'
 import Note from './Note'
 
-type Props = { article: Article; onOpen: (article: Article) => void }
+type Props = {
+  article: Article
+  // 1부터. 카톡의 "1. 2. 3."과 같은 번호다.
+  number: number
+  onOpen: (article: Article) => void
+}
 
-export default function Card({ article, onOpen }: Props) {
+export default function Card({ article, number, onOpen }: Props) {
   return (
     <article className="flex flex-col gap-2.5">
       <a
@@ -14,6 +19,8 @@ export default function Card({ article, onOpen }: Props) {
         onClick={() => onOpen(article)}
       >
         <h2 className="m-0 text-[19px] font-semibold leading-[1.45] tracking-[-0.01em]">
+          {/* 카톡과 같은 "1." 형식. 헤드라인보다 한 단계 흐리게 둔다. */}
+          <span className="mr-1.5 text-muted tabular-nums">{number}.</span>
           {article.headline}
         </h2>
       </a>

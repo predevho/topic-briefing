@@ -104,6 +104,38 @@ class RemoteStore(Protocol):
         ...
 
 
+def article_rows(*, briefing_date: str, summaries: list) -> list[dict]:
+    """articles에 넣을 행을 만든다. **순번(position)을 1부터 매긴다.**
+
+    카톡이 summaries 순서로 "1. 2. 3."을 매긴다. 페이지와 아카이브가 같은
+    번호를 보여 주려면 그 순서를 저장해야 한다 — 점수로 다시 정렬하면 동점
+    사이가 어긋난다(2026-11-12: 100점 3건, 98점 3건).
+
+    summaries는 summarize가 이미 점수순으로 정렬하고 상한으로 자른 것이다.
+    여기서 다시 정렬하지 않는다 — 순서의 주인은 summarize다.
+
+    SupabaseStore 밖에 두는 이유: 이 저장소는 DB 호출을 모킹하지 않는다
+    (모킹은 모킹만 검증한다). 행을 만드는 부분만 떼면 순수 함수로 확인된다.
+    """
+    rows = []
+    for position, summary in enumerate(summaries, start=1):
+        raw = summary.article.ranked.item
+        rows.append({
+            "briefing_date": briefing_date,
+            "url": raw.url,
+            "source": raw.source,
+            "published_at": raw.published,
+            "headline": summary.headline,
+            "bullets": summary.bullets,
+            "why_it_matters": summary.why_it_matters,
+            "topic": summary.article.ranked.topic,
+            "score": summary.article.ranked.score,
+            "reason": summary.article.ranked.reason,
+            "position": position,
+        })
+    return rows
+
+
 class SupabaseStore:
     """RemoteStore의 Supabase 구현."""
 
@@ -190,23 +222,14 @@ class SupabaseStore:
         }).execute()
 
     def save_articles(self, *, briefing_date: str, summaries: list) -> None:
-        for summary in summaries:
-            raw = summary.article.ranked.item
+        for summary, row in zip(
+            summaries, article_rows(briefing_date=briefing_date, summaries=summaries)
+        ):
             # upsert + on_conflict: 같은 URL이 다시 와도 에러 대신 갱신한다.
+            # 순번도 갱신된다 — 재실행이 카톡을 새 순서로 다시 보내므로 맞다.
             rows = (
                 self._db.table("articles")
-                .upsert({
-                    "briefing_date": briefing_date,
-                    "url": raw.url,
-                    "source": raw.source,
-                    "published_at": raw.published,
-                    "headline": summary.headline,
-                    "bullets": summary.bullets,
-                    "why_it_matters": summary.why_it_matters,
-                    "topic": summary.article.ranked.topic,
-                    "score": summary.article.ranked.score,
-                    "reason": summary.article.ranked.reason,
-                }, on_conflict="url")
+                .upsert(row, on_conflict="url")
                 .execute()
                 .data
             )

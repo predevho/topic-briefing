@@ -135,3 +135,31 @@ def test_실행_이력에_출력_토큰도_남긴다():
 
     assert fake.runs[0]["input_tokens"] == 50135
     assert fake.runs[0]["output_tokens"] == 4220
+
+
+def test_기사_행에_순번을_1부터_매긴다():
+    """카톡의 "3."과 페이지의 "3."이 같은 글이어야 한다.
+
+    카톡은 summaries 순서로 번호를 매긴다. 페이지가 점수로 다시 정렬하면
+    동점(2026-11-12에 100점 3건, 98점 3건) 사이 순서가 어긋난다. 그래서
+    파이프라인이 매긴 순서를 그대로 저장한다.
+
+    SupabaseStore는 모킹하지 않는다(파일 머리말). 행을 만드는 부분만 떼어
+    순수 함수로 확인한다.
+    """
+    from pipeline.lib.store import article_rows
+    from tests.test_sender import _summary
+
+    # 같은 점수 셋 — 순서를 점수로는 정할 수 없는 경우다.
+    summaries = [_summary(0), _summary(1), _summary(2)]
+
+    rows = article_rows(briefing_date="2026-11-12", summaries=summaries)
+
+    assert [row["position"] for row in rows] == [1, 2, 3]
+    # 순번이 summaries 순서를 따른다 — 점수가 같아도.
+    assert [row["url"] for row in rows] == [
+        "https://toss.tech/a/0",
+        "https://toss.tech/a/1",
+        "https://toss.tech/a/2",
+    ]
+    assert all(row["briefing_date"] == "2026-11-12" for row in rows)

@@ -25,15 +25,14 @@ function byMonth(dates: ArchiveEntry[]): [string, ArchiveEntry[]][] {
 export default function Archive({ archive }: { archive: ArchiveData }) {
   return (
     <main className="mx-auto flex max-w-[1340px] flex-col gap-6 px-[22px] pb-8 pt-7">
+      {/*
+        이 화면이 루트(/)다. 예전의 "← 오늘로" 링크는 루트를 가리켰으므로
+        이제 자기 자신으로 가는 링크가 된다 — 지웠다. 최신 브리핑은 목록의
+        첫 줄이다.
+      */}
       <header className="flex flex-col gap-2">
-        <a
-          href={import.meta.env.BASE_URL}
-          className="py-1 font-meta text-[12.5px] text-muted"
-        >
-          ← 오늘로
-        </a>
         <h1 className="m-0 text-[25px] font-semibold tracking-[-0.01em]">
-          지난 브리핑
+          전체 브리핑
         </h1>
         <p className="m-0 font-meta text-[12.5px] text-muted">
           발행 {archive.days}일 · 총 {archive.total}건

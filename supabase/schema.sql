@@ -30,6 +30,10 @@ create table if not exists public.articles (
   why_it_matters text        not null,
   topic          text        not null,
   score          int         not null,
+  -- 그날 브리핑 안의 순번(1부터). 카톡의 "3."과 페이지의 "3."이 같은 글이게
+  -- 파이프라인이 매긴 순서를 저장한다. 동점이 흔해서 점수로 재계산하면
+  -- 어긋난다. null이면 순번을 모른다 — 페이지는 점수순으로 물러선다.
+  position       smallint,
   -- LLM의 판단 근거. "왜 이게 뽑혔나"를 나중에 조회한다.
   reason         text        not null,
   created_at     timestamptz not null default now(),
@@ -197,7 +201,7 @@ revoke all on public.kakao_auth     from anon, authenticated;
 -- 판단 근거)은 페이지에 쓰지 않으므로 내보내지 않는다. 테이블 통째로
 -- 주면 ?select=reason으로 읽힌다.
 grant select (id, briefing_date, url, source, published_at,
-              headline, bullets, why_it_matters, topic, score)
+              headline, bullets, why_it_matters, topic, score, position)
   on public.articles to anon, authenticated;
 
 drop policy if exists articles_public_read on public.articles;
@@ -234,8 +238,10 @@ create or replace view public.briefing_index
 select
   briefing_date,
   count(*)::int                                as count,
-  -- 그 날짜의 최고 점수 헤드라인. 아카이브가 "<lead> 외 N건"으로 그린다.
-  (array_agg(headline order by score desc))[1] as lead
+  -- 그 날짜의 1번 헤드라인. 아카이브가 "<lead> 외 N건"으로 그린다.
+  -- position으로 고른다 — 점수만으로는 동점 중 아무거나가 된다.
+  -- (security_invoker라 anon에게 position 권한이 있어야 이 뷰가 돈다.)
+  (array_agg(headline order by position nulls last, score desc, id))[1] as lead
 from public.articles
 group by briefing_date;
 
