@@ -49,6 +49,7 @@ class FakeRemoteStore:
         published_count: int,
         source_counts: dict[str, int],
         input_tokens: int | None,
+        output_tokens: int | None,
         errors: list[dict],
     ) -> None:
         # 실제 저장소처럼, 성공한 실행만 "마지막 발송"으로 센다.
@@ -66,6 +67,7 @@ class FakeRemoteStore:
             "published_count": published_count,
             "source_counts": source_counts,
             "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
             "errors": errors,
         })
 

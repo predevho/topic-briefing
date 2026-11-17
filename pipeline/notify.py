@@ -55,6 +55,18 @@ def notify(
     window_end = datetime.fromisoformat(briefing.window_end)
     moment = now or datetime.now(timezone.utc)
 
+    # rank와 summarize가 쓴 토큰을 합친다. 크레딧 가드(계획 3)가 읽는다.
+    #
+    # 한쪽만 있는 경우가 실제로 생긴다 — 수집이 0건이면 rank가 LLM을
+    # 부르지 않아 ranked.tokens가 None이다. 그때 다른 쪽만 세는 것이
+    # 맞다. 둘 다 None이면 None으로 남긴다: **"모른다"와 "0"은 다르고**,
+    # 0으로 적으면 가드가 "안 썼다"로 읽어 거짓 안심을 한다.
+    totals = None
+    if ranked.tokens and briefing.tokens:
+        totals = ranked.tokens + briefing.tokens
+    elif ranked.tokens or briefing.tokens:
+        totals = ranked.tokens or briefing.tokens
+
     def record(status: str, sent_at: datetime | None, extra: list[dict]) -> None:
         """실행 이력을 남긴다. 성공·실패 양쪽에서 같은 값을 쓴다."""
         remote.record_run(
@@ -68,7 +80,8 @@ def notify(
             max_score=ranked.max_score,
             published_count=len(briefing.summaries),
             source_counts=raw.source_counts,
-            input_tokens=None,
+            input_tokens=totals.input if totals else None,
+            output_tokens=totals.output if totals else None,
             errors=[error.model_dump() for error in raw.errors] + extra,
         )
 

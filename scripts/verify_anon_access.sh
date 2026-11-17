@@ -96,7 +96,7 @@ C=$(get articles reason)
 if [ "$C" = "200" ]; then bad "articles.reason이 읽힌다 — LLM 판단 근거가 공개된다"
 else note "✓ articles.reason 차단 (HTTP $C, $(code_of))"; fi
 
-for col in errors input_tokens window_start; do
+for col in errors input_tokens output_tokens window_start; do
   C=$(get runs "$col")
   if [ "$C" = "200" ]; then bad "runs.$col 이 읽힌다 — 내부 기록이 공개된다"
   else note "✓ runs.$col 차단 (HTTP $C, $(code_of))"; fi

@@ -72,6 +72,7 @@ def main() -> None:
         published_count=0,
         source_counts={MARKER: 0},
         input_tokens=None,
+        output_tokens=None,
         errors=[],
     )
     after = store.last_sent_at()

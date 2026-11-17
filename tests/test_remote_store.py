@@ -38,6 +38,7 @@ def test_기록한_실행의_시각을_돌려준다():
         published_count=3,
         source_counts={"s": 5},
         input_tokens=12000,
+        output_tokens=None,
         errors=[],
     )
 
@@ -60,6 +61,7 @@ def test_실패한_실행은_마지막_발송으로_세지_않는다():
         published_count=0,
         source_counts={"s": 5},
         input_tokens=None,
+        output_tokens=None,
         errors=[{"source": "sender:kakao", "kind": "config", "message": "HTTP 404"}],
     )
 
@@ -100,7 +102,36 @@ def test_실행_이력에_브리핑_날짜를_남긴다():
         published_count=0,
         source_counts={"토스_기술블로그": 3},
         input_tokens=42135,
+        output_tokens=None,
         errors=[],
     )
 
     assert fake.runs[0]["briefing_date"] == "2026-11-13"
+
+
+def test_실행_이력에_출력_토큰도_남긴다():
+    """크레딧 가드가 비용을 계산하려면 둘 다 필요하다.
+
+    출력이 5배 비싸다 — opus-5-5 기준 입력 $4 / 출력 $20 per MTok.
+    입력만 세면 비용을 크게 낮잡는다.
+    """
+    fake = FakeRemoteStore()
+
+    fake.record_run(
+        briefing_date="2026-11-17",
+        window_start=datetime(2026, 11, 16, 22, 20, tzinfo=timezone.utc),
+        window_end=datetime(2026, 11, 17, 22, 20, tzinfo=timezone.utc),
+        status="sent",
+        sent_at=datetime(2026, 11, 17, 22, 20, tzinfo=timezone.utc),
+        collected_count=240,
+        considered_count=10,
+        max_score=100,
+        published_count=7,
+        source_counts={"토스_기술블로그": 3},
+        input_tokens=50135,
+        output_tokens=4220,
+        errors=[],
+    )
+
+    assert fake.runs[0]["input_tokens"] == 50135
+    assert fake.runs[0]["output_tokens"] == 4220

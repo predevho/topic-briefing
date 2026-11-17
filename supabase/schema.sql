@@ -76,6 +76,8 @@ create table if not exists public.runs (
   -- {"토스_기술블로그": 3, "전자신문_오피니언": 0} — 3회 연속 0건이면 경고
   source_counts    jsonb       not null default '{}'::jsonb,
   input_tokens     int,
+  -- 출력이 5배 비싸다. 입력만 세면 비용을 크게 낮잡는다 (계획 3).
+  output_tokens    int,
   errors           jsonb       not null default '[]'::jsonb,
 
   constraint runs_status_enum check (status in ('sent', 'failed')),

@@ -12,6 +12,7 @@ from pipeline.models import (
     RawItem,
     SourceError,
     Summary,
+    TokenUsage,
 )
 from pipeline.notify import AllSendersFailedError, AlreadySentError, notify
 from tests.fakes import FakeRemoteStore, FakeSender
@@ -350,3 +351,69 @@ def test_저장이_실패해도_윈도우는_전진한다():
     remote, _ = _notify(_briefing([_summary()]), store=store)
 
     assert remote.last_sent_at() == SENT_AT
+
+
+# --- 토큰 합산 ---
+#
+# 크레딧 가드(계획 3)가 runs에서 읽는다. 분기가 셋이라 전부 본다.
+
+def _with_tokens(bundle, input_: int, output: int):
+    """번들에 토큰을 실어 돌려준다. Contract가 frozen이라 복사로 만든다."""
+    return bundle.model_copy(update={"tokens": TokenUsage(input=input_, output=output)})
+
+
+def test_두_단계의_토큰을_합쳐_기록한다():
+    remote = FakeRemoteStore()
+
+    notify(
+        briefing=_with_tokens(_briefing([_summary()]), 8000, 2400),
+        ranked=_with_tokens(_ranked(), 42135, 1820),
+        raw=_raw(),
+        remote=remote,
+        briefing_date="2026-11-10",
+        senders=[FakeSender("ok")],
+        now=SENT_AT,
+    )
+
+    assert remote.runs[0]["input_tokens"] == 50135
+    assert remote.runs[0]["output_tokens"] == 4220
+
+
+def test_한쪽만_있으면_그쪽만_센다():
+    """수집이 0건이면 rank가 LLM을 부르지 않아 ranked.tokens가 None이다.
+    그때 summarize 것만 세는 것이 맞다.
+    """
+    remote = FakeRemoteStore()
+
+    notify(
+        briefing=_with_tokens(_briefing([_summary()]), 8000, 2400),
+        ranked=_ranked(),                      # tokens 없음
+        raw=_raw(),
+        remote=remote,
+        briefing_date="2026-11-10",
+        senders=[FakeSender("ok")],
+        now=SENT_AT,
+    )
+
+    assert remote.runs[0]["input_tokens"] == 8000
+    assert remote.runs[0]["output_tokens"] == 2400
+
+
+def test_둘_다_없으면_None으로_남긴다():
+    """0으로 적으면 크레딧 가드가 "안 썼다"로 읽어 거짓 안심을 한다.
+    "모른다"와 "0"은 다르다.
+    """
+    remote = FakeRemoteStore()
+
+    notify(
+        briefing=_briefing([_summary()]),
+        ranked=_ranked(),
+        raw=_raw(),
+        remote=remote,
+        briefing_date="2026-11-10",
+        senders=[FakeSender("ok")],
+        now=SENT_AT,
+    )
+
+    assert remote.runs[0]["input_tokens"] is None
+    assert remote.runs[0]["output_tokens"] is None

@@ -474,6 +474,40 @@ grep -rn 'record_run' pipeline/ scripts/ tests/
         totals = ranked.tokens or briefing.tokens
 ```
 
+- [ ] **Step 5b: 합산 분기를 테스트로 감싼다**
+
+분기가 셋이고 배선의 **실제** 지점이다. `tests/test_notify.py`에 더한다.
+
+```python
+def _with_tokens(bundle, input_: int, output: int):
+    """번들에 토큰을 실어 돌려준다. Contract가 frozen이라 복사로 만든다."""
+    return bundle.model_copy(update={"tokens": TokenUsage(input=input_, output=output)})
+
+
+def test_두_단계의_토큰을_합쳐_기록한다():
+    remote = FakeRemoteStore()
+    notify(
+        briefing=_with_tokens(_briefing([_summary()]), 8000, 2400),
+        ranked=_with_tokens(_ranked(), 42135, 1820),
+        raw=_raw(), remote=remote, briefing_date="2026-11-10",
+        senders=[FakeSender("ok")], now=SENT_AT,
+    )
+    assert remote.runs[0]["input_tokens"] == 50135
+    assert remote.runs[0]["output_tokens"] == 4220
+
+
+def test_한쪽만_있으면_그쪽만_센다():
+    """수집이 0건이면 rank가 LLM을 부르지 않아 ranked.tokens가 None이다."""
+    ...   # ranked=_ranked() 로 두고 briefing에만 토큰을 실는다
+
+
+def test_둘_다_없으면_None으로_남긴다():
+    """0으로 적으면 가드가 "안 썼다"로 읽어 거짓 안심을 한다."""
+    ...   # 둘 다 토큰 없이 넘기고 input_tokens is None 을 본다
+```
+
+`TokenUsage`를 그 파일의 `pipeline.models` import에 더한다.
+
 - [ ] **Step 6: 마이그레이션 SQL**
 
 `supabase/migrations/2026-11-17-output-tokens.sql`:

@@ -93,6 +93,7 @@ class RemoteStore(Protocol):
         published_count: int,
         source_counts: dict[str, int],
         input_tokens: int | None,
+        output_tokens: int | None,
         errors: list[dict],
     ) -> None:
         """실행 이력을 남긴다. 0건이어도, 전송에 실패해도 반드시 호출한다."""
@@ -169,6 +170,7 @@ class SupabaseStore:
         published_count: int,
         source_counts: dict[str, int],
         input_tokens: int | None,
+        output_tokens: int | None,
         errors: list[dict],
     ) -> None:
         self._db.table("runs").insert({
@@ -183,6 +185,7 @@ class SupabaseStore:
             "published_count": published_count,
             "source_counts": source_counts,
             "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
             "errors": errors,
         }).execute()
 
