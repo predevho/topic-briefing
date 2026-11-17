@@ -6,6 +6,7 @@ from pipeline.lib.http import (
     classify_status,
     fetch,
     parse_retry_after,
+    post_form,
 )
 from pipeline.lib.retry import Permanent, Transient
 
@@ -177,3 +178,56 @@ def test_InvalidURL도_영구적이다():
 
     with pytest.raises(Permanent):
         fetch(URL, get=get)
+
+
+# --- post_form ---
+#
+# 분류를 틀리면 두 방향으로 손해다. 영구 실패를 재시도하면 시간만 쓰고,
+# 일시적 실패를 포기하면 그날 브리핑이 안 간다.
+
+POST_URL = "https://kauth.kakao.com/oauth/token"
+
+
+def _post_response(status: int, **kwargs) -> httpx.Response:
+    kwargs.setdefault("request", httpx.Request("POST", POST_URL))
+    return httpx.Response(status, **kwargs)
+
+
+def _post(send) -> dict:
+    return post_form(POST_URL, data={}, headers={}, timeout=1.0, send=send)
+
+
+def test_폼_POST가_JSON을_돌려준다():
+    def fake(url, data, headers, timeout):
+        assert url == POST_URL
+        return _post_response(200, json={"access_token": "AT"})
+
+    assert _post(fake) == {"access_token": "AT"}
+
+
+def test_POST_인증_실패는_영구다():
+    """401은 키 오타나 앱 설정 변경이다. 재시도해도 같다."""
+    with pytest.raises(Permanent, match="HTTP 401"):
+        _post(lambda *a, **k: _post_response(401, text="invalid client"))
+
+
+def test_POST_서버_오류는_일시적이다():
+    with pytest.raises(Transient, match="HTTP 500"):
+        _post(lambda *a, **k: _post_response(500))
+
+
+def test_POST_시간_초과는_일시적이다():
+    """fetch와 같은 처리다. 잡지 않으면 분류되지 않은 예외로 샌다."""
+    def slow(*a, **k):
+        raise httpx.TimeoutException("too slow")
+
+    with pytest.raises(Transient, match="시간 초과"):
+        _post(slow)
+
+
+def test_POST_응답이_JSON이_아니면_영구다():
+    """프록시나 점검 페이지가 200에 HTML을 실어 보내는 경우다.
+    그냥 .json()을 부르면 JSONDecodeError가 분류 없이 새어 나간다.
+    """
+    with pytest.raises(Permanent, match="JSON"):
+        _post(lambda *a, **k: _post_response(200, text="<html>maintenance</html>"))

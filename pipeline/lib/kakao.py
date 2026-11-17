@@ -10,10 +10,9 @@ access_token은 6시간(21,599초)이고 refresh_token은 **60일**이다
 파이프라인에서는 access_token을 매번 새로 받고 refresh_token은 그대로
 쓴다 — 회전될 때만 저장한다(`should_store` 참조).
 
-`lib/http.py`의 `fetch`를 쓰지 않는 이유: 그쪽은 GET 전용이다(`_httpx_get`).
-토큰 교환은 폼 POST라서 전송 계층을 따로 둔다. 다만 **실패 분류 규칙은
-공유한다** — `classify_status`를 그대로 부른다. 규칙이 두 곳에 있으면
-한쪽만 고치는 날이 온다.
+HTTP는 `lib/http.py`의 `post_form`에 맡긴다. 전송과 실패 분류가 거기
+한곳에 있어야 "403을 어디선 재시도하고 어디선 안 하는" 일이 생기지 않는다.
+이 파일은 **카카오 규약**만 안다 — 폼 필드 이름, 토큰 회전 규칙.
 """
 
 from __future__ import annotations
@@ -21,18 +20,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-import httpx
-
-from pipeline.lib.http import classify_status
-from pipeline.lib.retry import Permanent, Transient
+from pipeline.lib.http import DEFAULT_TIMEOUT, FORM, post_form
+from pipeline.lib.retry import Permanent
 
 TOKEN_URL = "https://kauth.kakao.com/oauth/token"
-FORM = "application/x-www-form-urlencoded;charset=utf-8"
-
-# 토큰 교환은 한 번에 끝나야 한다. fetch의 20초와 같게 둔다.
-TOKEN_TIMEOUT = 20.0
-
-PostFn = Callable[..., httpx.Response]
 
 
 @dataclass(frozen=True)
@@ -41,56 +32,6 @@ class KakaoTokens:
     # 기존 만료가 1개월 미만일 때만 온다. **안 오는 것이 정상이다.**
     refresh_token: str | None = None
     refresh_token_expires_in: int | None = None
-
-
-def _httpx_post(
-    url: str, data: dict[str, str], headers: dict[str, str], timeout: float
-) -> httpx.Response:
-    return httpx.post(url, data=data, headers=headers, timeout=timeout)
-
-
-def post_form(
-    url: str,
-    *,
-    data: dict[str, str],
-    headers: dict[str, str],
-    timeout: float = TOKEN_TIMEOUT,
-    send: PostFn = _httpx_post,
-) -> dict:
-    """폼을 POST하고 JSON을 돌려준다. 실패는 분류해 던진다.
-
-    `send`는 테스트에서 갈아끼우는 자리다. `http.fetch`의 `get`과 같은
-    방식이다 — 실패 경로를 실제 네트워크 없이 확인할 수 있어야 한다.
-    """
-    try:
-        response = send(url, data, headers, timeout)
-    except httpx.TimeoutException as error:
-        raise Transient(f"{url} 시간 초과: {error}") from error
-    except httpx.RequestError as error:
-        raise Transient(
-            f"{url} 전송 실패: {type(error).__name__}: {error}"
-        ) from error
-
-    # **스스로 던진다.** `raise classify_status(...)`가 아니다 — 반환값이
-    # None이라 2xx에서 `raise None`이 되어 TypeError로 바뀐다.
-    #
-    # 본문을 detail에 싣되 자른다. 카카오 에러 본문은 짧지만, 프록시가
-    # HTML 페이지를 돌려주면 로그가 그것으로 덮인다.
-    classify_status(
-        response.status_code,
-        url=url,
-        detail=response.text[:200],
-    )
-
-    try:
-        return response.json()
-    except ValueError as error:
-        # 점검 페이지나 프록시가 200에 HTML을 실어 보내는 경우다.
-        # 그냥 두면 JSONDecodeError가 분류 없이 새어 나간다.
-        raise Permanent(
-            f"{url} 응답이 JSON이 아니다 (HTTP {response.status_code}): "
-            f"{response.text[:200]}"
-        ) from error
 
 
 def access_token(
@@ -110,7 +51,7 @@ def access_token(
             "refresh_token": refresh_token,
         },
         headers={"Content-Type": FORM},
-        timeout=TOKEN_TIMEOUT,
+        timeout=DEFAULT_TIMEOUT,
     )
 
     # 카카오는 HTTP 200으로 `{"error": "invalid_grant"}`를 돌려줄 수 있다.

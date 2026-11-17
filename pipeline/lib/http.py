@@ -136,3 +136,62 @@ def fetch(
         final_url=str(response.url),
         moved_from=moved_from,
     )
+
+
+# --- 폼 POST ---
+#
+# fetch는 GET 전용이다(_httpx_get). 카카오 토큰 교환·카카오 발송은 폼
+# POST라서 전송 계층이 따로 필요하다. **분류 규칙은 위의 classify_status를
+# 그대로 쓴다** — 이 모듈 머리말이 말하는 "한곳"이 여기다.
+
+# 폼 POST의 Content-Type. 카카오는 토큰·발송 둘 다 이것만 받는다
+# (본문 전체를 JSON으로 보내면 거부한다).
+FORM = "application/x-www-form-urlencoded;charset=utf-8"
+
+PostFn = Callable[..., httpx.Response]
+
+
+def _httpx_post(
+    url: str, data: dict[str, str], headers: dict[str, str], timeout: float
+) -> httpx.Response:
+    return httpx.post(url, data=data, headers=headers, timeout=timeout)
+
+
+def post_form(
+    url: str,
+    *,
+    data: dict[str, str],
+    headers: dict[str, str],
+    timeout: float = DEFAULT_TIMEOUT,
+    send: PostFn = _httpx_post,
+) -> dict:
+    """폼을 POST하고 JSON을 돌려준다. 실패는 분류해 던진다.
+
+    `send`는 테스트에서 갈아끼우는 자리다. `fetch`의 `get`과 같은 방식이다
+    — 실패 경로를 실제 네트워크 없이 확인할 수 있어야 한다.
+    """
+    try:
+        response = send(url, data, headers, timeout)
+    except httpx.TimeoutException as error:
+        raise Transient(f"{url} 시간 초과: {error}") from error
+    except httpx.RequestError as error:
+        raise Transient(
+            f"{url} 전송 실패: {type(error).__name__}: {error}"
+        ) from error
+
+    # **스스로 던진다.** `raise classify_status(...)`가 아니다 — 반환값이
+    # None이라 2xx에서 `raise None`이 되어 TypeError로 바뀐다.
+    #
+    # 본문을 detail에 싣되 자른다. 카카오 에러 본문은 짧지만, 프록시가
+    # HTML 페이지를 돌려주면 로그가 그것으로 덮인다.
+    classify_status(response.status_code, url=url, detail=response.text[:200])
+
+    try:
+        return response.json()
+    except ValueError as error:
+        # 점검 페이지나 프록시가 200에 HTML을 실어 보내는 경우다.
+        # 그냥 두면 JSONDecodeError가 분류 없이 새어 나간다.
+        raise Permanent(
+            f"{url} 응답이 JSON이 아니다 (HTTP {response.status_code}): "
+            f"{response.text[:200]}"
+        ) from error
