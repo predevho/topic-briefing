@@ -1420,6 +1420,23 @@ print('보냈다. 슬랙 채널을 확인한다.')
 
 Expected: 슬랙 채널에 메시지가 뜬다
 
+> **2026-11-17 실측.**
+>
+> | 보낸 곳 | 결과 |
+> |---|---|
+> | 실제 웹훅 | 슬랙이 `ok`로 답했다 — 도착 |
+> | 비밀 부분만 틀린 웹훅 | `Permanent: Slack webhook HTTP 403 — invalid_token` |
+>
+> 틀린 비밀은 404가 아니라 **403 `invalid_token`**이다(테스트의 예시는 404
+> `no_service` — 폐기된 웹훅의 응답이다). 어느 쪽이든 4xx라 `Permanent`로
+> 올라가고, 메시지에 웹훅 경로가 없다는 것을 실제 응답으로 확인했다.
+>
+> 슬랙 앱 화면이 바뀌었다(2026-11 기준). "Create New App"의 선택지가
+> AI agent / Starter app / Paste a manifest / **Pick features**이고, 오른쪽에
+> 코딩 에이전트용 프롬프트가 뜬다. 웹훅만 필요하면 **Pick features**로 앱을
+> 만든 뒤 `https://api.slack.com/apps/<앱 ID>/incoming-webhooks`에서 켠다.
+> 에이전트 프롬프트는 Bolt 앱 프로젝트를 만드는 것이라 쓰지 않는다.
+
 - [ ] **Step 6: 커밋**
 
 ```bash
