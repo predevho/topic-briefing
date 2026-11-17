@@ -81,7 +81,7 @@ anon의 INSERT 정책을 `with check (user_id is null)`로 좁혔다. 인증을 
 │ → summarize → render → notify               │
 └──────┬──────────────┬───────────────┬───────┘
        │              │               │
-  Supabase       docs/data/*.json   카카오톡 (+ 슬랙 경고)
+  Supabase ◄───────── 페이지가 직접 조회   카카오톡 (+ 슬랙 경고)
  (토큰/본문/       → GitHub Pages
   좋아요/클릭)          ↑
        ↑                │
@@ -97,7 +97,7 @@ collect.py    → raw.json        (수집 원본, 수십~수백 건)
 rank.py       → ranked.json     (전체 점수 + 상위 10건)
 enrich.py     → articles.json   (본문 확보한 10건)
 summarize.py  → briefing.json   (임계값 통과분, 최대 7건)
-render.py     → docs/data/YYYY-MM-DD.json
+(render 단계는 없다 — 페이지가 Supabase를 직접 조회한다)
 notify.py     → Sender 목록으로 전송 (카카오톡 / 슬랙 경고)
 ```
 
@@ -172,7 +172,6 @@ Cloudflare Workers는 검토 후 제외했다. 무료 플랜 subrequest 50개 �
 │   ├── rank.py
 │   ├── enrich.py
 │   ├── summarize.py
-│   ├── render.py
 │   ├── notify.py
 │   ├── prune.py            # 중간 산출물 90일 정리
 │   ├── report_failure.py
@@ -410,18 +409,11 @@ Sender 프로토콜 (name, send(briefing, raw))
 
 ### 6.4 웹페이지
 
-> **2026-11-13 개정 — 이 절의 데이터 경로가 바뀌었다.** 계획 2가 정적
-> JSON(`docs/data/*.json`) 대신 **브라우저가 Supabase를 직접 조회하는**
-> 방식을 택했다. 이 절의 결정적 이유(파이프라인과 프론트엔드의 분리)는
-> 그대로이고 **수단만 바뀌었다** — 직접 조회는 그 분리를 더 강하게
-> 지킨다(리포지토리에 매일 커밋되는 것이 없다). 이 절이 `docs/data/`를
-> 적은 것은 당시 직접 조회를 선택지로 올리지 않았기 때문이고, 그 비교는
-> `design/superpowers/plans/2026-11-12-briefing-page.md`의 "개정 이력"에
-> 있다. 아래 본문은 Task 15 Step 5에서 갱신한다.
-
 **구조: 한 번 빌드한 SPA + JSON 런타임 불러오기.**
 
-React 앱은 코드가 바뀔 때만 빌드한다. 파이프라인은 `docs/data/YYYY-MM-DD.json`만 떨어뜨리고, 앱이 경로의 날짜를 보고 해당 JSON을 불러온다.
+React 앱은 코드가 바뀔 때만 빌드한다. 파이프라인은 **Supabase에만 쓰고**, 앱이 경로의 날짜를 보고 그 날짜를 직접 조회한다. 리포지토리에 매일 커밋되는 것이 없다.
+
+> **2026-11-13 개정.** 초판은 `docs/data/YYYY-MM-DD.json`을 만들어 fetch하는 방식이었다. 이 절이 비교한 것은 "매일 전체 빌드" 대 "런타임 불러오기"였고 **"Supabase 직접 조회"는 선택지에 올리지 않았다.** 결정적 이유(파이프라인과 프론트엔드의 분리)는 그대로이고 수단만 바뀌었다 — 직접 조회는 그 분리를 더 강하게 지킨다. 그 비교는 계획 2의 "개정 이력"에 있다.
 
 매일 전체 빌드 방식을 택하지 않은 **결정적 이유는 파이프라인과 프론트엔드의 분리**다. 매일 빌드하면 "오늘 브리핑을 보내는 일"이 "React 빌드가 성공하는 일"에 묶여서, `package.json` 의존성 하나가 깨지면 카톡이 오지 않는다. 분리하면 프론트엔드가 망가져도 전송은 되고 데이터는 쌓인다. 부수 효과로 아카이브가 1000일이 되어도 배포 비용이 불변이고, 과거 페이지를 매일 재생성하지 않는다.
 
@@ -489,7 +481,7 @@ runs            -- 실행 이력
 - 파이프라인은 `SUPABASE_SECRET_KEY`(쓰기), 브라우저는 `VITE_SUPABASE_PUBLISHABLE_KEY`를 쓴다. 키를 분리하는 것이 RLS가 실제로 작동하는 전제다.
 - **`robots.txt` + `noindex` 메타 태그로 검색 색인을 차단한다.** GitHub Pages는 검색엔진에 색인되므로, 이것이 없으면 "아무도 모르는 URL"이라는 전제가 깨진다.
 
-**리포지토리는 퍼블릭이다.** GitHub Pages는 무료 플랜에서 퍼블릭 리포만 지원하고, 이 설계는 비밀값을 리포에 두지 않으므로(전부 Actions Secrets와 Supabase) 퍼블릭이 안전하다. 단 한 가지 규칙이 따라붙는다 — **`articles.body`는 Supabase에만 존재하고 리포에 커밋되지 않는다.** `docs/data/*.json`에는 요약·헤드라인·링크만 담고 본문은 넣지 않는다. 이것이 7.2의 본문 비공개 원칙이 퍼블릭 리포에서도 성립하는 조건이다.
+**리포지토리는 퍼블릭이다.** GitHub Pages는 무료 플랜에서 퍼블릭 리포만 지원하고, 이 설계는 비밀값을 리포에 두지 않으므로(전부 Actions Secrets와 Supabase) 퍼블릭이 안전하다. 단 한 가지 규칙이 따라붙는다 — **`articles.body`는 Supabase에만 존재하고 리포에 커밋되지 않는다.** **리포지토리에 기사 데이터를 아무것도 커밋하지 않는다** — 페이지가 Supabase를 직접 조회하므로 담을 파일 자체가 없다. 이것이 7.2의 본문 비공개 원칙이 퍼블릭 리포에서도 성립하는 조건이고, 초판의 "요약만 담는다"보다 강한 보장이다.
 
 좋아요에 추가 인증(비밀 키, 익명 인증)을 두지 않는다. 위협 모델상 이 URL이 노출될 경로는 내가 공유하는 경우뿐이고, 신호 오염이 생기면 Phase 2에서 바로 드러나 그때 대응할 수 있다. 반면 본문 차단과 색인 차단은 되돌리기 어려우므로 그쪽에 노력을 쓴다.
 
@@ -522,7 +514,6 @@ runs            -- 실행 이력
 ### 7.5 데이터 보존
 
 - `data/` 중간 산출물: `.gitignore` 처리. **90일 경과분 삭제.**
-- `docs/data/*.json`: 영구 보관 (커밋). 건당 수 KB.
 - Supabase: 본문 포함 연 약 30MB. 무료 티어 500MB 안. **무료 프로젝트는 1주일 비활성 시 일시정지되지만 매일 쓰므로 해당하지 않는다.**
 
 ## 8. 에러 처리와 운영
@@ -646,7 +637,6 @@ jobs:
       - run: python -m pipeline.notify
       - if: failure()
         run: python -m pipeline.report_failure
-      # 마지막: docs/ 커밋·푸시
 ```
 
 정각(`0 * * * *`)을 피한 이유는 GitHub Actions cron이 정각에 전 세계 작업이 몰려 지연이 가장 크기 때문이다.
@@ -711,7 +701,7 @@ def test_분류되지_않은_예외는_삼키지_않는다()
 5. **`rank.py` + `evaluate.py`** — 시드 데이터로 선별 프롬프트 튜닝
 6. **`collect.py` / `enrich.py` / `summarize.py`**
 7. **`notify.py` + `lib/sender.py`의 `ConsoleSender`** — 여기까지면 로컬에서 브리핑이 터미널에 나오고 발행 이력이 쌓인다. **큐레이션 품질 튜닝을 여기서 끝낸다**
-8. **`render.py` + React 앱** (좋아요·클릭 저장 포함)
+8. **React 앱** (Supabase 직접 조회 + 인증 + 좋아요·클릭·메모 저장)
 9. **`KakaoSender`**(토큰 최초 인증 포함) + **`SlackSender`**(경고 전용) — 페이지가 있어야 "전체 보기" 버튼이 성립하므로 8 다음이다
 10. **`lib/guard.py`** + 실패 리포트
 11. **Actions 워크플로** + `prune.py`

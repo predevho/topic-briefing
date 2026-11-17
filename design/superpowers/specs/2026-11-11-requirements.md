@@ -97,12 +97,12 @@
 | O6 | 카톡 텍스트 템플릿 200자, 상위 5건 + "외 N건" | 6.1 | 계획 3 `KakaoSender` | 계획 3 | ⏳ |
 | O7 | 카톡 토큰 갱신 (`refresh_token_expires_in` 저장) | 6.3 | 계획 3 `lib/kakao` | 계획 3 | ⏳ |
 | O8 | 슬랙은 경고 전용 (브리핑 전문 미발송) | 6.2 | 계획 3 `SlackSender` | 계획 3 | ⏳ |
-| O9 | 웹페이지: 오늘자 + 날짜별 아카이브 | 6.4 | 계획 2 Task 7·8 | 계획서 작성 완료 (2026-11-12) | ⏳ |
-| O10 | 모바일 1열 / 태블릿 이상 2열 | 6.4 | 계획 2 Task 7 | `md:grid-cols-2` + Task 13 Step 4에서 실제 확인 | ⏳ |
-| O11 | SPA + JSON 런타임 로딩 (파이프라인과 프론트 분리) | 6.4 | 계획 2 Task 2·5 | Task 14 Step 1 — 빌드 없이 JSON만 커밋해 새 날짜가 보이는지 확인 | ⏳ |
-| O12 | GitHub Pages SPA 라우팅 (`404.html` 폴백) | 6.4 | 계획 2 Task 9 | 라우터 의존성 없이 `location.pathname`을 읽는다 — `404.html`이 `index.html` 복사본이면 그대로 동작한다 | ⏳ |
-| O13 | 좋아요·클릭·메모 저장 | 7.3 | 계획 2 Task 10·11 | **anon은 INSERT만 가능**(계획 1 실측). 좋아요는 추가 전용 + `localStorage`, 메모는 추가 전용 + 최신 행 읽기 | ⏳ |
-| O14 | 페이지 색 규칙: accent는 상호작용에만 | 목업 | 계획 2 Task 4 | `--color-accent: #9A5B3C`. 쓰는 곳은 좋아요·메모 버튼·링크뿐 | ⏳ |
+| O9 | 웹페이지: 오늘자 + 날짜별 아카이브 | 6.4 | 계획 2 Task 7·8 | **2026-11-17 실측** — 배포된 URL에서 `/`(7건), `/2026-11-12`, `/archive`(발행 2일·총 7건) 확인 | ✅ |
+| O10 | 모바일 1열 / 태블릿 이상 2열 | 6.4 | 계획 2 Task 7 | **2026-11-17 실측** — 1024px 2열, 375px 1열, 가로 넘침 없음 | ✅ |
+| O11 | **SPA + 런타임 조회** (파이프라인과 프론트 분리) | 6.4 | 계획 2 Task 5 | 페이지가 Supabase를 직접 조회하므로 파이프라인은 DB에만 쓴다. **수단이 바뀌었고 의도는 그대로다** — 초판의 `docs/data/*.json`은 만들지 않는다. 빌드·커밋 없이 DB에 넣은 행이 페이지에 보이는 것을 2026-11-17에 실측 | ✅ |
+| O12 | GitHub Pages SPA 라우팅 (`404.html` 폴백) | 6.4 | 계획 2 Task 9 | 라우터 의존성 없이 `location.pathname`을 읽는다. **2026-11-17 실측** — Pages가 없는 경로에 HTTP 404 + `404.html`을 주고 앱이 그대로 뜬다 | ✅ |
+| O13 | 좋아요·클릭·메모 저장 | 7.3 | 계획 2 Task 11·12 | **인증 후 `auth.uid() = user_id` RLS.** 좋아요는 **토글**(삽입·삭제), 메모는 추가 전용 + 최신 행 읽기. 2026-11-17에 실제로 눌러 DB 행 생성·삭제를 확인 | ✅ |
+| O14 | 페이지 색 규칙: accent는 상호작용에만 | 목업 | 계획 2 Task 4 | `--color-accent: #9A5B3C`. 쓰는 곳은 좋아요·메모·로그인 버튼과 에러 화면 링크뿐. `@theme static`이 필요하다 — 그냥 `@theme`이면 인라인 `var()`로만 쓰는 토큰이 조용히 빠진다 | ✅ |
 
 ---
 
@@ -112,12 +112,12 @@
 |---|---|---|---|---|---|
 | D1 | 본문 전문을 1일차부터 적재한다 (Phase 3 대비) | 2장 | `article_bodies` + `save_articles` | Task 22 Step 5 — `articles`와 `article_bodies` 건수 일치 확인 | 🔍 |
 | D2 | **본문은 공개되지 않는다** | 7.2 | `article_bodies`에 anon 권한 없음 | `scripts/verify_anon_access.sh` — **재실행 가능**. 2026-11-11 실측 통과 (401/`42501`) | ✅ |
-| D3 | 본문은 리포지토리에 커밋되지 않는다 | 7.2 | 계획 2 Task 2 — `render`가 `articles`를 읽고 `PAGE_FIELDS`로 거른다 | **구조적으로 보장된다**: `articles` 테이블에 본문 컬럼이 아예 없다(본문은 `article_bodies`). `test_본문과_판단근거는_담지_않는다` | ⏳ |
-| D4 | 검색 색인 차단 (`robots.txt` + `noindex`) | 7.2 | 계획 2 Task 4·12 | 둘 다 둔다 — `robots.txt`는 크롤링을, 메타는 이미 수집된 페이지의 색인을 막는다 | ⏳ |
+| D3 | 본문은 리포지토리에 커밋되지 않는다 | 7.2 | 계획 2 Task 5 | **구조적으로 더 강해졌다**: 기사 데이터를 **아무것도** 커밋하지 않는다. 페이지가 Supabase를 직접 조회하므로 `docs/data/`가 없다. 덧붙여 `articles` 테이블에 본문 컬럼이 아예 없다 | ✅ |
+| D4 | 검색 색인 차단 (`robots.txt` + `noindex`) | 7.2 | 계획 2 Task 3·13 | 둘 다 둔다. **2026-11-17 실측** — 배포된 `/robots.txt`가 `Disallow: /`, `/`의 메타가 `noindex, nofollow, noarchive` | ✅ |
 | D5 | secret 키와 publishable 키를 분리한다 | 7.2 | `.env`의 `SUPABASE_SECRET_KEY` / `VITE_SUPABASE_PUBLISHABLE_KEY` | `verify_anon_access.sh` 0번 — secret 키로 돌리면 거부하고 종료한다 | ✅ |
 | D6 | 실행 이력으로 윈도우·멱등성·소스 감지를 지탱한다 | 7.1 | `runs` | `test_실행_이력을_남긴다` 외 | ✅ |
 | D7 | 전송 실패한 실행도 기록한다 | ERD 4.3 | `runs.status` | `test_전부_실패해도_실패_상태로_기록한다` | ✅ |
-| D8 | 0건인 날의 후보 수·최고 점수를 남긴다 | ERD 4.2 | `runs.considered_count`, `max_score` | `test_수집_후보_최고점수를_이력에_남긴다` | ✅ |
+| D8 | 0건인 날의 후보 수·최고 점수를 남긴다 | ERD 4.2 | `runs.considered_count`, `max_score` | `test_수집_후보_최고점수를_이력에_남긴다`. **계획 2 Task 2가 `runs.briefing_date`를 더해 페이지가 이 데이터에 도달한다** — 없으면 0건인 날이 아카이브에서 사라지고 화면이 "수집 0건"이라 거짓말한다. 2026-11-17 실측 | ✅ |
 | D9 | 모든 시각은 UTC로 저장, KST로 표시 | 7.4 | `lib/timeutil` | `test_published_타임존이_UTC로_정규화된다`, `test_타임존이_없으면_UTC로_간주한다` | ✅ |
 | D10 | 타임존 없는 값을 거부한다 (조용한 오차 방지) | 7.4 | `timeutil._require_aware` | `test_윈도우_경계가_타임존_없는_값을_거부한다` | ✅ |
 | D11 | 중간 산출물 90일 정리, 시드는 보호 | 7.5 | `prune.py` | `test_시드_디렉터리는_절대_지우지_않는다` | ✅ |

@@ -38,6 +38,19 @@ python -m pipeline.summarize    # 요약  → briefing.json
 python -m pipeline.notify       # 터미널 출력 + 발행 이력 기록
 ```
 
+**페이지는 아무것도 하지 않아도 갱신된다.** `notify`가 Supabase에 쓰면
+페이지가 열릴 때 직접 조회한다 — 빌드도 커밋도 필요 없다(스펙 6.4의 분리).
+
+> <https://predevho.github.io/topic-briefing/>
+
+프론트엔드 **코드**를 바꿨을 때만 배포한다.
+
+```bash
+cd web && npm run build && cd ..
+bash scripts/verify_bundle.sh                  # secret 키가 안 섞였는지
+git add docs/ && git commit -m "build: 페이지 갱신" && git push
+```
+
 각 단계는 **단독 재실행이 가능하다.** 요약 프롬프트를 고쳤으면
 `python -m pipeline.summarize`만 다시 돌린다 — 수집과 선별 비용이 들지 않는다.
 단계 사이의 JSON이 그래서 있다.
@@ -71,6 +84,15 @@ python -m pipeline.evaluate --date 2026-11-12     # 실제 하루로 (물량)
 `SCORE_THRESHOLD`는 실제 수집 쪽으로 판단한다.
 
 ## 점검
+
+```bash
+bash scripts/verify_anon_access.sh   # anon 권한 (14개 항목)
+bash scripts/verify_bundle.sh        # 번들에 비밀이 섞였는지 (5개 항목)
+```
+
+`verify_bundle.sh`는 `grep sb_secret_`으로 보지 않는다 — supabase-js 자신이
+키 형식을 판별하려고 그 리터럴을 들고 있어서 **항상 걸린다.** `.env`의 실제
+키 값으로 대조한다.
 
 ```bash
 pytest                              # 전체 테스트 (396개)
