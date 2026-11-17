@@ -1107,10 +1107,42 @@ git commit -m "feat: KakaoSender — 200자 조립과 외 N건 접기"
 > 했지만, **카카오가 실제로 어느 단위로 세고 200이 포함인지는 모른다.**
 > 보수적으로 센 것이지 확인한 것이 아니다.
 >
-> 그래서 Step 3에 경계 발송을 하나 넣는다 — `kakao_len`이 정확히 200인
-> 본문을 보내 본다. 통과하면 상한이 포함이고 단위 가정이 안전하다는 뜻이다.
-> 거부되면 `KAKAO_MAX_TEXT`를 내려야 하고, **그건 지금 알아야 한다** —
-> 발행 12건에 헤드라인이 전부 30자인 날 아침에 알 일이 아니다.
+> 그래서 `--boundary` 모드를 넣는다 — `kakao_len`이 정확히 200인 본문을
+> 보내 본다. 거부되면 `KAKAO_MAX_TEXT`를 내려야 하고, **그건 지금 알아야
+> 한다** — 발행 12건에 헤드라인이 전부 30자인 날 아침에 알 일이 아니다.
+
+> **2026-11-17 실측 결과.**
+>
+> | 보낸 것 | `len()` | `kakao_len` | API |
+> |---|---|---|---|
+> | 실제 브리핑 (11/12, 발행 7건) | 173 | 174 | 통과 |
+> | 경계 본문 | 199 | **200** | **통과** |
+>
+> **상한 200은 포함이다.** UTF-16 셈이 안전하다 — `KAKAO_MAX_TEXT`를 내릴
+> 필요가 없다. (거부라면 400이 와서 `post_form`이 `Permanent`로 멈춘다.)
+>
+> 경계를 만드는 조합은 **하나뿐이다**: 헤드라인 30자 × 5건 + 발행 12건.
+> 29자면 196, 31자면 5건이 안 들어가 170으로 떨어진다.
+>
+> **고친 것 셋.**
+>
+> 1. **스크립트가 운영 경로를 쓰지 않았다.** 원래 `httpx.post`를 직접
+>    불렀다. 그러면 "스크립트는 되는데 파이프라인은 안 되는" 상태를 못
+>    잡는다 — 바로 Task 5에서 고친 날짜 버그가 그런 종류다. 이제
+>    `kakao.access_token`과 `KakaoSender`를 그대로 쓴다.
+>
+> 2. **날짜 변환을 실제 발송으로 검증한다.** 스크립트가 `Briefing`을 꾸밀 때
+>    `window_end`를 **UTC 22:20**으로 둔다(= cron 시각). `briefing_date`를
+>    그대로 넣으면 Task 5에서 고친 버그를 영원히 못 잡는다.
+>    실측: `2026-11-11T22:20:00+00:00` → 카톡에 `11/12`가 찍혔다.
+>
+> 3. **회전된 refresh_token을 실제로 저장한다.** 원래는 "저장이 필요하다"고
+>    출력만 했다. 이 스크립트가 secret 키를 쥔 유일한 곳이라 여기서
+>    `should_store`가 참이면 `kakao_auth`를 갱신한다. 출력만 하고 넘기면
+>    한 달 뒤 조용히 로그인이 끊긴다.
+>
+> `RawBundle`에 `source_counts`가 필수다(소스 침묵 감지용). 빼면 pydantic이
+> 거부한다 — 발송 전에 멈추므로 안전한 실패다.
 
 **Files:**
 - Modify: `scripts/kakao_send_test.py` (실제 브리핑으로 보내도록)
@@ -1142,14 +1174,20 @@ print(f"   text 길이: {len(text)}자 (상한 200)")
 
 `template["text"] = text`로 바꾸고 `link`는 `.env`의 `PAGE_URL`을 그대로 쓴다.
 
-- [ ] **Step 2: 보낸다**
+- [ ] **Step 2: 보낸다 — 두 번**
 
 ```bash
 cd "$(git rev-parse --show-toplevel)"
 .venv/bin/python -u scripts/kakao_send_test.py
 ```
 
-Expected: `result_code: 0`, `text 길이`가 200 이하
+```bash
+cd "$(git rev-parse --show-toplevel)"
+.venv/bin/python -u scripts/kakao_send_test.py --boundary
+```
+
+Expected: 둘 다 예외 없이 끝난다. `kakao_len`이 각각 174, 200.
+거부되면 `post_form`이 `Permanent`로 멈춘다 — 조용히 넘어가지 않는다.
 
 - [ ] **Step 3: 폰에서 두 링크를 모두 누른다**
 
