@@ -13,13 +13,36 @@ SlackSender가 추가된다.
 """
 
 import argparse
-from datetime import datetime, timezone
+import sys
+from datetime import date, datetime, timezone
+from typing import Callable
 
-from pipeline.lib.secrets import require
-from pipeline.lib.sender import ConsoleSender, Sender
+from pipeline.lib.guard import (
+    BUDGET_WARN_RATIO,
+    SPIKE_FACTOR,
+    load_seed_last_seen,
+    month_cost_usd,
+    silent_sources,
+    token_expiring,
+    token_spike,
+)
+from pipeline.lib.config import Source, load_sources
+from pipeline.lib.http import post_json
+from pipeline.lib.kakao import KakaoTokens, access_token, rotated_expiry, should_store
+from pipeline.lib.llm import MODEL
+from pipeline.lib.retry import Permanent, Transient
+from pipeline.lib.secrets import optional, require
+from pipeline.lib.sender import ConsoleSender, KakaoSender, Sender
+from pipeline.lib.slack import SlackSender
 from pipeline.lib.store import LocalStore, RemoteStore, SupabaseStore
 from pipeline.lib.timeutil import KST
 from pipeline.models import Briefing, RankedBundle, RawBundle
+
+# 가드가 읽는 실행 이력의 길이. 최고 침묵 임계값(200일)보다 길어야 한다 —
+# 짧으면 그보다 오래된 양수를 못 보고 시드 날짜로 물러서 경과일이 부푼다.
+GUARD_LOOKBACK_DAYS = 400
+
+Warn = Callable[[str], None]
 
 
 class AlreadySentError(RuntimeError):
@@ -44,8 +67,16 @@ def notify(
     senders: list[Sender],
     force: bool = False,
     now: datetime | None = None,
+    warn: Warn | None = None,
+    sources: list[Source] | None = None,
+    budget_usd: float | None = None,
 ) -> None:
-    """센더로 내보내고 이력을 남긴다. 0건도 내보내고, 실패해도 기록한다."""
+    """센더로 내보내고 이력을 남긴다. 0건도 내보내고, 실패해도 기록한다.
+
+    `warn`을 주면 가드(침묵·토큰 만료·크레딧)를 돌리고, 센더 실패와 페이지 저장
+    실패도 경고로 낸다. 경고는 **브리핑을 막지 않는다** — 가드나 경고 채널이
+    터져도 발송과 기록은 그대로 간다.
+    """
     if not senders:
         raise ValueError(
             "센더가 하나도 없다. 설정 실수로 아무 데도 보내지 않는 것을 막는다."
@@ -95,7 +126,36 @@ def notify(
                 f"다시 보내려면 --force를 쓴다."
             )
 
-    # 센더는 서로 독립이다. 계획 3에서 카톡 토큰이 만료돼도 슬랙은 가야 한다.
+    def alert(line: str) -> None:
+        """경고 하나를 낸다. 경고 채널이 터져도 브리핑은 계속한다."""
+        if warn is None:
+            return
+        try:
+            warn(line)
+        except Exception as problem:  # noqa: BLE001 — 경고가 브리핑을 막으면 안 된다
+            print(f"경고 전달 실패(브리핑은 계속한다): {problem} — {line}", file=sys.stderr)
+
+    # 가드는 브리핑과 독립이다. 터져도 발송을 막지 않는다 — 경고 때문에
+    # 브리핑이 안 가면 주객이 전도된다. AlreadySent 검사 **뒤**에 두는 이유:
+    # 재실행이 같은 경고를 또 보내면 그것도 알림 피로다.
+    if warn is not None:
+        try:
+            lines = guard_warnings(
+                remote=remote,
+                sources=sources or [],
+                today=date.fromisoformat(briefing_date),
+                today_counts=raw.source_counts,
+                today_input=totals.input if totals else 0,
+                budget_usd=budget_usd,
+                now=moment,
+            )
+        except Exception as problem:  # noqa: BLE001
+            # 가드 자체의 실패도 조용히 삼키지는 않는다 — 경고로 알린다.
+            lines = [f"가드 실행 실패(브리핑은 나갔다): {type(problem).__name__}: {problem}"]
+        for line in lines:
+            alert(line)
+
+    # 센더는 서로 독립이다. 카톡이 실패해도 콘솔·기록은 가야 한다.
     delivered: list[str] = []
     failures: list[dict] = []
 
@@ -109,6 +169,10 @@ def notify(
                 "kind": "config",
                 "message": f"{type(error).__name__}: {error}",
             })
+            # ConsoleSender는 항상 성공하므로 카톡이 실패해도 실행은 'sent'로
+            # 끝난다. runs.errors에만 남기면 아무도 모른다 — 카톡이 안 갔을 때
+            # 알리는 것이 슬랙의 존재 이유다.
+            alert(f"전송 실패: {sender.name} — {type(error).__name__}: {error}")
 
     if not delivered:
         # 아무 데도 못 보냈다. status='failed'로 **기록은 남기고** 예외를 올린다.
@@ -139,10 +203,162 @@ def notify(
                 "kind": "transient",
                 "message": f"{type(error).__name__}: {error}",
             })
+            alert(
+                f"페이지 저장 실패 — 오늘 브리핑이 카톡에는 갔지만 페이지에 없다: "
+                f"{type(error).__name__}: {error}"
+            )
 
     # 0건이어도 반드시 남긴다. 남기지 않으면 다음 윈도우가 계속 늘어나
     # 같은 항목을 반복 평가하게 된다.
     record("sent", moment, failures)
+
+
+def read_budget(raw: str | None, warn: Warn) -> float | None:
+    """MONTHLY_BUDGET_USD를 읽는다. 없으면 None(예산 경고만 생략).
+
+    숫자가 아니면 None으로 두되 **알린다.** 오타("$30")로 예산 경고가 조용히
+    꺼지면, 꺼졌다는 사실을 아무도 모른다.
+    """
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        warn(f"MONTHLY_BUDGET_USD가 숫자가 아니다({raw!r}) — 예산 경고가 꺼져 있다. 예: 30")
+        return None
+
+
+def guard_warnings(
+    *,
+    remote: RemoteStore,
+    sources: list[Source],
+    today: date,
+    today_counts: dict[str, int],
+    today_input: int,
+    budget_usd: float | None,
+    now: datetime,
+    seed: dict[str, date] | None = None,
+) -> list[str]:
+    """가드 셋(침묵·토큰 만료·크레딧)을 돌려 사람이 읽을 줄로 만든다.
+
+    가치 순서는 소스 침묵 > 토큰 만료 > 크레딧이다(스펙 8.4).
+    """
+    lines: list[str] = []
+    runs = remote.recent_runs(days=GUARD_LOOKBACK_DAYS)
+
+    # --- 소스 침묵 ---
+    # **오늘 수집분을 더한다.** 가드는 오늘 실행 기록을 남기기 전에 돈다.
+    # 빼면 30일 조용하던 소스가 오늘 글을 썼는데도 오늘 아침 "30일째"가 뜬다.
+    #
+    # **seed를 반드시 쓴다.** 빠뜨리면 runs가 시작되기 전부터 조용하던 소스를
+    # 영원히 못 잡는다(Task 8 — 2026-11-17 하이퍼커넥트 209일).
+    with_today = runs + [{"briefing_date": today.isoformat(), "source_counts": today_counts}]
+    for name, gap, limit in silent_sources(
+        sources, with_today, today=today,
+        seed=load_seed_last_seen() if seed is None else seed,
+    ):
+        lines.append(f"소스 침묵: {name} — {gap}일째 (기준 {limit}일)")
+
+    # --- 카카오 토큰 만료 ---
+    found = remote.kakao_refresh_token()
+    if found is not None:
+        left = token_expiring(found[1], now=now)
+        if left is not None:
+            when = f"{left}일 남음" if left >= 0 else f"{-left}일 지남"
+            lines.append(
+                f"카카오 토큰 만료 {when} — "
+                "`.venv/bin/python scripts/kakao_auth.py`로 재발급한다"
+            )
+
+    # --- 크레딧 ---
+    # 그 달은 KST 기준이다 — briefing_date가 KST 날짜다.
+    if budget_usd is not None:
+        month = today.isoformat()[:7]
+        spent = month_cost_usd(
+            [r for r in runs if r["briefing_date"][:7] == month], model=MODEL
+        )
+        # None은 "모른다"다(Task 11). 모르는데 예산을 넘었다고도, 안 넘었다고도
+        # 말하지 않는다.
+        if spent is not None and spent >= budget_usd * BUDGET_WARN_RATIO:
+            lines.append(
+                f"크레딧: 이번 달 ${spent:.2f} / 예산 ${budget_usd:.0f} "
+                f"({spent / budget_usd:.0%}, 정가 기준)"
+            )
+
+    if token_spike(runs, today_input=today_input):
+        lines.append(
+            f"입력 토큰 급증: 오늘 {today_input:,} — 평소(중앙값)의 {SPIKE_FACTOR}배 초과"
+        )
+
+    return lines
+
+
+def build_kakao_sender(
+    *,
+    remote: RemoteStore,
+    client_id: str,
+    client_secret: str,
+    page_url: str,
+    now: datetime,
+    warn: Warn,
+    exchange: Callable[..., KakaoTokens] | None = access_token,
+) -> KakaoSender | None:
+    """오늘 쓸 카톡 센더를 만든다. 못 만들면 None을 돌려주고 **알린다.**
+
+    계획서 원안은 토큰이 없으면 카톡을 조용히 빼고, 갱신이 실패하면 예외로
+    실행 전체를 멈췄다. 앞은 아무도 모르고, 뒤는 브리핑 기록도 슬랙 경고도
+    없이 끝난다. **카톡이 죽은 순간이 슬랙이 있는 이유다.**
+    """
+    found = remote.kakao_refresh_token()
+    if found is None:
+        warn("카카오 토큰이 없다 — 카톡 없이 보냈다. "
+             "`.venv/bin/python scripts/kakao_auth.py`로 인증한다")
+        return None
+
+    try:
+        tokens = exchange(
+            refresh_token=found[0], client_id=client_id, client_secret=client_secret
+        )
+    except (Permanent, Transient) as error:
+        warn(f"카카오 토큰 갱신 실패 — 카톡 없이 보냈다: {error}. "
+             "계속되면 `.venv/bin/python scripts/kakao_auth.py`로 재발급한다")
+        return None
+
+    # 회전된 토큰이 왔을 때만 저장한다 — 한 달에 한 번쯤이다.
+    # 초 → 시각 변환은 rotated_expiry 한 곳에서만 한다(Task 10).
+    if should_store(tokens):
+        try:
+            remote.save_kakao_refresh_token(
+                tokens.refresh_token, rotated_expiry(tokens, now=now)
+            )
+        except Exception as error:  # noqa: BLE001 — 오늘 발송은 할 수 있다
+            # access_token은 받았으니 오늘은 보낸다. 새 refresh_token을 잃었으므로
+            # 사람이 알아야 한다 — 내버려 두면 한 달 뒤 조용히 끊긴다.
+            warn(f"회전된 카카오 토큰 저장 실패 — 오늘은 보냈지만 재인증이 필요할 수 있다: "
+                 f"{type(error).__name__}: {error}")
+
+    return KakaoSender(access_token=tokens.access_token, page_url=page_url)
+
+
+def send_warnings(
+    lines: list[str], *, webhook_url: str, post: Callable[..., str] = post_json
+) -> bool:
+    """모은 경고를 슬랙으로 한 번에 보낸다. 실패하면 False.
+
+    슬랙마저 실패하면 경고가 갈 곳이 실행 로그뿐이다. 거기라도 전부 남기고
+    False를 돌려 실행이 실패로 끝나게 한다 — GitHub Actions는 실패한 예약
+    실행을 메일로 알린다. 그게 마지막 줄이다.
+    """
+    if not lines:
+        return True
+    try:
+        SlackSender(webhook_url=webhook_url, post=post).warn(lines)
+        return True
+    except Exception as error:  # noqa: BLE001
+        print(f"슬랙 경고 전송 실패: {error}", file=sys.stderr)
+        for line in lines:
+            print(f"  ⚠ {line}", file=sys.stderr)
+        return False
 
 
 def main() -> None:
@@ -151,21 +367,49 @@ def main() -> None:
                         help="이미 전송한 윈도우를 다시 보낸다")
     args = parser.parse_args()
 
-    date = datetime.now(timezone.utc).astimezone(KST).date().isoformat()
-    store = LocalStore(date=date)
+    now = datetime.now(timezone.utc)
+    today = now.astimezone(KST).date().isoformat()
+    store = LocalStore(date=today)
+    remote = SupabaseStore(require("SUPABASE_URL"), require("SUPABASE_SECRET_KEY"))
 
-    notify(
-        briefing=store.read("briefing", Briefing),
-        ranked=store.read("ranked", RankedBundle),
-        raw=store.read("raw", RawBundle),
-        remote=SupabaseStore(require("SUPABASE_URL"), require("SUPABASE_SECRET_KEY")),
-        briefing_date=date,
-        # 계획 3에서 KakaoSender·SlackSender가 이 목록에 추가된다.
-        senders=[ConsoleSender()],
-        force=args.force,
+    # 경고는 모았다가 끝에 슬랙으로 한 번에 보낸다. 슬랙 웹훅은 **필수**다 —
+    # 없으면 경고가 실행 로그에만 남고, 로그는 아무도 매일 읽지 않는다.
+    webhook = require("SLACK_WEBHOOK_URL")
+    collected: list[str] = []
+
+    senders: list[Sender] = [ConsoleSender()]
+    kakao = build_kakao_sender(
+        remote=remote,
+        client_id=require("KAKAO_REST_API_KEY"),
+        client_secret=require("KAKAO_CLIENT_SECRET"),
+        page_url=require("PAGE_URL"),
+        now=now,
+        warn=collected.append,
     )
+    if kakao is not None:
+        senders.append(kakao)
 
-    print(f"전송 완료 ({date})")
+    try:
+        notify(
+            briefing=store.read("briefing", Briefing),
+            ranked=store.read("ranked", RankedBundle),
+            raw=store.read("raw", RawBundle),
+            remote=remote,
+            briefing_date=today,
+            senders=senders,
+            force=args.force,
+            now=now,
+            warn=collected.append,
+            sources=load_sources(),
+            budget_usd=read_budget(optional("MONTHLY_BUDGET_USD"), collected.append),
+        )
+    finally:
+        # notify가 실패해도(모든 센더 실패 등) 그때까지 모은 경고는 보낸다.
+        warned = send_warnings(collected, webhook_url=webhook)
+
+    print(f"전송 완료 ({today}) · 경고 {len(collected)}건")
+    if not warned:
+        sys.exit("슬랙 경고 전송에 실패했다 — 위 로그에 경고 전문이 있다")
 
 
 if __name__ == "__main__":

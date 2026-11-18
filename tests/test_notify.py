@@ -417,3 +417,363 @@ def test_둘_다_없으면_None으로_남긴다():
 
     assert remote.runs[0]["input_tokens"] is None
     assert remote.runs[0]["output_tokens"] is None
+
+
+# --- 가드 조립 (계획 3 Task 12) ---
+
+from datetime import date, timedelta
+
+from pipeline.lib.config import Source
+from pipeline.notify import guard_warnings, read_budget
+
+GUARD_NOW = datetime(2026, 11, 17, 22, 20, tzinfo=timezone.utc)
+TODAY = date(2026, 11, 18)
+
+
+def _source(name: str, tier: str = "fast") -> Source:
+    return Source(name=name, url=f"https://e.com/{name}", kind="rss",
+                  weight=1.0, lang="ko", quiet_tier=tier)
+
+
+def _guard(remote=None, *, sources=(), today_counts=None, today_input=0,
+           budget=None, seed=None):
+    return guard_warnings(
+        remote=remote or FakeRemoteStore(),
+        sources=list(sources),
+        today=TODAY,
+        today_counts=today_counts or {},
+        today_input=today_input,
+        budget_usd=budget,
+        now=GUARD_NOW,
+        seed=seed or {},
+    )
+
+
+def test_조용한_소스를_경과일과_기준으로_알린다():
+    remote = FakeRemoteStore()
+    remote.runs_history = [
+        {"briefing_date": "2026-11-17", "source_counts": {"토스": 0}},
+        {"briefing_date": "2026-09-01", "source_counts": {"토스": 3}},
+    ]
+
+    lines = _guard(remote, sources=[_source("토스")])
+
+    assert lines == ["소스 침묵: 토스 — 78일째 (기준 30일)"]
+
+
+def test_오늘_글이_왔으면_침묵_경고를_내지_않는다():
+    """가드는 오늘 실행 기록을 남기기 **전에** 돈다. 오늘 수집분을 넣지 않으면
+    30일 조용하던 소스가 오늘 글을 썼는데도 오늘 아침 "30일째"가 뜬다."""
+    remote = FakeRemoteStore()
+    remote.runs_history = [{"briefing_date": "2026-09-01", "source_counts": {"토스": 3}}]
+
+    lines = _guard(remote, sources=[_source("토스")], today_counts={"토스": 2})
+
+    assert lines == []
+
+
+def test_토큰_만료가_가까우면_재발급_방법과_함께_알린다():
+    remote = FakeRemoteStore()
+    remote.kakao = ("RT", GUARD_NOW + timedelta(days=10))
+
+    [line] = _guard(remote)
+
+    assert "10일 남음" in line
+    assert "scripts/kakao_auth.py" in line
+
+
+def test_토큰이_이미_만료됐으면_지났다고_알린다():
+    remote = FakeRemoteStore()
+    remote.kakao = ("RT", GUARD_NOW - timedelta(days=3))
+
+    [line] = _guard(remote)
+
+    assert "3일 지남" in line
+
+
+def test_예산의_80퍼센트를_넘으면_알린다():
+    remote = FakeRemoteStore()
+    remote.runs_history = [
+        {"briefing_date": "2026-11-03", "source_counts": {},
+         "input_tokens": 3_000_000, "output_tokens": 600_000},   # $12 + $12 = $24
+    ]
+
+    [line] = _guard(remote, budget=30.0)
+
+    assert "$24.00" in line and "$30" in line
+
+
+def test_지난달_사용량은_이번_달_예산에_넣지_않는다():
+    remote = FakeRemoteStore()
+    remote.runs_history = [
+        {"briefing_date": "2026-10-31", "source_counts": {},
+         "input_tokens": 3_000_000, "output_tokens": 600_000},
+    ]
+
+    assert _guard(remote, budget=30.0) == []
+
+
+def test_비용을_모르면_예산_경고를_내지_않고_터지지도_않는다():
+    """Task 11에서 month_cost_usd가 "모른다"면 None을 돌려주게 했다. 계획서
+    원안은 `spent >= 예산`으로 바로 비교해서, 토큰 기록이 없는 지금(2026-11-18
+    실측: runs 3행 모두 비어 있다) TypeError로 가드 전체가 죽는다."""
+    remote = FakeRemoteStore()
+    remote.runs_history = [{"briefing_date": "2026-11-12", "source_counts": {},
+                            "input_tokens": None, "output_tokens": None}]
+
+    assert _guard(remote, budget=30.0) == []
+
+
+def test_예산이_없으면_예산_경고만_건너뛴다():
+    remote = FakeRemoteStore()
+    remote.runs_history = [{"briefing_date": "2026-11-03", "source_counts": {},
+                            "input_tokens": 9_000_000, "output_tokens": 9_000_000}]
+
+    assert _guard(remote, budget=None) == []
+
+
+def test_입력_토큰이_평소의_3배를_넘으면_알린다():
+    remote = FakeRemoteStore()
+    remote.runs_history = [
+        {"briefing_date": f"2026-11-{d:02d}", "source_counts": {},
+         "input_tokens": 80_000, "output_tokens": 20_000}
+        for d in range(3, 13)
+    ]
+
+    [line] = _guard(remote, today_input=250_000)
+
+    assert "250,000" in line
+
+
+def test_예산_값을_읽는다():
+    problems = []
+
+    assert read_budget("30", problems.append) == 30.0
+    assert read_budget(None, problems.append) is None
+    assert read_budget("", problems.append) is None
+    assert problems == []
+
+
+def test_예산_값이_숫자가_아니면_경고하고_없는_것으로_본다():
+    """오타로 예산 경고가 조용히 꺼지면 안 된다. 꺼진 사실을 알린다."""
+    problems = []
+
+    assert read_budget("$30", problems.append) is None
+    assert len(problems) == 1 and "MONTHLY_BUDGET_USD" in problems[0]
+
+
+# --- notify가 가드와 실패를 경고로 낸다 ---
+
+from pipeline.lib.kakao import KakaoTokens
+from pipeline.lib.retry import Transient
+from pipeline.lib.sender import KakaoSender
+from pipeline.notify import build_kakao_sender, send_warnings
+
+
+def _notify_warned(*, remote=None, senders=None, briefing=None, sources=(), warn=None):
+    warned: list[str] = []
+    notify(
+        briefing=briefing or _briefing([_summary()]),
+        ranked=_ranked(),
+        raw=_raw(),
+        remote=remote or FakeRemoteStore(),
+        briefing_date="2026-11-10",
+        senders=senders if senders is not None else [FakeSender()],
+        now=SENT_AT,
+        warn=warn or warned.append,
+        sources=list(sources),
+    )
+    return warned
+
+
+def test_가드_경고가_warn으로_간다():
+    """브리핑은 카톡으로, 경고는 슬랙으로. 섞이지 않는다."""
+    remote = FakeRemoteStore()
+    remote.runs_history = [{"briefing_date": "2026-08-01", "source_counts": {"토스": 3}}]
+
+    warned = _notify_warned(remote=remote, sources=[_source("토스")])
+
+    assert any(w.startswith("소스 침묵: 토스") for w in warned)
+
+
+def test_가드가_터져도_브리핑은_나간다():
+    """경고 때문에 브리핑이 막히면 주객이 전도된다."""
+    class Broken(FakeRemoteStore):
+        def recent_runs(self, days):
+            raise RuntimeError("DB가 잠깐 죽었다")
+
+    sender = FakeSender()
+    remote = Broken()
+    _notify_warned(remote=remote, senders=[sender], sources=[_source("토스")])
+
+    assert sender.calls == 1
+    assert remote.runs[-1]["status"] == "sent"
+
+
+def test_경고_채널이_터져도_브리핑은_나간다():
+    def exploding(_):
+        raise RuntimeError("슬랙이 죽었다")
+
+    sender = FakeSender()
+    remote = FakeRemoteStore()
+    remote.runs_history = [{"briefing_date": "2026-08-01", "source_counts": {"토스": 3}}]
+    _notify_warned(remote=remote, senders=[sender], sources=[_source("토스")], warn=exploding)
+
+    assert sender.calls == 1
+
+
+def test_카톡_발송이_실패하면_경고로_알린다():
+    """ConsoleSender는 항상 성공하므로 카톡이 실패해도 실행은 'sent'로 끝난다.
+    실패는 runs.errors에만 남고 아무도 모른다. 카톡이 안 갔을 때 알리는 것이
+    슬랙의 존재 이유다."""
+    warned = _notify_warned(senders=[
+        FakeSender(name="console"),
+        FakeSender(name="kakao", error=Permanent("카카오 발송 HTTP 401")),
+    ])
+
+    assert any("kakao" in w and "401" in w for w in warned)
+
+
+def test_페이지_저장이_실패하면_경고로_알린다():
+    warned = _notify_warned(remote=FakeRemoteStore(save_error=RuntimeError("timeout")))
+
+    assert any("페이지" in w for w in warned)
+
+
+def test_이미_보냈으면_경고도_내지_않는다():
+    """재실행이 같은 경고를 또 보내면 그것도 알림 피로다."""
+    warned: list[str] = []
+    with pytest.raises(AlreadySentError):
+        notify(
+            briefing=_briefing([_summary()]), ranked=_ranked(), raw=_raw(),
+            remote=FakeRemoteStore(last_sent=WINDOW_END), briefing_date="2026-11-10",
+            senders=[FakeSender()], now=SENT_AT, warn=warned.append, sources=[_source("토스")],
+        )
+
+    assert warned == []
+
+
+# --- 카톡 센더 조립 ---
+
+KAKAO_NOW = datetime(2026, 12, 20, 22, 20, tzinfo=timezone.utc)
+
+
+def _build(remote, exchange):
+    warned: list[str] = []
+    sender = build_kakao_sender(
+        remote=remote, client_id="ID", client_secret="SECRET",
+        page_url="https://x.test", now=KAKAO_NOW, warn=warned.append, exchange=exchange,
+    )
+    return sender, warned
+
+
+def test_토큰이_없으면_카톡_없이_가고_알린다():
+    """계획서 원안은 토큰이 없으면 카톡을 조용히 빼기만 했다. 매일 콘솔에만
+    찍히고 아무도 모른다."""
+    sender, warned = _build(FakeRemoteStore(), exchange=None)
+
+    assert sender is None
+    assert len(warned) == 1 and "scripts/kakao_auth.py" in warned[0]
+
+
+def test_토큰_갱신이_실패하면_카톡_없이_가고_알린다():
+    """**슬랙이 있는 이유가 정확히 이 순간이다.** 원안은 여기서 예외가 나
+    실행 전체가 멈췄다 — 브리핑 기록도 슬랙 경고도 없이."""
+    remote = FakeRemoteStore()
+    remote.kakao = ("RT", KAKAO_NOW)
+
+    def expired(**_):
+        raise Permanent("카카오 토큰 HTTP 401 — invalid_grant")
+
+    sender, warned = _build(remote, exchange=expired)
+
+    assert sender is None
+    assert "갱신 실패" in warned[0] and "invalid_grant" in warned[0]
+    assert "scripts/kakao_auth.py" in warned[0]
+
+
+def test_일시적_갱신_실패도_카톡_없이_간다():
+    remote = FakeRemoteStore()
+    remote.kakao = ("RT", KAKAO_NOW)
+
+    def flaky(**_):
+        raise Transient("카카오 토큰 시간 초과")
+
+    sender, warned = _build(remote, exchange=flaky)
+
+    assert sender is None and "시간 초과" in warned[0]
+
+
+def test_회전된_토큰을_저장하고_보낸다():
+    remote = FakeRemoteStore()
+    remote.kakao = ("OLD", KAKAO_NOW + timedelta(days=20))
+
+    def rotated(**kw):
+        assert kw["refresh_token"] == "OLD"
+        return KakaoTokens(access_token="AT", refresh_token="NEW",
+                           refresh_token_expires_in=5184000)
+
+    sender, warned = _build(remote, exchange=rotated)
+
+    assert isinstance(sender, KakaoSender)
+    assert remote.saved_tokens == [("NEW", KAKAO_NOW + timedelta(days=60))]
+    assert warned == []
+
+
+def test_회전_저장이_실패해도_오늘은_보내고_알린다():
+    """오늘 access_token은 받았으니 오늘은 보낸다. 다만 새 토큰을 잃었으므로
+    사람이 알아야 한다 — 내버려 두면 한 달 뒤 조용히 끊긴다."""
+    remote = FakeRemoteStore()
+    remote.kakao = ("OLD", KAKAO_NOW + timedelta(days=20))
+    remote.kakao_save_error = RuntimeError("DB timeout")
+
+    def rotated(**_):
+        return KakaoTokens(access_token="AT", refresh_token="NEW",
+                           refresh_token_expires_in=5184000)
+
+    sender, warned = _build(remote, exchange=rotated)
+
+    assert isinstance(sender, KakaoSender)
+    assert len(warned) == 1 and "저장" in warned[0]
+
+
+def test_평소에는_보내기만_한다():
+    remote = FakeRemoteStore()
+    remote.kakao = ("RT", KAKAO_NOW + timedelta(days=50))
+
+    sender, warned = _build(remote, exchange=lambda **_: KakaoTokens(access_token="AT"))
+
+    assert isinstance(sender, KakaoSender)
+    assert remote.saved_tokens == [] and warned == []
+
+
+# --- 슬랙으로 내보내기 ---
+
+def test_경고가_없으면_슬랙을_부르지_않는다():
+    calls = []
+    assert send_warnings([], webhook_url="https://hooks.test/x",
+                         post=lambda *a, **k: calls.append(1) or "ok") is True
+    assert calls == []
+
+
+def test_경고를_한_번에_보낸다():
+    calls = []
+
+    def post(url, *, payload, timeout, label):
+        calls.append(payload["text"])
+        return "ok"
+
+    assert send_warnings(["가", "나"], webhook_url="https://hooks.test/x", post=post) is True
+    assert len(calls) == 1 and "가" in calls[0] and "나" in calls[0]
+
+
+def test_슬랙이_실패하면_로그에_경고를_남기고_실패를_알린다(capsys):
+    """슬랙마저 실패하면 경고가 갈 곳이 Actions 로그뿐이다. 거기라도 남기고,
+    False를 돌려 실행이 실패로 끝나게 한다 — GitHub가 실패 메일을 보낸다."""
+    def broken(*a, **k):
+        raise Permanent("Slack webhook HTTP 404 — no_service")
+
+    assert send_warnings(["소스 침묵: 토스"], webhook_url="https://hooks.test/x",
+                         post=broken) is False
+    err = capsys.readouterr().err
+    assert "소스 침묵: 토스" in err and "no_service" in err

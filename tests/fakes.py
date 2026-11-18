@@ -25,6 +25,11 @@ class FakeRemoteStore:
         self._save_error = save_error
         self.runs: list[dict] = []
         self.saved: list[dict] = []
+        # 가드가 읽는 것 (계획 3 Task 12)
+        self.runs_history: list[dict] = []
+        self.kakao: tuple[str, datetime] | None = None
+        self.kakao_save_error: Exception | None = None
+        self.saved_tokens: list[tuple[str, datetime]] = []
 
     def last_sent_at(self) -> datetime | None:
         return self._last_sent
@@ -75,6 +80,18 @@ class FakeRemoteStore:
         if self._save_error is not None:
             raise self._save_error
         self.saved.append({"briefing_date": briefing_date, "summaries": summaries})
+
+    def recent_runs(self, days: int) -> list[dict]:
+        return list(self.runs_history)
+
+    def kakao_refresh_token(self) -> tuple[str, datetime] | None:
+        return self.kakao
+
+    def save_kakao_refresh_token(self, token: str, expires_at: datetime) -> None:
+        if self.kakao_save_error is not None:
+            raise self.kakao_save_error
+        self.saved_tokens.append((token, expires_at))
+        self.kakao = (token, expires_at)
 
 
 class FakeLLM:

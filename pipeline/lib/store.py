@@ -103,6 +103,27 @@ class RemoteStore(Protocol):
         """발행 글과 본문을 저장한다. 본문은 별도 테이블로 들어간다."""
         ...
 
+    # --- 가드가 읽는 것 (계획 3 Task 12) ---
+
+    def recent_runs(self, days: int) -> list[dict]:
+        """최근 실행 이력(briefing_date, status, source_counts, 토큰).
+
+        가드가 읽는다 — 소스 침묵은 source_counts를, 크레딧은 토큰을 본다.
+        status='sent'만이 아니라 **전부** 돌려준다: 전송이 실패한 날에도
+        수집은 했으므로 침묵 판정에 들어가야 한다(스펙 8.4).
+
+        순서는 보장하지 않는다 — 가드가 순서에 기대지 않는다(Task 8).
+        """
+        ...
+
+    def kakao_refresh_token(self) -> tuple[str, datetime] | None:
+        """(refresh_token, 만료 시각). 최초 인증 전이면 None."""
+        ...
+
+    def save_kakao_refresh_token(self, token: str, expires_at: datetime) -> None:
+        """회전된 토큰을 저장한다. 한 달에 한 번쯤 불린다."""
+        ...
+
 
 def article_rows(*, briefing_date: str, summaries: list) -> list[dict]:
     """articles에 넣을 행을 만든다. **순번(position)을 1부터 매긴다.**
@@ -241,3 +262,39 @@ class SupabaseStore:
                 "body_source": summary.article.body_source,
                 "fallback_reason": summary.article.fallback_reason,
             }, on_conflict="article_id").execute()
+
+    def recent_runs(self, days: int) -> list[dict]:
+        since = (datetime.now(timezone.utc).date() - timedelta(days=days)).isoformat()
+        rows = (
+            self._db.table("runs")
+            .select("briefing_date, status, source_counts, input_tokens, output_tokens")
+            .gte("briefing_date", since)
+            # PostgREST 기본 상한(1000행)에 조용히 걸리지 않게 명시한다.
+            # 날짜당 한두 행이라 400일이면 넉넉하다.
+            .limit(2000)
+            .execute()
+        )
+        return rows.data or []
+
+    def kakao_refresh_token(self) -> tuple[str, datetime] | None:
+        rows = (
+            self._db.table("kakao_auth")
+            .select("refresh_token, refresh_token_expires_at")
+            .eq("id", 1)
+            .execute()
+        )
+        if not rows.data:
+            return None
+        row = rows.data[0]
+        return row["refresh_token"], datetime.fromisoformat(row["refresh_token_expires_at"])
+
+    def save_kakao_refresh_token(self, token: str, expires_at: datetime) -> None:
+        # 컬럼은 refresh_token_expires_at(시각)이다. Task 10에서 발송 확인
+        # 스크립트가 없는 컬럼(…_expires_in)에 쓰던 버그를 찾았다.
+        # updated_at은 트리거가 없어 직접 넣는다.
+        self._db.table("kakao_auth").upsert({
+            "id": 1,
+            "refresh_token": token,
+            "refresh_token_expires_at": expires_at.isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }).execute()
