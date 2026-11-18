@@ -1,0 +1,85 @@
+name: daily briefing
+
+on:
+  schedule:
+    # UTC 22:20 (일~목) → KST 07:20 (월~금).
+    # 정각을 피한 이유: GitHub Actions cron은 정각에 전 세계 작업이 몰려
+    # 지연이 가장 크다.
+    #
+    # 이 시각은 pipeline/report_failure.py의 RUN_WEEKDAYS·RUN_HOUR·RUN_MINUTE와
+    # 같아야 한다 — tests/test_workflow.py가 대조한다.
+    #
+    # **공개 리포는 60일 동안 저장소 활동이 없으면 예약 실행이 꺼진다**
+    # (GitHub Docs, Events that trigger workflows). 그날부터 카톡이 오지 않는다.
+    # 0건인 날에도 카톡이 가므로(요구사항 O2) "아침에 카톡이 없다"가 곧 신호다.
+    # Actions 탭에서 다시 켠다.
+    - cron: '20 22 * * 0-4'
+  # 실패 보고가 "지금 다시 돌린다"고 할 때 쓰는 손잡이.
+  workflow_dispatch:
+
+# 이 작업은 저장소에 쓸 일이 없다. GITHUB_TOKEN을 읽기 전용으로 묶는다.
+permissions:
+  contents: read
+
+# 같은 날 두 번 돌지 않게 한다. notify의 AlreadySent 가드가 한 겹 더 있다.
+concurrency:
+  group: daily-briefing
+  cancel-in-progress: false
+
+jobs:
+  briefing:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      KAKAO_REST_API_KEY: ${{ secrets.KAKAO_REST_API_KEY }}
+      KAKAO_CLIENT_SECRET: ${{ secrets.KAKAO_CLIENT_SECRET }}
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+      # 비밀이 아니다 — 평문으로 둔다.
+      PAGE_URL: https://topic-briefing.vercel.app
+      # 크레딧 가드의 월 예산. 어림 1회 $0.7~1.4, 평일 월 22회면 $16~32
+      # (계획 3 Task 11). 첫 주 runs의 실측으로 고친다.
+      MONTHLY_BUDGET_USD: '30'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: constraints.txt
+
+      # 로컬에서 테스트한 버전으로 고정한다. pyproject.toml은 하한만 둔다.
+      - id: install
+        run: pip install -e . -c constraints.txt
+
+      # 단계마다 id를 둔다 — 실패 리포트가 어디서 죽었는지 말하려면 필요하다.
+      - id: collect
+        run: python -m pipeline.collect
+      - id: rank
+        run: python -m pipeline.rank
+      - id: enrich
+        run: python -m pipeline.enrich
+      - id: summarize
+        run: python -m pipeline.summarize
+      - id: notify
+        run: python -m pipeline.notify
+
+      # 설치가 실패했으면 이 단계도 import에서 죽는다. 그때는 실행이 실패로
+      # 끝나고 GitHub가 실패 메일을 보낸다 — 그게 마지막 줄이다.
+      - if: failure()
+        env:
+          FAILED_STEP: >-
+            ${{ steps.install.outcome == 'failure' && 'install'
+             || steps.collect.outcome == 'failure' && 'collect'
+             || steps.rank.outcome == 'failure' && 'rank'
+             || steps.enrich.outcome == 'failure' && 'enrich'
+             || steps.summarize.outcome == 'failure' && 'summarize'
+             || steps.notify.outcome == 'failure' && 'notify'
+             || 'setup' }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python -m pipeline.report_failure

@@ -2529,6 +2529,34 @@ git commit -m "feat: 단계 실패 리포트"
 
 > **선행: Secrets 6개.** 없으면 워크플로가 돌지 않는다.
 
+> **2026-11-18 실행 중 고친 것.**
+>
+> - **의존성 고정.** `pyproject.toml`은 하한(`>=`)만 있고 잠금 파일이 없었다.
+>   매일 사람 없이 도는 작업이 매번 최신을 받으면 `anthropic` 3.x가 나오는 날
+>   아침 조용히 깨진다. 로컬 `.venv`(테스트 517개를 통과한 버전)를
+>   `constraints.txt`로 떠서 `pip install -e . -c constraints.txt`로 설치한다.
+>   `cache-dependency-path`도 그 파일로 둔다.
+> - **`permissions: contents: read`.** 이 작업은 저장소에 쓸 일이 없다.
+> - **예산 $30.** 원안 $20은 어림(1회 $0.7~1.4, 월 $16~32, Task 11)의 상한보다
+>   낮다. `.env.example`과 맞춘다.
+> - **`FAILED_STEP`에 install과 setup.** 원안은 어느 것에도 안 걸리면 `notify`로
+>   보고했다 — 설치에서 죽어도 "notify에서 죽었다"가 된다.
+> - **워크플로와 코드를 테스트로 묶었다**(`tests/test_workflow.py`): cron ↔
+>   `report_failure`의 정기 실행 시각, 코드의 모든 `require("X")` ↔ 워크플로
+>   env, 비밀은 `secrets.`에서만, 권한 읽기 전용, 모든 단계가 `FAILED_STEP`에.
+>   일부러 깨뜨려 확인했다 — cron을 한 시간 당기면, `PAGE_URL`을 지우면 실패한다.
+>   (PyYAML은 `on:`을 불리언 `True`로 읽는다 — YAML 1.1 함정.)
+>
+> **공개 리포는 60일 동안 저장소 활동이 없으면 예약 실행이 꺼진다**
+> (GitHub Docs, Events that trigger workflows). 이 시스템은 커밋 없이 몇 달씩
+> 돌아야 하므로 실제로 일어난다. 0건인 날에도 카톡이 가므로(O2) "아침에 카톡이
+> 없다"가 곧 신호다 — Actions 탭에서 다시 켠다. API로 스스로 다시 켜는 요령이
+> 있지만 그게 타이머를 되돌린다는 것은 공식 문서에 없어 넣지 않았다.
+>
+> **Step 2(포크 PR 설정)는 이 워크플로와 무관하다.** 트리거가 `schedule`과
+> `workflow_dispatch`뿐이라 포크 PR이 이 워크플로를 돌릴 수 없다. 다른
+> 워크플로를 더할 때를 위한 확인이다.
+
 **Files:**
 - Create: `.github/workflows/daily.yml`
 
