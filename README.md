@@ -5,14 +5,14 @@
 - 설계: [`design/superpowers/specs/2026-11-10-it-column-automation-design.md`](design/superpowers/specs/2026-11-10-it-column-automation-design.md)
 - ERD: [`design/superpowers/specs/2026-11-11-erd.md`](design/superpowers/specs/2026-11-11-erd.md)
 - 요구사항 추적표: [`design/superpowers/specs/2026-11-11-requirements.md`](design/superpowers/specs/2026-11-11-requirements.md)
-- 구현 계획과 실측 기록: [`design/superpowers/plans/2026-11-10-briefing-pipeline.md`](design/superpowers/plans/2026-11-10-briefing-pipeline.md)
-- **공개 전 점검**: [`design/공개-전-점검.md`](design/공개-전-점검.md) — 이 리포지토리는 비공개다. 공개로 바꾸기 전에 읽는다
+- 구현 계획과 실측 기록: [계획 1](design/superpowers/plans/2026-11-10-briefing-pipeline.md) · [계획 2](design/superpowers/plans/2026-11-12-briefing-page.md) · [계획 3](design/superpowers/plans/2026-11-17-delivery-automation.md)
+- **공개 전 점검**: [`design/공개-전-점검.md`](design/공개-전-점검.md) — 이 리포지토리는 **공개**다. 이 점검을 거쳐 공개로 바꿨다
 
 | | 범위 | 상태 |
 |---|---|---|
 | 계획 1 | 파이프라인 — 수집·선별·본문·요약, 결과는 터미널 | **완료** |
-| 계획 2 | 웹페이지 + 좋아요·클릭 | 예정 |
-| 계획 3 | 카카오톡 전송 + 슬랙 경고 + 경고 장치 + GitHub Actions | 예정 |
+| 계획 2 | 웹페이지 + 좋아요·클릭 | **완료** |
+| 계획 3 | 카카오톡 전송 + 슬랙 경고 + 경고 장치 + GitHub Actions | **완료** |
 
 ## 준비
 
@@ -22,21 +22,30 @@ pip install -e ".[dev]"
 cp .env.example .env     # 값을 채운다
 ```
 
-`.env`에 필요한 것은 셋이다 — `SUPABASE_URL`, `SUPABASE_SECRET_KEY`,
-`ANTHROPIC_API_KEY`. Supabase 키 이름 주의: 대시보드의 **Connect** 대화상자에서
+`.env`에 필요한 키와 각각의 뜻은 `.env.example`에 있다(Anthropic·Supabase·카카오·
+슬랙·페이지 주소·월 예산). GitHub Actions에는 같은 값이 Secrets로 들어간다 —
+목록은 `.github/workflows/daily.yml`의 `env`다. Supabase 키 이름 주의: 대시보드의 **Connect** 대화상자에서
 URL과 publishable 키를, **Settings → API Keys**에서 secret 키를 받는다
 (`Settings → API` 페이지는 없다). `eyJ...`로 시작하는 긴 키는 2026년 말
 폐기되는 레거시 키다.
 
 ## 매일 실행
 
+**자동으로 돈다.** GitHub Actions가 월~금 07:20 KST에 실행한다
+(`.github/workflows/daily.yml`). 아래는 손으로 돌릴 때의 절차다 — 운영은
+아래 "운영" 절을 본다.
+
 ```bash
 python -m pipeline.collect      # 수집  → data/<날짜>/raw.json
 python -m pipeline.rank         # 선별  → ranked.json
 python -m pipeline.enrich       # 본문  → articles.json
 python -m pipeline.summarize    # 요약  → briefing.json
-python -m pipeline.notify       # 터미널 출력 + 발행 이력 기록
+python -m pipeline.notify       # 카톡 발송 + 터미널 출력 + 발행 이력 + 슬랙 경고
 ```
+
+> **`notify`는 이제 실제 카톡을 보낸다.** 결과만 터미널에서 보려면 `summarize`
+> 까지만 돌린다(`briefing.json`). 같은 날 Actions가 이미 보냈으면 `notify`는
+> `AlreadySent`로 멈춘다.
 
 **페이지는 아무것도 하지 않아도 갱신된다.** `notify`가 Supabase에 쓰면
 페이지가 열릴 때 직접 조회한다 — 빌드도 커밋도 필요 없다(스펙 6.4의 분리).
@@ -98,7 +107,7 @@ bash scripts/verify_bundle.sh        # 번들에 비밀이 섞였는지 (5개 �
 키 값으로 대조한다.
 
 ```bash
-pytest                              # 전체 테스트 (396개)
+pytest                              # 전체 테스트 (525개)
 python scripts/check_feeds.py       # 소스 피드 생존 확인
 python scripts/verify_anon_access.sh # anon 키로 본문이 막히는지
 python scripts/smoke_supabase.py    # DB 연결·권한 확인
@@ -153,14 +162,40 @@ python -m pipeline.prune --dry-run  # 정리 대상 확인
    (`--force` 필요), `prune`은 날짜 형식을 왕복 비교해 우리가 만들지 않은
    디렉터리를 건드리지 않는다.
 
-## 계획 3에서 메워야 할 구멍
+## 운영
 
-**`runs.input_tokens`가 항상 `NULL`이다.** `notify`가 `input_tokens=None`을
-넣는다. `AnthropicLLM.parse`는 입력 토큰 수를 돌려주지만 `rank`와 `summarize`가
-그 값을 버린다. 지금은 쓰는 곳이 없어서 배선하지 않았다. 계획 3의 크레딧
-소진 가드가 이 값을 쓴다. 스키마 컬럼은 이미 있다.
+**경고는 슬랙으로만 온다.** 카톡은 브리핑 전용이다(`SlackSender`에는 `send`가
+없다). 슬랙에 오는 것:
 
-**소스 침묵 경고의 임계값.** spec 8.4를 "소스별 `quiet_days`"로 고쳤다 —
-"3일 연속 0건"이면 느리지만 살아 있는 소스 5개가 영구히 경고를 띄운다
-(실측: Lil'Log는 400일에 2편이 평소 속도다). 측정값은 `sources.yaml`
-주석에 있다.
+| 경고 | 뜻 | 할 일 |
+|---|---|---|
+| 소스 침묵: X — N일째 (기준 M일) | 그 소스에서 M일 넘게 글을 못 봤다 | `check_feeds.py`로 본다. 멈춘 블로그면 `sources.yaml`에서 `quiet_tier: none` |
+| 카카오 토큰 만료 N일 남음/지남 | 회전 저장이 실패했거나 오래 멈췄다 | `python scripts/kakao_auth.py` |
+| 카카오 토큰 갱신 실패 — 카톡 없이 보냈다 | 오늘 카톡이 안 갔다(페이지는 갱신됨) | 같다 |
+| 크레딧: 이번 달 $X / 예산 $Y | 정가 기준 사용액이 예산의 80%를 넘었다 | Console에서 잔액 확인. 예산은 워크플로의 `MONTHLY_BUDGET_USD` |
+| 입력 토큰 급증 | 오늘 입력이 평소(중앙값)의 3배를 넘었다 | 피드 하나가 쏟아냈는지 로그를 본다 |
+| 전송 실패 / 페이지 저장 실패 | 카톡 또는 DB 저장이 실패했다 | 로그를 본다 |
+| 브리핑 실패 — 죽은 단계 | 단계가 죽었다. **다시 돌려야 하는지 계산해서** 같이 온다 | 보고가 말하는 대로 |
+
+**경고가 없으면 아무것도 오지 않는다** — 매일 "이상 없음"을 보내면 정작 중요한
+경고를 안 읽게 된다. 대신 **0건인 날에도 카톡은 간다.** 그래서 "아침에 카톡이
+없다"가 시스템이 멈췄다는 신호다.
+
+**60일 동안 저장소 활동이 없으면 예약 실행이 꺼진다**(공개 리포의 GitHub 규칙).
+커밋 없이 몇 달 돌아가면 실제로 일어난다. 카톡이 안 오면 먼저 Actions 탭에서
+`daily briefing`이 켜져 있는지 본다.
+
+**훈련.** 경고는 울려 봐야 동작을 안다. 둘 다 발송·기록 없이 실제 경로를 탄다.
+
+```bash
+gh workflow run "daily briefing" -f drill_failure=true   # 실패 보고 — 수집 전에 일부러 실패한다
+```
+
+가드 셋(침묵·토큰·크레딧)은 조건을 바꿔 `notify.guard_warnings`를 부르고 슬랙으로
+보내 본다 — 계획 3 문서의 Task 15에 절차가 있다.
+
+**비용.** 첫 실측(2026-11-18) 1회 정가 $0.56(입력 78,637 · 출력 12,182 토큰),
+평일 월 22회면 약 $12. 예산 $30의 80%에서 경고한다.
+
+**의존성.** CI는 `constraints.txt`로 고정해 설치한다. 올릴 때는 로컬에서 테스트를
+통과시킨 뒤 `pip freeze --exclude-editable`로 다시 만든다(머리말은 손으로).
