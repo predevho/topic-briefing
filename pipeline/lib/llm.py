@@ -71,7 +71,14 @@ class TruncatedError(Permanent):
 
 
 class SchemaError(Transient):
-    """구조화된 출력이 비었거나 스키마를 못 맞췄다. 한 번 더 시도할 가치가 있다."""
+    """구조화된 출력이 비었거나 스키마를 못 맞췄다. 한 번 더 시도할 가치가 있다.
+
+    `usage`: 그 시도가 쓴 토큰. 스키마 실패는 응답을 **다 받은 뒤에** 판정되므로
+    이미 과금됐다. 재시도가 버리면 그날 비용이 낮게 잡힌다(retry_counting_tokens).
+    응답을 못 받았으면 None — 0이 아니라 "모른다"다.
+    """
+
+    usage: TokenUsage | None = None
 
 
 @runtime_checkable
@@ -231,6 +238,44 @@ def retry_on_schema(
     raise AssertionError("도달할 수 없다")   # attempts >= 1
 
 
+def retry_counting_tokens(
+    call: Callable[[], tuple[TOut, TokenUsage]],
+    *,
+    attempts: int = SCHEMA_ATTEMPTS,
+) -> tuple[TOut, TokenUsage]:
+    """retry_on_schema와 같게 재시도하되, **실패한 시도의 토큰도 더한다.**
+
+    스키마 실패는 응답을 다 받은 뒤에 판정되므로 그 응답은 이미 과금됐다.
+    원래는 성공한 마지막 응답의 토큰만 돌아와서 재시도한 날은 비용이 낮게
+    잡혔다 — 크레딧 가드(계획 3 Task 11)가 막으려는 방향의 오차다.
+
+    끝내 실패하면 그때까지 쓴 토큰 합을 마지막 SchemaError에 실어 올린다.
+    단계는 실패해도 돈은 나갔다.
+
+    재시도 정책은 retry_on_schema에 그대로 맡긴다 — 정책이 두 곳에 있으면
+    한쪽만 고치는 날이 온다.
+    """
+    spent: list[TokenUsage] = []
+
+    def counted() -> tuple[TOut, TokenUsage]:
+        try:
+            return call()
+        except SchemaError as error:
+            if error.usage is not None:
+                spent.append(error.usage)
+            raise
+
+    try:
+        parsed, usage = retry_on_schema(counted, attempts=attempts)
+    except SchemaError as error:
+        error.usage = sum(spent[1:], spent[0]) if spent else None
+        raise
+
+    for earlier in spent:
+        usage = usage + earlier
+    return parsed, usage
+
+
 class AnthropicLLM:
     """LLM 프로토콜의 Claude API 구현.
 
@@ -259,7 +304,7 @@ class AnthropicLLM:
         effort: Effort,
         max_tokens: int = DEFAULT_MAX_TOKENS,
     ) -> tuple[TOut, TokenUsage]:
-        return retry_on_schema(
+        return retry_counting_tokens(
             lambda: self._parse_once(
                 prompt=prompt,
                 output_format=output_format,
@@ -315,17 +360,25 @@ class AnthropicLLM:
         except Exception as error:  # noqa: BLE001 — classify_sdk_error가 선별한다
             raise classify_sdk_error(error) from error
 
-        # 거부·잘림·스키마 실패를 순서대로 가려낸다. 셋 다 HTTP 200으로 온다.
-        parsed = response.parsed_output
-        classify_response(
-            stop_reason=response.stop_reason,
-            stop_details=response.stop_details,
-            parsed=parsed,
-            max_tokens=max_tokens,
-        )
-        assert parsed is not None     # classify_response가 None이면 던진다
-
-        return parsed, TokenUsage(
+        # 응답을 받았으면 성공이든 실패든 과금됐다. 판정 전에 센다.
+        usage = TokenUsage(
             input=response.usage.input_tokens,
             output=response.usage.output_tokens,
         )
+
+        # 거부·잘림·스키마 실패를 순서대로 가려낸다. 셋 다 HTTP 200으로 온다.
+        parsed = response.parsed_output
+        try:
+            classify_response(
+                stop_reason=response.stop_reason,
+                stop_details=response.stop_details,
+                parsed=parsed,
+                max_tokens=max_tokens,
+            )
+        except SchemaError as error:
+            # 재시도가 이 시도의 토큰을 버리지 않게 실어 보낸다.
+            error.usage = usage
+            raise
+        assert parsed is not None     # classify_response가 None이면 던진다
+
+        return parsed, usage

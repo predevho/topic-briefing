@@ -514,3 +514,64 @@ def test_토큰_사용량을_더할_수_있다():
 
     assert total.input == 1040
     assert total.output == 1150
+
+
+# --- 재시도한 시도의 토큰도 센다 ---
+#
+# 스키마 실패는 응답을 **다 받은 뒤에** 판정된다. 그 응답은 이미 과금됐다.
+# 원래는 성공한 마지막 응답의 토큰만 돌아와서, 재시도한 날은 비용이 낮게
+# 잡혔다 — 크레딧 가드(계획 3 Task 11)가 막으려는 바로 그 방향의 오차다.
+
+from pipeline.lib.llm import retry_counting_tokens
+from pipeline.models import TokenUsage
+
+
+def test_실패한_시도의_토큰을_더한다():
+    calls = []
+
+    def flaky():
+        calls.append(1)
+        if len(calls) == 1:
+            error = SchemaError("비었다")
+            error.usage = TokenUsage(input=40_000, output=9_000)
+            raise error
+        return "결과", TokenUsage(input=40_000, output=7_000)
+
+    parsed, usage = retry_counting_tokens(flaky)
+
+    assert parsed == "결과"
+    assert usage == TokenUsage(input=80_000, output=16_000)
+
+
+def test_한_번에_성공하면_그대로다():
+    parsed, usage = retry_counting_tokens(lambda: ("결과", TokenUsage(input=1, output=2)))
+
+    assert usage == TokenUsage(input=1, output=2)
+
+
+def test_끝내_실패하면_쓴_토큰을_모두_싣고_올린다():
+    """단계가 실패해도 돈은 나갔다. 실패 기록(Task 13)이 읽을 수 있게 싣는다."""
+    def always():
+        error = SchemaError("비었다")
+        error.usage = TokenUsage(input=10, output=5)
+        raise error
+
+    with pytest.raises(SchemaError) as caught:
+        retry_counting_tokens(always)
+
+    assert caught.value.usage == TokenUsage(input=10 * SCHEMA_ATTEMPTS, output=5 * SCHEMA_ATTEMPTS)
+
+
+def test_토큰을_모르는_실패는_더하지_않는다():
+    """응답을 못 받은 실패(usage 없음)는 0이 아니라 '모른다'다. 더할 것이 없다."""
+    calls = []
+
+    def flaky():
+        calls.append(1)
+        if len(calls) == 1:
+            raise SchemaError("응답 없음")       # usage를 싣지 않았다
+        return "결과", TokenUsage(input=3, output=4)
+
+    _, usage = retry_counting_tokens(flaky)
+
+    assert usage == TokenUsage(input=3, output=4)

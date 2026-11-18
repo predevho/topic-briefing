@@ -215,3 +215,85 @@ def test_이미_만료됐으면_음수로_알린다():
 def test_임계값이_14일이다():
     """재인증은 브라우저에서 사람이 해야 한다. 2주면 주말을 두 번 지난다."""
     assert TOKEN_WARN_DAYS == 14
+
+
+# --- 크레딧 ---
+#
+# Anthropic은 잔여 크레딧을 알려주지 않는다. /cost는 "할인 후, 크레딧 적용 전"
+# 금액이고 Admin 키와 4~24시간 지연이 따른다. 그래서 우리 사용량을 누적해
+# 내가 정한 예산과 비교한다(설계 0.1).
+
+import pytest
+
+from pipeline.lib.guard import (
+    BUDGET_WARN_RATIO,
+    PRICES,
+    SPIKE_FACTOR,
+    month_cost_usd,
+    token_spike,
+)
+
+
+def test_입력과_출력을_각각의_단가로_센다():
+    """출력이 5배 비싸다. 입력만 세면 비용을 크게 낮잡는다."""
+    runs = [{"input_tokens": 1_000_000, "output_tokens": 1_000_000}]
+
+    assert month_cost_usd(runs, model="claude-opus-5-5") == 24.0   # 4 + 20
+
+
+def test_단가가_문서와_같다():
+    """2026-11-18 claude-api 문서: Opus 5.5 $4 / $20 per MTok.
+    단가가 바뀌면 여기서 먼저 깨진다."""
+    assert PRICES["claude-opus-5-5"] == (4.0, 20.0)
+
+
+def test_값이_없는_실행은_0으로_세지_않고_건너뛴다():
+    """배선 전 실행은 None이다. 0으로 세면 '안 썼다'가 되어 거짓 안심이다."""
+    runs = [
+        {"input_tokens": None, "output_tokens": None},
+        {"input_tokens": 1_000_000, "output_tokens": 0},
+    ]
+
+    assert month_cost_usd(runs, model="claude-opus-5-5") == 4.0
+
+
+def test_한쪽만_있는_실행도_건너뛴다():
+    """출력이 비싼 쪽이다. 입력만 세고 출력을 0으로 두면 가장 큰 몫을 놓친다."""
+    runs = [{"input_tokens": 1_000_000, "output_tokens": None}]
+
+    assert month_cost_usd(runs, model="claude-opus-5-5") is None
+
+
+def test_잰_실행이_하나도_없으면_모른다():
+    """**원안은 0.0을 돌려줬다.** 그러면 "이번 달 $0 / 예산 $10"이 된다.
+    2026-11-18 실측: runs 3행 모두 토큰이 비어 있다(배선 전). 지금 이 가드가
+    말할 수 있는 것은 "모른다"뿐이다."""
+    runs = [{"input_tokens": None, "output_tokens": None}]
+
+    assert month_cost_usd(runs, model="claude-opus-5-5") is None
+    assert month_cost_usd([], model="claude-opus-5-5") is None
+
+
+def test_모르는_모델이면_분명하게_실패한다():
+    """모델을 바꾸고 단가를 안 넣으면 KeyError 한 단어로 끝난다. 무엇을 할지 말한다."""
+    with pytest.raises(KeyError, match="PRICES"):
+        month_cost_usd([{"input_tokens": 1, "output_tokens": 1}], model="claude-x")
+
+
+def test_표본이_적으면_급증을_판정하지_않는다():
+    """이틀치로 '평소의 3배'를 판정하면 셋째 날마다 경고가 뜬다."""
+    runs = [{"input_tokens": 1000}, {"input_tokens": 1000}]
+
+    assert token_spike(runs, today_input=9999) is False
+
+
+def test_중앙값의_3배를_넘으면_급증이다():
+    runs = [{"input_tokens": 1000} for _ in range(10)]
+
+    assert token_spike(runs, today_input=3001) is True
+    assert token_spike(runs, today_input=2999) is False
+
+
+def test_임계값들():
+    assert BUDGET_WARN_RATIO == 0.8
+    assert SPIKE_FACTOR == 3

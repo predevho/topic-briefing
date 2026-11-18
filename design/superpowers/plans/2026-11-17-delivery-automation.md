@@ -1915,9 +1915,47 @@ git commit -m "feat: 토큰 만료 가드 — 14일 전부터"
 
 **Anthropic은 잔여 크레딧을 알려주지 않는다.** Usage and Cost Analytics의 `/cost`는 "할인 후, 크레딧 적용 전" 금액이고, Admin API 키와 4~24시간 지연이 따라온다. 그래서 **우리 사용량을 누적해 내가 정한 예산과 비교한다**(설계 0.1).
 
+> **2026-11-18 실행 중 고친 것 — 둘.**
+>
+> **1. 재시도한 시도의 토큰이 버려지고 있었다.** `llm.parse`는 스키마 실패를
+> `retry_on_schema`로 한 번 더 시도한다(`SCHEMA_ATTEMPTS = 2`). 그런데 스키마
+> 실패는 응답을 **다 받은 뒤에** 판정되므로 그 응답은 이미 과금됐다. 원래는
+> 성공한 마지막 응답의 토큰만 돌아와서 재시도한 날은 비용이 낮게 잡혔다 —
+> 이 가드가 막으려는 바로 그 방향의 오차다. 요약 한 번이 입력 3.7만 + 출력
+> 최대 3만 토큰이라, 버려지는 시도 하나가 월 예산의 몇 %다.
+> `SchemaError.usage`에 그 시도의 토큰을 싣고 `retry_counting_tokens`가 합친다.
+> 재시도 정책은 `retry_on_schema`에 그대로 맡긴다. 끝내 실패하면 쓴 토큰
+> 합을 마지막 예외에 실어 올린다(Task 13이 읽을 수 있다). `AnthropicLLM.parse`는
+> SDK를 부르므로 단위 테스트가 없어서, SDK 클라이언트 자리에 가짜 응답을 끼워
+> 실제 코드 경로를 밟아 확인했다 — 스키마 실패 후 성공 시 100/30 + 100/20 =
+> 200/50.
+>
+> **2. 잰 것이 없을 때 `0.0`을 돌려줬다.** 원안 `month_cost_usd`는 토큰이
+> 없는 실행을 건너뛰고 합을 내는데, 전부 없으면 `0.0`이 된다 — "이번 달 $0".
+> 2026-11-18 실측으로 runs 3행 모두 토큰이 비어 있다(Task 3 배선 전 실행).
+> 지금 이 가드가 말할 수 있는 것은 "모른다"뿐이므로 `None`을 돌려준다.
+> 입력만 있고 출력이 없는 실행도 건너뛴다 — 출력이 5배 비싸서 0으로 두면
+> 가장 큰 몫을 놓친다.
+>
+> 단가는 claude-api 문서로 확인했다: Opus 5.5 $4 / $20 per MTok. 사고 토큰은
+> 출력으로 과금되고 `usage.output_tokens`에 들어 있다. 캐시는 쓰지 않는다.
+>
+> **예산 어림** (실측 입력 크기 기준, rank.py·summarize.py 주석):
+>
+> | | 토큰 | 비용 |
+> |---|---|---|
+> | 입력 (rank 42,135 + summarize 37,432) | ≈ 8만 | $0.32 |
+> | 출력 (채점 18,614 + 요약 ≈1,540) | ≈ 2만 | $0.40 |
+> | 사고 (상한 8,000 + 28,000) | 0 ~ 3.6만 | $0 ~ 0.72 |
+> | **1회** | | **$0.72 ~ 1.44** |
+> | **월 (평일 ≈22회)** | | **$16 ~ 32** |
+>
+> 출력·사고는 실측이 아니라 상한이다. 첫 주 runs가 실제 값을 준다.
+
 **Files:**
 - Modify: `pipeline/lib/guard.py`
-- Test: `tests/test_guard.py`
+- Modify: `pipeline/lib/llm.py` (`SchemaError.usage`, `retry_counting_tokens`)
+- Test: `tests/test_guard.py`, `tests/test_llm.py`
 
 - [ ] **Step 1: 실패하는 테스트를 쓴다**
 
@@ -2023,7 +2061,7 @@ def token_spike(runs: list[dict], *, today_input: int) -> bool:
 .venv/bin/python -m pytest tests/test_guard.py -v
 ```
 
-Expected: 15 passed
+Expected: 가드 9개 + llm 4개. 전체 479개.
 
 - [ ] **Step 5: 커밋**
 

@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import statistics
 from datetime import date, datetime
 from pathlib import Path
 
@@ -132,3 +133,72 @@ def token_expiring(expires_at: datetime, *, now: datetime) -> int | None:
     """
     days = (expires_at - now).days
     return days if days <= TOKEN_WARN_DAYS else None
+
+
+# --- 크레딧 ---
+#
+# **Anthropic은 잔여 크레딧을 알려주지 않는다.** Usage and Cost Analytics의
+# /cost는 "할인 후, 크레딧 적용 전" 금액이고 Admin API 키와 4~24시간 지연이
+# 따른다. 그래서 우리 사용량을 누적해 내가 정한 예산과 비교한다(설계 0.1).
+
+# 모델별 단가 (USD per 1M tokens): 입력, 출력.
+# 2026-11-18 claude-api 문서로 확인. **정가 기준이라 실제 청구액과 다르다** —
+# 할인과 크레딧 적용 전이다. 목적은 정확한 금액이 아니라 조기 소진 감지다.
+# 사고(thinking) 토큰은 출력으로 과금되고 usage.output_tokens에 이미 들어 있다.
+# 캐시는 쓰지 않는다(쓰면 캐시 쓰기·읽기 단가가 따로 필요하다).
+PRICES: dict[str, tuple[float, float]] = {
+    "claude-opus-5-5": (4.0, 20.0),
+}
+
+BUDGET_WARN_RATIO = 0.8    # 월 예산의 80%를 넘으면 알린다
+SPIKE_FACTOR = 3           # 평소의 3배
+SPIKE_MIN_SAMPLES = 5      # 이보다 적으면 판정하지 않는다
+
+
+def month_cost_usd(runs: list[dict], *, model: str) -> float | None:
+    """그 달 실행들이 쓴 비용(정가 기준). 잰 실행이 하나도 없으면 None.
+
+    입력·출력 중 하나라도 None인 실행은 **건너뛴다.** 0으로 세면 "안 썼다"가
+    되어 비용을 낮잡는다 — 특히 출력이 5배 비싸서 출력을 0으로 두면 가장 큰
+    몫을 놓친다.
+
+    잰 실행이 없으면 0.0이 아니라 None이다. 0.0이면 "이번 달 $0"이라는
+    거짓 안심이 된다(2026-11-18: runs 3행 모두 배선 전이라 비어 있다).
+
+    어느 달의 runs를 넘길지는 호출부가 정한다(KST 기준 그 달).
+    """
+    if model not in PRICES:
+        raise KeyError(
+            f"{model}의 단가가 없다. pipeline/lib/guard.py의 PRICES에 "
+            f"(입력, 출력) USD/MTok을 더한다."
+        )
+    price_in, price_out = PRICES[model]
+
+    measured = [
+        run for run in runs
+        if run.get("input_tokens") is not None and run.get("output_tokens") is not None
+    ]
+    if not measured:
+        return None
+
+    total = sum(
+        run["input_tokens"] / 1_000_000 * price_in
+        + run["output_tokens"] / 1_000_000 * price_out
+        for run in measured
+    )
+    return round(total, 4)
+
+
+def token_spike(runs: list[dict], *, today_input: int) -> bool:
+    """오늘 입력 토큰이 평소(중앙값)의 3배를 넘는가.
+
+    피드 하나가 갑자기 10배를 쏟아내는 것 같은 **당일 이상**을 잡는다.
+    예산 비율은 느린 누수를 잡고, 이쪽이 사고를 잡는다.
+
+    표본이 적으면 판정하지 않는다 — 이틀치로 중앙값을 내면 셋째 날마다
+    경고가 뜬다. 중앙값인 이유: 평균은 그 사고 하루에 끌려 올라간다.
+    """
+    history = [r["input_tokens"] for r in runs if r.get("input_tokens")]
+    if len(history) < SPIKE_MIN_SAMPLES:
+        return False
+    return today_input > statistics.median(history) * SPIKE_FACTOR
