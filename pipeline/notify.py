@@ -22,6 +22,7 @@ from pipeline.lib.guard import (
     SPIKE_FACTOR,
     load_seed_last_seen,
     month_cost_usd,
+    new_source_failures,
     silent_sources,
     token_expiring,
     token_spike,
@@ -144,6 +145,7 @@ def notify(
                 sources=sources or [],
                 today=date.fromisoformat(briefing_date),
                 today_counts=raw.source_counts,
+                today_errors=[error.model_dump() for error in raw.errors],
                 today_input=totals.input if totals else 0,
                 budget_usd=budget_usd,
                 now=moment,
@@ -237,13 +239,23 @@ def guard_warnings(
     budget_usd: float | None,
     now: datetime,
     seed: dict[str, date] | None = None,
+    today_errors: list[dict] | None = None,
 ) -> list[str]:
-    """가드 셋(침묵·토큰 만료·크레딧)을 돌려 사람이 읽을 줄로 만든다.
+    """가드(새 소스 실패·침묵·토큰 만료·크레딧)를 돌려 사람이 읽을 줄로 만든다.
 
     가치 순서는 소스 침묵 > 토큰 만료 > 크레딧이다(스펙 8.4).
     """
     lines: list[str] = []
     runs = remote.recent_runs(days=GUARD_LOOKBACK_DAYS)
+
+    # --- 새로 생긴 소스 실패 ---
+    # 침묵 가드보다 먼저 둔다. 막힌 소스를 30일 뒤가 아니라 그날 안다.
+    kind_ko = {"config": "설정", "moved": "주소 이전"}
+    for failure in new_source_failures(today_errors or [], runs, today=today):
+        lines.append(
+            f"새 소스 실패: {failure['source']} ({kind_ko[failure['kind']]}) — "
+            f"{failure['message']}. 직전 실행에는 없었다. 계속돼도 다시 알리지 않는다"
+        )
 
     # --- 소스 침묵 ---
     # **오늘 수집분을 더한다.** 가드는 오늘 실행 기록을 남기기 전에 돈다.

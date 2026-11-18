@@ -202,3 +202,46 @@ def token_spike(runs: list[dict], *, today_input: int) -> bool:
     if len(history) < SPIKE_MIN_SAMPLES:
         return False
     return today_input > statistics.median(history) * SPIKE_FACTOR
+
+
+# --- 새로 생긴 소스 실패 ---
+#
+# collect_warnings의 "고쳐야 할 소스"·"주소 이전"은 콘솔에만 찍힌다. Actions
+# 로그는 아무도 매일 읽지 않는다 — 2026-11-18 우아한형제들 403(러너 IP에서만)이
+# 침묵 가드가 잡을 30일 뒤까지 묻힐 뻔했다. 그대로 슬랙에 보내면 같은 실패가
+# 매일 반복 알림이 되므로 **직전 실행일에 없던 실패만** 알린다.
+
+# 사람이 고쳐야 하는 종류만. transient는 기다리면 된다 — 할 일이 없다.
+ACTIONABLE_KINDS = frozenset({"config", "moved"})
+
+
+def new_source_failures(
+    today_errors: list[dict], runs: list[dict], *, today: date
+) -> list[dict]:
+    """오늘 수집 오류 중 **직전 실행일에 없던** (소스, 종류)를 돌려준다.
+
+    - 직전 실행일은 오늘보다 앞선 가장 늦은 briefing_date다. 그날 행이 여럿이면
+      합쳐서 본다(2026-11-12처럼 개발 중 --force 흔적이 있다).
+    - 오늘 행은 직전으로 치지 않는다 — --force 재실행이 그것과 비교하면 안 된다.
+    - 그제 실패하고 어제 회복했다가 오늘 다시 실패하면 새로 알린다. 어제
+      고쳐졌다고 생각했을 것이다.
+    - 종류가 바뀌면(moved → config) 새 실패다. 할 일이 달라진다.
+
+    계속되는 실패는 첫날 한 번만 알린다. 그 뒤로도 막혀 있으면 침묵 가드가
+    등급 기준일(fast 30일)에 다시 알린다.
+    """
+    earlier = [r for r in runs if r["briefing_date"] < today.isoformat()]
+    if earlier:
+        last_day = max(r["briefing_date"] for r in earlier)
+        seen = {
+            (e.get("source"), e.get("kind"))
+            for r in earlier if r["briefing_date"] == last_day
+            for e in (r.get("errors") or [])
+        }
+    else:
+        seen = set()
+
+    return [
+        e for e in today_errors
+        if e["kind"] in ACTIONABLE_KINDS and (e["source"], e["kind"]) not in seen
+    ]

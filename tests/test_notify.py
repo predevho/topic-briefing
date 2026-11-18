@@ -789,3 +789,27 @@ def test_예산을_반올림하지_않고_적는다():
     [line] = _guard(remote, budget=12.5)
 
     assert "$12.5" in line
+
+
+def test_새로_생긴_소스_실패를_알린다():
+    remote = FakeRemoteStore()
+    remote.runs_history = [{"briefing_date": "2026-11-17", "source_counts": {}, "errors": []}]
+
+    lines = guard_warnings(
+        remote=remote, sources=[], today=TODAY, today_counts={}, today_input=0,
+        budget_usd=None, now=GUARD_NOW, seed={},
+        today_errors=[{"source": "우아한형제들", "kind": "config",
+                       "message": "https://techblog.woowahan.com/feed/ HTTP 403"}],
+    )
+
+    [line] = lines
+    assert line.startswith("새 소스 실패: 우아한형제들")
+    assert "HTTP 403" in line
+    assert "다시 알리지 않는다" in line
+
+
+def test_notify가_오늘_수집_오류를_가드에_넘긴다():
+    """_raw()에는 '깨진소스' config 오류가 있다. 직전 실행이 없으니 새 실패다."""
+    warned = _notify_warned()
+
+    assert any(w.startswith("새 소스 실패: 깨진소스") for w in warned)

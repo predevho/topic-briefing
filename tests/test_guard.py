@@ -297,3 +297,84 @@ def test_중앙값의_3배를_넘으면_급증이다():
 def test_임계값들():
     assert BUDGET_WARN_RATIO == 0.8
     assert SPIKE_FACTOR == 3
+
+
+# --- 새로 생긴 소스 실패 ---
+#
+# collect_warnings의 "고쳐야 할 소스"는 콘솔에만 찍힌다. Actions 로그는 아무도
+# 매일 읽지 않으므로, 2026-11-18 우아한형제들 403(러너 IP에서만)이 침묵 가드가
+# 잡을 30일 뒤까지 묻힐 뻔했다. 그대로 슬랙에 보내면 같은 실패가 매일 반복
+# 알림이 된다 — 그래서 **어제는 없던 실패만** 알린다.
+
+from pipeline.lib.guard import new_source_failures
+
+
+def _err(source, kind="config", message="HTTP 403"):
+    return {"source": source, "kind": kind, "message": message}
+
+
+def test_직전_실행에_없던_설정_실패는_새_실패다():
+    runs = [{"briefing_date": "2026-11-12", "errors": []}]
+
+    found = new_source_failures([_err("우아한형제들")], runs, today=date(2026, 11, 18))
+
+    assert found == [_err("우아한형제들")]
+
+
+def test_직전_실행에도_있던_실패는_다시_알리지_않는다():
+    runs = [{"briefing_date": "2026-11-18", "errors": [_err("우아한형제들")]}]
+
+    assert new_source_failures([_err("우아한형제들")], runs, today=date(2026, 11, 19)) == []
+
+
+def test_일시_실패는_알리지_않는다():
+    """기다리면 되는 실패다 — 사람이 할 일이 없다(collect_warnings와 같은 기준)."""
+    assert new_source_failures([_err("HN", kind="transient")], [], today=TODAY) == []
+
+
+def test_주소_이전도_새로_생기면_알린다():
+    found = new_source_failures([_err("토스", kind="moved", message="a → b")], [], today=TODAY)
+
+    assert [f["kind"] for f in found] == ["moved"]
+
+
+def test_직전_실행이_없으면_지금_실패가_전부_새것이다():
+    assert len(new_source_failures([_err("a"), _err("b")], [], today=TODAY)) == 2
+
+
+def test_가장_최근_실행일만_비교한다():
+    """그제 실패했다가 어제 회복하고 오늘 다시 실패하면 새로 알린다 —
+    어제 고쳐졌다고 생각했을 것이다."""
+    runs = [
+        {"briefing_date": "2026-11-16", "errors": [_err("토스")]},
+        {"briefing_date": "2026-11-17", "errors": []},
+    ]
+
+    assert new_source_failures([_err("토스")], runs, today=date(2026, 11, 18)) == [_err("토스")]
+
+
+def test_같은_날의_여러_행은_합쳐서_본다():
+    """2026-11-12처럼 한 날짜에 행이 여럿일 수 있다(개발 중 --force 흔적)."""
+    runs = [
+        {"briefing_date": "2026-11-17", "errors": []},
+        {"briefing_date": "2026-11-17", "errors": [_err("토스")]},
+    ]
+
+    assert new_source_failures([_err("토스")], runs, today=date(2026, 11, 18)) == []
+
+
+def test_종류가_바뀌면_새_실패다():
+    """주소 이전이던 소스가 아예 막히면(moved → config) 할 일이 달라진다."""
+    runs = [{"briefing_date": "2026-11-17", "errors": [_err("토스", kind="moved")]}]
+
+    assert len(new_source_failures([_err("토스")], runs, today=date(2026, 11, 18))) == 1
+
+
+def test_오늘_행은_직전으로_치지_않는다():
+    """--force로 같은 날 다시 돌리면 오늘 행이 이미 있다. 그건 '어제'가 아니다."""
+    runs = [
+        {"briefing_date": "2026-11-17", "errors": []},
+        {"briefing_date": "2026-11-18", "errors": [_err("토스")]},
+    ]
+
+    assert len(new_source_failures([_err("토스")], runs, today=date(2026, 11, 18))) == 1

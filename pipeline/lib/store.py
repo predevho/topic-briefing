@@ -106,7 +106,7 @@ class RemoteStore(Protocol):
     # --- 가드가 읽는 것 (계획 3 Task 12) ---
 
     def recent_runs(self, days: int) -> list[dict]:
-        """최근 실행 이력(briefing_date, status, source_counts, 토큰).
+        """최근 실행 이력(briefing_date, status, source_counts, 토큰, errors).
 
         가드가 읽는다 — 소스 침묵은 source_counts를, 크레딧은 토큰을 본다.
         status='sent'만이 아니라 **전부** 돌려준다: 전송이 실패한 날에도
@@ -267,7 +267,7 @@ class SupabaseStore:
         since = (datetime.now(timezone.utc).date() - timedelta(days=days)).isoformat()
         rows = (
             self._db.table("runs")
-            .select("briefing_date, status, source_counts, input_tokens, output_tokens")
+            .select("briefing_date, status, source_counts, input_tokens, output_tokens, errors")
             .gte("briefing_date", since)
             # PostgREST 기본 상한(1000행)에 조용히 걸리지 않게 명시한다.
             # 날짜당 한두 행이라 400일이면 넉넉하다.

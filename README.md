@@ -169,6 +169,7 @@ python -m pipeline.prune --dry-run  # 정리 대상 확인
 
 | 경고 | 뜻 | 할 일 |
 |---|---|---|
+| 새 소스 실패: X (설정/주소 이전) | 직전 실행일에 없던 실패다 — 피드 주소가 바뀌었거나 막혔다. **첫날 한 번만** 온다 | `check_feeds.py`로 본다. 주소 이전이면 `sources.yaml` 갱신 |
 | 소스 침묵: X — N일째 (기준 M일) | 그 소스에서 M일 넘게 글을 못 봤다 | `check_feeds.py`로 본다. 멈춘 블로그면 `sources.yaml`에서 `quiet_tier: none` |
 | 카카오 토큰 만료 N일 남음/지남 | 회전 저장이 실패했거나 오래 멈췄다 | `python scripts/kakao_auth.py` |
 | 카카오 토큰 갱신 실패 — 카톡 없이 보냈다 | 오늘 카톡이 안 갔다(페이지는 갱신됨) | 같다 |
