@@ -777,3 +777,15 @@ def test_슬랙이_실패하면_로그에_경고를_남기고_실패를_알린�
                          post=broken) is False
     err = capsys.readouterr().err
     assert "소스 침묵: 토스" in err and "no_service" in err
+
+
+def test_예산을_반올림하지_않고_적는다():
+    """원래 `:.0f`라 예산 $12.5가 "$12"로, $0.01이 "$0"으로 보였다
+    (2026-11-18 가드 훈련에서 발견)."""
+    remote = FakeRemoteStore()
+    remote.runs_history = [{"briefing_date": "2026-11-03", "source_counts": {},
+                            "input_tokens": 3_000_000, "output_tokens": 0}]   # $12
+
+    [line] = _guard(remote, budget=12.5)
+
+    assert "$12.5" in line

@@ -280,7 +280,7 @@ def guard_warnings(
         # 말하지 않는다.
         if spent is not None and spent >= budget_usd * BUDGET_WARN_RATIO:
             lines.append(
-                f"크레딧: 이번 달 ${spent:.2f} / 예산 ${budget_usd:.0f} "
+                f"크레딧: 이번 달 ${spent:.2f} / 예산 ${budget_usd:g} "
                 f"({spent / budget_usd:.0%}, 정가 기준)"
             )
 

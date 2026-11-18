@@ -102,3 +102,16 @@ def test_실패_보고가_모든_단계를_안다():
     for step_id in ids:
         assert f"steps.{step_id}.outcome" in expression, f"{step_id}가 FAILED_STEP에 없다"
     assert report["run"] == "python -m pipeline.report_failure"
+
+
+def test_실패_훈련은_손으로_켤_때만_수집_전에_돈다():
+    """훈련이 예약 실행에서 돌면 매일 아침이 실패한다. 수집 뒤에 있으면
+    API를 부르고 기록을 남긴 뒤에 실패한다."""
+    wf = _workflow()
+    steps = wf["jobs"]["briefing"]["steps"]
+    ids = [s.get("id") for s in steps]
+    drill = steps[ids.index("drill")]
+
+    assert drill["if"] == "inputs.drill_failure"
+    assert ids.index("drill") < ids.index("collect")
+    assert _triggers(wf)["workflow_dispatch"]["inputs"]["drill_failure"]["default"] is False
