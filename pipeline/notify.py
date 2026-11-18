@@ -27,13 +27,12 @@ from pipeline.lib.guard import (
     token_spike,
 )
 from pipeline.lib.config import Source, load_sources
-from pipeline.lib.http import post_json
 from pipeline.lib.kakao import KakaoTokens, access_token, rotated_expiry, should_store
 from pipeline.lib.llm import MODEL
 from pipeline.lib.retry import Permanent, Transient
 from pipeline.lib.secrets import optional, require
 from pipeline.lib.sender import ConsoleSender, KakaoSender, Sender
-from pipeline.lib.slack import SlackSender
+from pipeline.lib.slack import send_warnings
 from pipeline.lib.store import LocalStore, RemoteStore, SupabaseStore
 from pipeline.lib.timeutil import KST
 from pipeline.models import Briefing, RankedBundle, RawBundle
@@ -338,27 +337,6 @@ def build_kakao_sender(
                  f"{type(error).__name__}: {error}")
 
     return KakaoSender(access_token=tokens.access_token, page_url=page_url)
-
-
-def send_warnings(
-    lines: list[str], *, webhook_url: str, post: Callable[..., str] = post_json
-) -> bool:
-    """모은 경고를 슬랙으로 한 번에 보낸다. 실패하면 False.
-
-    슬랙마저 실패하면 경고가 갈 곳이 실행 로그뿐이다. 거기라도 전부 남기고
-    False를 돌려 실행이 실패로 끝나게 한다 — GitHub Actions는 실패한 예약
-    실행을 메일로 알린다. 그게 마지막 줄이다.
-    """
-    if not lines:
-        return True
-    try:
-        SlackSender(webhook_url=webhook_url, post=post).warn(lines)
-        return True
-    except Exception as error:  # noqa: BLE001
-        print(f"슬랙 경고 전송 실패: {error}", file=sys.stderr)
-        for line in lines:
-            print(f"  ⚠ {line}", file=sys.stderr)
-        return False
 
 
 def main() -> None:

@@ -14,6 +14,7 @@ Task 12). 삼키는 것과 막지 않는 것은 다르다.
 
 from __future__ import annotations
 
+import sys
 from typing import Callable
 
 from pipeline.lib.http import post_json
@@ -88,3 +89,27 @@ class SlackSender:
         # HTML을 실어 보내면 상태 코드로는 성공으로 읽히므로 본문까지 본다.
         if reply.strip() != "ok":
             raise Permanent(f"{LABEL} 응답이 ok가 아니다: {reply[:200]!r}")
+
+
+def send_warnings(
+    lines: list[str], *, webhook_url: str, post: Callable[..., str] = post_json
+) -> bool:
+    """모은 경고를 슬랙으로 한 번에 보낸다. 실패하면 False.
+
+    notify(매일 경고)와 report_failure(단계 실패)가 함께 쓴다.
+
+    슬랙마저 실패하면 경고가 갈 곳이 실행 로그뿐이다. 거기라도 전부 남기고
+    False를 돌려 실행이 실패로 끝나게 한다 — GitHub Actions는 실패한 예약
+    실행을 메일로 알린다. 그게 마지막 줄이다.
+    """
+    if not lines:
+        return True
+    try:
+        SlackSender(webhook_url=webhook_url, post=post).warn(lines)
+        return True
+    except Exception as error:  # noqa: BLE001
+        print(f"슬랙 경고 전송 실패: {error}", file=sys.stderr)
+        for line in lines:
+            print(f"  ⚠ {line}", file=sys.stderr)
+        return False
+
