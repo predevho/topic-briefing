@@ -147,6 +147,8 @@ def article_rows(*, briefing_date: str, summaries: list) -> list[dict]:
             "source": raw.source,
             "published_at": raw.published,
             "headline": summary.headline,
+            # 2026-11-19부터 본문 요약이 요점을 대신한다. 새 요약의 bullets는 [].
+            "overview": summary.overview,
             "bullets": summary.bullets,
             "why_it_matters": summary.why_it_matters,
             "topic": summary.article.ranked.topic,

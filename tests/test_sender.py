@@ -149,6 +149,21 @@ def test_헤드라인과_요점과_링크를_출력한다(capsys):
     assert "https://toss.tech/a/0" in out
 
 
+def test_본문_요약이_있으면_문단으로_출력한다(capsys):
+    """2026-11-19부터 요점 대신 본문 요약이다. 로컬에서 품질을 볼 때 문단이
+    보여야 한다. 긴 문단은 터미널 폭에 맞춰 줄을 바꾼다."""
+    summary = _summary().model_copy(update={
+        "overview": "배경 문단이다. " * 12 + "\n\n결과 문단이다.",
+        "bullets": [],
+    })
+    ConsoleSender().send(briefing=_briefing([summary]), raw=_raw())
+    out = capsys.readouterr().out
+
+    assert "배경 문단이다." in out and "결과 문단이다." in out
+    assert "첫 요점" not in out
+    assert max(len(line) for line in out.splitlines()) <= 90
+
+
 def test_점수와_출처를_출력한다(capsys):
     """튜닝 중에 '왜 이게 뽑혔나'를 보려면 둘 다 필요하다."""
     ConsoleSender().send(briefing=_briefing([_summary()]), raw=_raw())

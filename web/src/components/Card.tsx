@@ -25,11 +25,29 @@ export default function Card({ article, number, onOpen }: Props) {
         </h2>
       </a>
 
-      <ul className="m-0 flex list-disc flex-col gap-1.5 pl-[15px] text-[14.5px] leading-[1.7] text-ink-2">
-        {article.bullets.map((bullet, i) => (
-          <li key={i}>{bullet}</li>
-        ))}
-      </ul>
+      {/*
+        2026-11-19부터 원문을 간추린 2~3문단(overview)이 요점을 대신한다.
+        문단은 빈 줄로 나뉘어 온다. 그 전 글은 overview가 없으니 요점을 그린다.
+      */}
+      {article.overview ? (
+        <div className="flex flex-col gap-3 text-[14.5px] leading-[1.75] text-ink-2">
+          {article.overview
+            .split(/\n\s*\n/)
+            .map((paragraph) => paragraph.trim())
+            .filter(Boolean)
+            .map((paragraph, i) => (
+              <p key={i} className="m-0">
+                {paragraph}
+              </p>
+            ))}
+        </div>
+      ) : (
+        <ul className="m-0 flex list-disc flex-col gap-1.5 pl-[15px] text-[14.5px] leading-[1.7] text-ink-2">
+          {article.bullets.map((bullet, i) => (
+            <li key={i}>{bullet}</li>
+          ))}
+        </ul>
+      )}
 
       {/*
         한글에 이탤릭을 쓰지 않는다 — Noto Serif KR에 이탤릭이 없어서 브라우저가

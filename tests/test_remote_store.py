@@ -163,3 +163,26 @@ def test_기사_행에_순번을_1부터_매긴다():
         "https://toss.tech/a/2",
     ]
     assert all(row["briefing_date"] == "2026-11-12" for row in rows)
+
+
+def test_기사_행에_본문_요약이_들어간다():
+    """2026-11-19부터 요점 대신 본문 요약이다. 요점은 빈 목록으로 저장한다
+    (articles.bullets는 NOT NULL default '[]')."""
+    from pipeline.lib.store import article_rows
+    from tests.test_sender import _summary
+
+    summary = _summary(0).model_copy(update={"overview": "배경.\n\n결과.", "bullets": []})
+
+    [row] = article_rows(briefing_date="2026-11-19", summaries=[summary])
+
+    assert row["overview"] == "배경.\n\n결과."
+    assert row["bullets"] == []
+
+
+def test_예전_요약은_본문_요약이_비어_있다():
+    from pipeline.lib.store import article_rows
+    from tests.test_sender import _summary
+
+    [row] = article_rows(briefing_date="2026-11-12", summaries=[_summary(0)])
+
+    assert row["overview"] is None

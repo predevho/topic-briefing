@@ -10,6 +10,7 @@
 """
 
 import json
+import textwrap
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
@@ -115,8 +116,16 @@ class ConsoleSender:
                 print()
                 print(f"  [{position}] {summary.article.ranked.score:3d}  "
                       f"{mark}  {summary.headline}")
-                for bullet in summary.bullets:
-                    print(f"           • {bullet}")
+                # 2026-11-19부터 본문 요약(2~3문단)이 요점을 대신한다. 예전
+                # 데이터(overview 없음)는 요점을 찍는다.
+                if summary.overview:
+                    for paragraph in summary.overview.split("\n\n"):
+                        for line in textwrap.wrap(paragraph.strip(), width=60):
+                            print(f"           {line}")
+                        print()
+                else:
+                    for bullet in summary.bullets:
+                        print(f"           • {bullet}")
                 print(f"           왜: {summary.why_it_matters}")
                 print(f"           {item.source} · {출처표시}  {item.url}")
 

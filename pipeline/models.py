@@ -164,7 +164,10 @@ class SummaryDraft(Contract):
 
     index: int = Field(ge=0)
     headline: str = Field(min_length=1)
-    bullets: list[str] = Field(min_length=1, max_length=3)
+    # 원문을 간추린 2~3문단. 문단은 빈 줄로 나눈다(2026-11-19 — 요점을 대신한다).
+    # **길이 제약을 걸지 않는다** — 헤드라인과 같은 이유다. 빈 요약은
+    # summarize가 그 한 건만 거른다.
+    overview: str
     why_it_matters: str
 
 
@@ -177,7 +180,11 @@ class SummarySheet(Contract):
 class Summary(Contract):
     article: Article
     headline: str = Field(min_length=1, max_length=HEADLINE_MAX)
-    bullets: list[str] = Field(min_length=1, max_length=3)
+    # 원문을 간추린 2~3문단(2026-11-19부터). 그 전 데이터(briefing.json, DB)는 None.
+    overview: str | None = None
+    # 2026-11-19부터 새 요약은 빈 목록이다 — overview가 대신한다. 예전 데이터를
+    # 읽어야 하므로 필드는 남긴다.
+    bullets: list[str] = Field(default_factory=list, max_length=3)
     why_it_matters: str
 
 

@@ -46,9 +46,10 @@ SUMMARIZE_EFFORT: Effort = "medium"
 # 크게 둔다 — 2026-11-18 실측으로 입력이 37,432토큰(기사 10건 본문)이고
 # effort가 medium이라 사고가 길어질 수 있다.
 
-# 요약 한 건당 출력 토큰. 헤드라인 30자 + 불릿 2~3개 + 의미 한 문장이면
-# 실측 220토큰 정도이고, 여유를 둔다.
-OUTPUT_TOKENS_PER_SUMMARY = 400
+# 요약 한 건당 출력 토큰. 헤드라인 30자 + 본문 요약 약 700~1,000자 + 의미 한
+# 문장. 요점 3개이던 때는 실측 220토큰이었다(400으로 잡았다). 한국어 1,000자가
+# 대략 700~900토큰이라 여유를 둔다(2026-11-19).
+OUTPUT_TOKENS_PER_SUMMARY = 1_300
 
 # 사고 토큰 여유. 비스트리밍 한계(21,333)를 넘기므로 래퍼가 스트리밍을
 # 고른다 — Task 16에서 검증된 경로다.
@@ -93,8 +94,17 @@ def build_prompt(*, articles: list[Article]) -> str:
         "- 본문을 읽어보니 내용이 없는 글(보도자료 재가공, 제품 홍보, "
         "제목만 그럴듯한 글)은 **제외한다.**",
         f"- headline은 **{HEADLINE_MAX}자 이내**. 카카오톡 메시지 길이 제약이다.",
-        "- bullets는 2~3개. 각 한 문장. 글의 핵심 주장과 근거를 담는다.",
-        "- why_it_matters는 한 문장. '이게 왜 중요한가'를 백엔드 개발자 관점에서 쓴다.",
+        "- overview는 **원문을 간추린 글**이다. 읽는 사람이 원문을 열지 않고도 흐름을 "
+        "따라갈 수 있어야 한다. 사실을 나열하지 말고 문장을 이어서 쓴다.",
+        "  - **2~3문단**, 문단 사이는 빈 줄. 문단마다 흐름의 한 단계를 맡는다 — "
+        "① 배경·문제(왜 이 일을 했나) ② 무엇을·어떻게(접근과 핵심 내용) "
+        "③ 결과·시사점(수치, 한계, 주의할 점).",
+        "  - 원문이 넉넉하면 **700~1,000자**로 쓴다. 수치·고유명사·버전은 원문 그대로 옮긴다.",
+        "  - **원문에 없는 내용은 쓰지 않는다.** 추측이나 일반론으로 길이를 채우지 않는다.",
+        "  - '(발췌 — 원문이 짧다)' 표시가 붙은 글은 받은 원문이 짧은 발췌뿐이다. "
+        "**원문보다 길게 쓰지 않는다** — 1~2문단으로 원문에 있는 만큼만 쓴다.",
+        "- why_it_matters는 한 문장. '이게 왜 중요한가'를 백엔드 개발자 관점에서 쓴다. "
+        "overview를 반복하지 말고 의미만 말한다.",
         "- **모든 출력은 한국어로 쓴다.** 원문이 영어여도 한국어로 요약한다.",
         "- 고유명사(제품명, 회사명, 기술명)는 원어를 그대로 쓴다.",
         "- index에는 각 글의 [번호]를 쓴다. 제외한 글은 응답에 넣지 않는다.",
@@ -107,8 +117,11 @@ def build_prompt(*, articles: list[Article]) -> str:
         item = article.ranked.item
         # 본문을 여기서 다시 자르지 않는다. enrich가 BODY_MAX_CHARS로 이미
         # 잘랐고, 손잡이가 두 곳이면 토큰 예산을 추적할 수 없다.
+        # 발췌로만 받은 글은 모델에게 알린다. 모르면 짧은 원문을 길게 늘리려고
+        # 지어낸다(2026-11-19 설계). GeekNews 글이 늘 이렇다.
+        excerpt = " (발췌 — 원문이 짧다)" if article.body_source == "rss_excerpt" else ""
         lines += [
-            f"### [{index}] {item.title}",
+            f"### [{index}] {item.title}{excerpt}",
             f"출처: {item.source}  /  주제: {article.ranked.topic}",
             "",
             article.body,
@@ -157,11 +170,17 @@ def summarize(*, articles: ArticlesBundle, llm: LLM) -> Briefing:
         if article.ranked.score < SCORE_THRESHOLD:
             continue
 
+        # 빈 요약은 요약이 아니다. 스키마에서 거부하면 시트 **전체**가 날아가므로
+        # 여기서 그 한 건만 거른다.
+        overview = draft.overview.strip()
+        if not overview:
+            continue
+
         summaries.append(Summary(
             article=article,
             # LLM이 상한을 넘겨도 브리핑을 잃지 않는다. shorten 설명 참조.
             headline=shorten(draft.headline),
-            bullets=draft.bullets,
+            overview=overview,
             why_it_matters=draft.why_it_matters,
         ))
 
@@ -202,8 +221,7 @@ def main() -> None:
         article = summary.article
         mark = "발췌" if article.body_source == "rss_excerpt" else "본문"
         print(f"  {article.ranked.score:3d}  [{mark}] {summary.headline}")
-        for bullet in summary.bullets:
-            print(f"       - {bullet[:70]}")
+        print(f"       {len(summary.overview or '')}자 · {(summary.overview or '')[:70]}")
         print(f"       → {summary.why_it_matters[:70]}")
         print()
 

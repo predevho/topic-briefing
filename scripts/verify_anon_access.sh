@@ -25,7 +25,7 @@ TMP=$(mktemp); trap 'rm -f "$TMP"' EXIT
 FAIL=0
 
 # 페이지가 실제로 읽는 컬럼. web/src/lib/data.ts와 맞춰야 한다.
-ART_COLS="id,briefing_date,url,source,published_at,headline,bullets,why_it_matters,topic,score,position"
+ART_COLS="id,briefing_date,url,source,published_at,headline,overview,bullets,why_it_matters,topic,score,position"
 RUN_COLS="briefing_date,status,collected_count,considered_count,max_score,published_count,source_counts"
 
 note() { printf '  %s\n' "$1"; }

@@ -8,7 +8,7 @@ export const THRESHOLD = 60
 
 // articles에서 읽는 컬럼. reason을 넣으면 컬럼 단위 grant 때문에 질의가 실패한다.
 const ARTICLE_COLUMNS =
-  'id, url, source, published_at, headline, bullets, why_it_matters, topic, score, position'
+  'id, url, source, published_at, headline, overview, bullets, why_it_matters, topic, score, position'
 
 // runs에서 읽는 컬럼. errors·input_tokens·window_*는 grant가 없다.
 // published_count는 화면에 쓰지 않고 **정렬에만** 쓴다 — 아래 RUN_ORDER 참조.

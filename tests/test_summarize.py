@@ -56,7 +56,7 @@ def _draft(index: int) -> SummaryDraft:
     return SummaryDraft(
         index=index,
         headline=f"헤드라인 {index}",
-        bullets=["요점 하나", "요점 둘"],
+        overview=f"배경 {index}.\n\n무엇을 했나 {index}.\n\n결과 {index}.",
         why_it_matters="중요한 이유",
     )
 
@@ -122,14 +122,24 @@ def test_초안_헤드라인에는_상한을_걸지_않는다():
 
     # 긴 헤드라인도 받아들여야 한다 — 거부하면 브리핑 전체를 잃는다
     draft = SummaryDraft(index=0, headline="가" * 40,
-                         bullets=["b"], why_it_matters="w")
+                         overview="o", why_it_matters="w")
     assert len(draft.headline) == 40
 
 
-def test_불릿_개수가_스키마에_들어간다():
+def test_초안은_요점_대신_본문_요약을_받는다():
+    """요점과 해설이 같은 요지를 두 번 말했다(2026-11-19 사용자). 요점을 없애고
+    본문을 간추린 요약 하나로 간다."""
     schema = SummarySheet.model_json_schema()["$defs"]["SummaryDraft"]
-    assert schema["properties"]["bullets"]["maxItems"] == 3
-    assert schema["properties"]["bullets"]["minItems"] == 1
+    assert "bullets" not in schema["properties"]
+    assert "overview" in schema["required"]
+
+
+def test_초안_본문_요약에는_길이_제약을_걸지_않는다():
+    """헤드라인 maxLength 위반 하나로 7건이 날아간 것과 같은 함정이다
+    (2026-11-18). 스키마의 길이 제약은 강제되지 않고, 어기면 시트 전체가 거부된다."""
+    schema = SummarySheet.model_json_schema()["$defs"]["SummaryDraft"]
+    prop = schema["properties"]["overview"]
+    assert "maxLength" not in prop and "minLength" not in prop
 
 
 def test_최종_요약은_헤드라인_상한을_지킨다():
@@ -138,18 +148,33 @@ def test_최종_요약은_헤드라인_상한을_지킨다():
 
     with pytest.raises(ValidationError):
         Summary(article=_article(), headline="가" * (HEADLINE_MAX + 1),
-                bullets=["b"], why_it_matters="w")
+                overview="o", why_it_matters="w")
 
 
 def test_빈_헤드라인을_거부한다():
     with pytest.raises(ValidationError):
-        SummaryDraft(index=0, headline="", bullets=["b"], why_it_matters="w")
+        SummaryDraft(index=0, headline="", overview="o", why_it_matters="w")
 
 
-def test_불릿이_없으면_거부한다():
-    """요점이 없는 요약은 요약이 아니다."""
-    with pytest.raises(ValidationError):
-        SummaryDraft(index=0, headline="h", bullets=[], why_it_matters="w")
+def test_본문_요약이_비면_그_한_건만_버린다():
+    """빈 요약은 요약이 아니다. 하지만 스키마에서 거부하면 **시트 전체**가
+    날아간다 — 그 한 건만 거른다."""
+    drafts = [
+        _draft(0),
+        SummaryDraft(index=1, headline="빈 요약", overview="  ", why_it_matters="w"),
+    ]
+
+    briefing, _ = _summarize([_article(0), _article(1)], drafts)
+
+    assert [s.headline for s in briefing.summaries] == ["헤드라인 0"]
+
+
+def test_요약에_본문_요약이_담기고_요점은_비어_있다():
+    briefing, _ = _summarize([_article(0)], [_draft(0)])
+
+    [summary] = briefing.summaries
+    assert summary.overview.startswith("배경 0.")
+    assert summary.bullets == []
 
 
 # --- 프롬프트 ---
@@ -266,8 +291,8 @@ def test_중복_index는_한_번만_담는다():
 
 def test_중복_index는_먼저_나온_것을_쓴다():
     """어느 쪽을 쓰는지가 정해져 있어야 한다."""
-    첫째 = SummaryDraft(index=0, headline="먼저", bullets=["b"], why_it_matters="w")
-    둘째 = SummaryDraft(index=0, headline="나중", bullets=["b"], why_it_matters="w")
+    첫째 = SummaryDraft(index=0, headline="먼저", overview="o", why_it_matters="w")
+    둘째 = SummaryDraft(index=0, headline="나중", overview="o", why_it_matters="w")
     briefing, _ = _summarize([_article(0)], [첫째, 둘째])
 
     assert briefing.summaries[0].headline == "먼저"
@@ -358,8 +383,8 @@ def test_앞뒤_공백을_없앤다():
 def test_긴_헤드라인이_와도_브리핑을_잃지_않는다():
     """이게 이 기능의 존재 이유다. 한 건 때문에 7건을 잃지 않는다."""
     drafts = [
-        SummaryDraft(index=0, headline="짧다", bullets=["b"], why_it_matters="w"),
-        SummaryDraft(index=1, headline="가" * 40, bullets=["b"], why_it_matters="w"),
+        SummaryDraft(index=0, headline="짧다", overview="o", why_it_matters="w"),
+        SummaryDraft(index=1, headline="가" * 40, overview="o", why_it_matters="w"),
     ]
     briefing, _ = _summarize([_article(0), _article(1)], drafts)
 
@@ -413,3 +438,37 @@ def test_전부_기준_미달이어도_토큰은_기록된다():
     assert briefing.summaries == []
     assert briefing.tokens is not None
     assert briefing.tokens.input == 12000
+
+
+# --- 본문 요약 프롬프트 (2026-11-19) ---
+
+def test_프롬프트가_흐름을_잇는_본문_요약을_요구한다():
+    prompt = build_prompt(articles=[_article()])
+
+    assert "overview" in prompt
+    assert "2~3문단" in prompt
+    assert "배경" in prompt and "결과" in prompt
+    assert "bullets" not in prompt
+
+
+def test_프롬프트가_지어내기를_막는다():
+    """짧은 원문을 길게 쓰라고 하면 모델이 지어낸다."""
+    prompt = build_prompt(articles=[_article()])
+
+    assert "원문에 없는 내용" in prompt
+    assert "원문보다 길게 쓰지 않는다" in prompt
+
+
+def test_발췌로_받은_글에_표시가_붙는다():
+    excerpt = _article(1).model_copy(update={"body_source": "rss_excerpt"})
+
+    prompt = build_prompt(articles=[_article(0), excerpt])
+
+    # 규칙 설명에도 같은 문구가 있으므로 **글 머리 줄**을 직접 본다.
+    headers = [line for line in prompt.splitlines() if line.startswith("### [")]
+    assert headers == ["### [0] 제목 0", "### [1] 제목 1 (발췌 — 원문이 짧다)"]
+
+
+def test_본문_요약_한_건의_출력_예산이_넉넉하다():
+    """한국어 약 1,000자 + 왜 중요한가. 원래 400토큰(요점 3개 기준)이었다."""
+    assert OUTPUT_TOKENS_PER_SUMMARY >= 1_200

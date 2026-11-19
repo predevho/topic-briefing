@@ -6,6 +6,9 @@
 export type Article = {
   id: number
   headline: string
+  // 원문을 간추린 2~3문단, 문단 사이는 빈 줄(2026-11-19부터). 그 전 글은 null —
+  // 그때는 bullets를 그린다. 새 글의 bullets는 빈 목록이다.
+  overview: string | null
   bullets: string[]
   why_it_matters: string
   source: string

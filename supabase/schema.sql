@@ -26,6 +26,9 @@ create table if not exists public.articles (
   source         text        not null,
   published_at   timestamptz not null,
   headline       text        not null,
+  -- 원문을 간추린 2~3문단(2026-11-19부터). 그 전 글은 null — 페이지는 요점을 그린다.
+  overview       text,
+  -- 2026-11-19부터 새 글은 빈 목록이다(overview가 대신한다).
   bullets        jsonb       not null default '[]'::jsonb,
   why_it_matters text        not null,
   topic          text        not null,
@@ -201,7 +204,7 @@ revoke all on public.kakao_auth     from anon, authenticated;
 -- 판단 근거)은 페이지에 쓰지 않으므로 내보내지 않는다. 테이블 통째로
 -- 주면 ?select=reason으로 읽힌다.
 grant select (id, briefing_date, url, source, published_at,
-              headline, bullets, why_it_matters, topic, score, position)
+              headline, overview, bullets, why_it_matters, topic, score, position)
   on public.articles to anon, authenticated;
 
 drop policy if exists articles_public_read on public.articles;
