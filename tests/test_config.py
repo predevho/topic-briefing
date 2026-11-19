@@ -166,7 +166,8 @@ def test_실제_소스_목록의_등급_배정():
     sources = load_sources()
     tiers = Counter(s.quiet_tier for s in sources)
 
-    assert tiers == {"fast": 25, "weekly": 10, "monthly": 4, "none": 6}
+    # 우아한형제들(fast)은 2026-11-19에 껐다 — Actions 러너에서만 403(sources.yaml 주석).
+    assert tiers == {"fast": 24, "weekly": 10, "monthly": 4, "none": 6}
     by_name = {s.name: s.quiet_tier for s in sources}
     assert by_name["하이퍼커넥트_기술블로그"] == "none"
     # 피드가 최근 20건만 보여 날짜가 적어 보이지만 하루 20건씩 쓰는 곳이다.

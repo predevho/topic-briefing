@@ -88,12 +88,17 @@ sources:
     lang: ko
     enabled: false
 
+  # 끔(2026-11-19). GitHub Actions 러너(데이터센터 IP)에서만 피드가 HTTP 403이다 —
+  # 11/18·11/19 두 번. 같은 요청이 로컬(맥)에서는 200이다(server: cloudflare).
+  # Cloudflare가 데이터센터 IP를 막는 것으로 보인다. 브라우저인 척 우회하지
+  # 않는다 — 사이트가 막은 것이다. 집 IP에서 도는 러너(self-hosted)로 옮기면
+  # 다시 켠다.
   - name: 우아한형제들_기술블로그
     url: https://techblog.woowahan.com/feed/
     kind: rss
     weight: 1.3
     lang: ko
-    enabled: true
+    enabled: false
 
   # 침묵 등급 weekly(기준 90일) — 시드 최대공백 21일.
   - name: 네이버_D2
