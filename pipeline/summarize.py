@@ -10,8 +10,10 @@
 실행: python -m pipeline.summarize
 """
 
+import re
 from datetime import datetime, timezone
 
+from pipeline.enrich import BODY_MAX_CHARS
 from pipeline.lib.llm import LLM, AnthropicLLM, Effort
 from pipeline.lib.secrets import require
 from pipeline.lib.store import LocalStore
@@ -82,6 +84,82 @@ def shorten(text: str, limit: int = HEADLINE_MAX) -> str:
     return cut + "…"
 
 
+# --- 잘린 끝 정리 (2026-11-20) ---
+#
+# 2026-11-20 실측: GeekNews 발췌가 `…남음 smo …`에서 끝났고, 모델이 잘린 "smo"를
+# 보고 "smoltcp, DPDK, AF_XDP를 이용해"라고 썼다. DPDK·AF_XDP는 원문에 없다.
+# 보지 못한 조각은 채울 수도 없으므로 **모델에게 보내기 전에** 정리한다.
+# 저장된 원문(article_bodies)은 건드리지 않는다 — 여기서만 다듬는다.
+
+# 원문이 잘렸다는 표시. 프롬프트 규칙이 이 표시를 가리킨다.
+CUT_MARK = "[원문이 여기서 끊겼다]"
+
+# 잘린 꼬리로 보는 조각: 공백 없는 영문·숫자·기호. "smo", "4.", "AF_X" 같은 것.
+# 한국어 단어는 남긴다 — 메모체 발췌는 마지막 단어가 대개 완결돼 있다("않음").
+_LATIN_FRAGMENT = re.compile(r"^[\x21-\x7e]+$")
+
+# 문장 끝: 마침표·물음표·느낌표 뒤 공백, 또는 줄바꿈.
+_SENTENCE_END = re.compile(r"[.!?。](?=\s)|\n")
+
+
+def prepare_body(body: str) -> str:
+    """모델에게 보낼 원문의 끝을 정리한다. 온전한 원문은 그대로 돌려준다.
+
+    - 발췌가 `…`로 끝나면(GeekNews): 줄임표를 떼고, 그 앞이 잘린 영문·숫자
+      조각이면 함께 뗀다. 버전 번호가 `4.`처럼 잘리면 모델이 버전을 지어낸다.
+    - enrich가 BODY_MAX_CHARS에서 표시 없이 잘랐으면: 마지막 완결 문장까지
+      되돌린다('consensus algorithms wou' 같은 꼬리를 남기지 않는다).
+    - 둘 다 CUT_MARK를 붙여 모델이 잘린 글임을 알게 한다.
+    """
+    text = body.rstrip()
+
+    if text.endswith(("…", "...")):
+        text = text.rstrip(".…").rstrip()
+        head, _, last = text.rpartition(" ")
+        if head and _LATIN_FRAGMENT.match(last):
+            text = head.rstrip(" ,;:")
+        return f"{text} {CUT_MARK}"
+
+    if len(body) >= BODY_MAX_CHARS:
+        ends = [m.end() for m in _SENTENCE_END.finditer(text)]
+        if ends:
+            text = text[: ends[-1]].rstrip()
+        else:
+            text = text.rsplit(" ", 1)[0]
+        return f"{text} {CUT_MARK}"
+
+    return body
+
+
+# 원문에 없는 영문 용어 점검. 도구·제품 이름을 지어내는 것이 가장 흔한 틀림이고
+# (2026-11-20 DPDK·AF_XDP), 영문 토큰은 기계적으로 대조할 수 있다.
+_TERM = re.compile(r"[A-Za-z][A-Za-z0-9_\-]{2,}")
+
+
+def unsupported_terms(overview: str, reference: str) -> list[str]:
+    """요약에 나오지만 원문에 없는 영문 용어(3자 이상). 대소문자는 무시한다.
+
+    `reference`는 모델이 본 것 — 본문에 **제목과 출처 이름**을 더해 넘긴다
+    (2026-11-20 오탐: 'Simon Willison'은 출처 줄에서 본 이름이다).
+
+    끝 글자 하나 차이는 있는 것으로 본다 — 복수·활용형(원문 'canaries' →
+    요약 'canary', 2026-11-20 오탐). 지어낸 이름(DPDK, AF_XDP)은 그래도 걸린다.
+
+    막지는 않는다 — 실행 로그에 찍어 사람이 볼 수 있게 한다. 원문이 한국어로
+    쓴 것을 요약이 영문으로 옮긴 경우(예: '쿠버네티스' → 'Kubernetes')도 걸리므로
+    판정이 아니라 단서다.
+    """
+    lowered = reference.lower()
+    found: list[str] = []
+    for term in _TERM.findall(overview):
+        key = term.lower()
+        if key in lowered or (len(key) >= 4 and key[:-1] in lowered):
+            continue
+        if term not in found:
+            found.append(term)
+    return found
+
+
 def build_prompt(*, articles: list[Article]) -> str:
     """요약 프롬프트를 조립한다."""
     lines = [
@@ -101,6 +179,10 @@ def build_prompt(*, articles: list[Article]) -> str:
         "③ 결과·시사점(수치, 한계, 주의할 점).",
         "  - 원문이 넉넉하면 **700~1,000자**로 쓴다. 수치·고유명사·버전은 원문 그대로 옮긴다.",
         "  - **원문에 없는 내용은 쓰지 않는다.** 추측이나 일반론으로 길이를 채우지 않는다.",
+        "  - 도구·제품·라이브러리 이름과 버전·수치는 **원문에 철자 그대로 있는 것만** 쓴다. "
+        "배경지식으로 보충하지 않는다.",
+        f"  - 원문 끝의 '{CUT_MARK}'는 글이 거기서 잘렸다는 뜻이다. "
+        "**잘린 단어를 추측해 완성하지 않는다.**",
         "  - '(발췌 — 원문이 짧다)' 표시가 붙은 글은 받은 원문이 짧은 발췌뿐이다. "
         "**원문보다 길게 쓰지 않는다** — 1~2문단으로 원문에 있는 만큼만 쓴다.",
         "- why_it_matters는 한 문장. '이게 왜 중요한가'를 백엔드 개발자 관점에서 쓴다. "
@@ -124,7 +206,8 @@ def build_prompt(*, articles: list[Article]) -> str:
             f"### [{index}] {item.title}{excerpt}",
             f"출처: {item.source}  /  주제: {article.ranked.topic}",
             "",
-            article.body,
+            # 잘린 끝을 정리해서 보낸다(prepare_body). 저장된 원문은 그대로다.
+            prepare_body(article.body),
             "",
             "---",
             "",
@@ -222,6 +305,11 @@ def main() -> None:
         mark = "발췌" if article.body_source == "rss_excerpt" else "본문"
         print(f"  {article.ranked.score:3d}  [{mark}] {summary.headline}")
         print(f"       {len(summary.overview or '')}자 · {(summary.overview or '')[:70]}")
+        # 원문에 없는 영문 용어 — 지어내기의 단서(2026-11-20 DPDK·AF_XDP).
+        item = article.ranked.item
+        reference = f"{item.title} {item.source} {article.body}"
+        if extra := unsupported_terms(summary.overview or "", reference):
+            print(f"       ⚠ 원문에 없는 영문 용어: {', '.join(extra)}")
         print(f"       → {summary.why_it_matters[:70]}")
         print()
 

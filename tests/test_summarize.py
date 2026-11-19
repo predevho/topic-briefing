@@ -472,3 +472,107 @@ def test_발췌로_받은_글에_표시가_붙는다():
 def test_본문_요약_한_건의_출력_예산이_넉넉하다():
     """한국어 약 1,000자 + 왜 중요한가. 원래 400토큰(요점 3개 기준)이었다."""
     assert OUTPUT_TOKENS_PER_SUMMARY >= 1_200
+
+
+# --- 잘린 끝 정리 (2026-11-20) ---
+#
+# 2026-11-20 실측: GeekNews 발췌가 `…남음 smo …`에서 끝났고, 모델이 잘린 "smo"를
+# 보고 "smoltcp, DPDK, AF_XDP를 이용해"라고 썼다. DPDK·AF_XDP는 원문에 없다.
+# 보지 못한 조각은 채울 수도 없다 — 모델에게 보내기 **전에** 정리한다.
+# 저장된 원문(article_bodies)은 건드리지 않는다.
+
+from pipeline.summarize import CUT_MARK, prepare_body, unsupported_terms
+
+
+def test_발췌_끝의_잘린_영문_조각을_뗀다():
+    body = "커널 네트워크 스택이 메모리 병목으로 남음 smo …"
+
+    prepared = prepare_body(body)
+
+    assert "smo" not in prepared
+    assert prepared.startswith("커널 네트워크 스택이 메모리 병목으로 남음")
+    assert prepared.endswith(CUT_MARK)
+
+
+def test_발췌_끝의_잘린_버전_번호를_뗀다():
+    """`4.`가 남으면 모델이 "4.0.1"처럼 버전을 지어낼 수 있다."""
+    prepared = prepare_body("영향 버전은 Ruby 3.3.14, 3.4.13, 4. …")
+
+    assert "4." not in prepared.replace("3.4.13", "")
+    assert "3.4.13" in prepared
+
+
+def test_발췌_끝의_한국어_단어는_남긴다():
+    """한국어 메모체는 마지막 단어가 대개 완결돼 있다('않음'). 떼면 뜻이 잘린다."""
+    prepared = prepare_body("실시간 재배치는 아직 지원하지 않음 …")
+
+    assert "지원하지 않음" in prepared
+    assert prepared.endswith(CUT_MARK)
+
+
+def test_길이_상한에서_잘린_본문은_마지막_문장까지_되돌린다():
+    """enrich가 8,000자에서 표시 없이 자른다 — 'consensus algorithms wou'처럼."""
+    from pipeline.enrich import BODY_MAX_CHARS
+
+    # 8,000자에서 잘려 "A sentence en"처럼 끝나는 본문
+    body = ("A sentence ends here. " * 400)[:BODY_MAX_CHARS]
+    assert not body.endswith(". ")
+
+    prepared = prepare_body(body)
+
+    assert prepared.endswith("here. " + CUT_MARK) or prepared.endswith("here." + CUT_MARK)
+    assert len(prepared) < len(body) + len(CUT_MARK)
+
+
+def test_온전한_본문은_그대로다():
+    body = "짧고 온전한 글이다. 끝까지 있다."
+
+    assert prepare_body(body) == body
+
+
+def test_프롬프트가_잘린_원문을_정리해서_보낸다():
+    excerpt = _article(0).model_copy(update={
+        "body_source": "rss_excerpt", "body": "병목으로 남음 smo …"})
+
+    prompt = build_prompt(articles=[excerpt])
+
+    assert "smo" not in prompt
+    assert CUT_MARK in prompt
+
+
+def test_프롬프트가_잘린_단어_완성과_이름_지어내기를_막는다():
+    prompt = build_prompt(articles=[_article()])
+
+    assert "잘린 단어를 추측해 완성하지 않는다" in prompt
+    assert "철자 그대로" in prompt
+
+
+# --- 원문에 없는 용어 점검 ---
+
+def test_원문에_없는_영문_용어를_찾는다():
+    """2026-11-20의 그 문장으로 시험한다."""
+    body = "TCP/IP 처리를 커널 밖으로 옮겨 메모리 사용량을 줄임 smo …"
+    overview = "그래서 smoltcp, DPDK, AF_XDP를 이용해 TCP/IP 처리를 커널 밖으로 옮겼다."
+
+    assert unsupported_terms(overview, body) == ["smoltcp", "DPDK", "AF_XDP"]
+
+
+def test_원문에_있는_용어는_대소문자가_달라도_통과한다():
+    assert unsupported_terms("Redis Cluster를 지원한다", "redis cluster 클라이언트") == []
+
+
+def test_복수형과_활용형은_원문에_있는_것으로_본다():
+    """2026-11-20 오탐: 원문 'long-running canaries'를 요약이 'canary'로 옮겼다."""
+    assert unsupported_terms("장기 실행 canary를 도입했다", "long-running canaries that use") == []
+
+
+def test_출처_이름과_제목은_원문에_있는_것으로_본다():
+    """2026-11-20 오탐: 'Simon Willison'은 출처 이름이다. 모델은 프롬프트의
+    출처 줄에서 봤다. 호출부가 제목·출처를 대조 범위에 넣는다."""
+    reference = "Simon_Willison 제목 본문에는 이름이 없다"
+    assert unsupported_terms("Simon Willison은 썼다", reference) == []
+
+
+def test_끝_글자_하나를_봐줘도_지어낸_이름은_잡힌다():
+    body = "TCP/IP 처리를 커널 밖으로 옮겨 메모리 사용량을 줄임"
+    assert unsupported_terms("DPDK와 AF_XDP로 옮겼다", body) == ["DPDK", "AF_XDP"]
