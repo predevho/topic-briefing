@@ -99,8 +99,21 @@ class RemoteStore(Protocol):
         """실행 이력을 남긴다. 0건이어도, 전송에 실패해도 반드시 호출한다."""
         ...
 
-    def save_articles(self, *, briefing_date: str, summaries: list) -> None:
-        """발행 글과 본문을 저장한다. 본문은 별도 테이블로 들어간다."""
+    def save_articles(self, *, briefing_date: str, summaries: list) -> list[int]:
+        """발행 글과 본문을 저장한다. 본문은 별도 테이블로 들어간다.
+
+        저장한 글의 id를 summaries 순서대로 돌려준다 — 관련 글 연결이 쓴다.
+        """
+        ...
+
+    # --- 관련 글 연결 (2026-11-23) ---
+
+    def save_embeddings(self, rows: list[tuple[int, str, list[float]]]) -> None:
+        """(글 id, 모델, 벡터)를 저장한다. 같은 글이면 덮어쓴다."""
+        ...
+
+    def link_related(self, article_ids: list[int], threshold: float, limit: int) -> int:
+        """그 글들의 관련 글을 다시 계산해 article_links에 쓴다. 쓴 행 수."""
         ...
 
     # --- 가드가 읽는 것 (계획 3 Task 12) ---
@@ -244,7 +257,8 @@ class SupabaseStore:
             "errors": errors,
         }).execute()
 
-    def save_articles(self, *, briefing_date: str, summaries: list) -> None:
+    def save_articles(self, *, briefing_date: str, summaries: list) -> list[int]:
+        ids: list[int] = []
         for summary, row in zip(
             summaries, article_rows(briefing_date=briefing_date, summaries=summaries)
         ):
@@ -257,6 +271,7 @@ class SupabaseStore:
                 .data
             )
             article_id = rows[0]["id"]
+            ids.append(article_id)
 
             self._db.table("article_bodies").upsert({
                 "article_id": article_id,
@@ -264,6 +279,24 @@ class SupabaseStore:
                 "body_source": summary.article.body_source,
                 "fallback_reason": summary.article.fallback_reason,
             }, on_conflict="article_id").execute()
+        return ids
+
+    def save_embeddings(self, rows: list[tuple[int, str, list[float]]]) -> None:
+        if not rows:
+            return
+        # pgvector는 '[0.1,0.2,...]' 문자열을 받는다.
+        self._db.table("article_embeddings").upsert([
+            {"article_id": article_id, "model": model,
+             "embedding": "[" + ",".join(f"{x:.8g}" for x in vector) + "]"}
+            for article_id, model, vector in rows
+        ], on_conflict="article_id").execute()
+
+    def link_related(self, article_ids: list[int], threshold: float, limit: int) -> int:
+        # SQL 함수 link_related는 service_role만 부를 수 있다(anon·authenticated는 회수).
+        result = self._db.rpc("link_related", {
+            "p_article_ids": article_ids, "p_threshold": threshold, "p_limit": limit,
+        }).execute()
+        return int(result.data or 0)
 
     def recent_runs(self, days: int) -> list[dict]:
         since = (datetime.now(timezone.utc).date() - timedelta(days=days)).isoformat()

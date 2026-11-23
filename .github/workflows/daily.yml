@@ -45,6 +45,8 @@ jobs:
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+      # 관련 글 연결(2026-11-23). 없으면 연결만 건너뛰고 슬랙에 알린다.
+      VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
       # 비밀이 아니다 — 평문으로 둔다.
       PAGE_URL: https://topic-briefing.vercel.app
       # 크레딧 가드의 월 예산. 어림 1회 $0.7~1.4, 평일 월 22회면 $16~32

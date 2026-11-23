@@ -30,6 +30,10 @@ class FakeRemoteStore:
         self.kakao: tuple[str, datetime] | None = None
         self.kakao_save_error: Exception | None = None
         self.saved_tokens: list[tuple[str, datetime]] = []
+        # 관련 글 연결 (2026-11-23)
+        self.saved_ids: list[list[int]] = []
+        self.embeddings: list[tuple[int, str, list[float]]] = []
+        self.link_calls: list[tuple[list[int], float, int]] = []
 
     def last_sent_at(self) -> datetime | None:
         return self._last_sent
@@ -76,10 +80,21 @@ class FakeRemoteStore:
             "errors": errors,
         })
 
-    def save_articles(self, *, briefing_date: str, summaries: list) -> None:
+    def save_articles(self, *, briefing_date: str, summaries: list) -> list[int]:
         if self._save_error is not None:
             raise self._save_error
         self.saved.append({"briefing_date": briefing_date, "summaries": summaries})
+        base = 100 * len(self.saved)
+        ids = [base + i for i in range(len(summaries))]
+        self.saved_ids.append(ids)
+        return ids
+
+    def save_embeddings(self, rows: list[tuple[int, str, list[float]]]) -> None:
+        self.embeddings.extend(rows)
+
+    def link_related(self, article_ids: list[int], threshold: float, limit: int) -> int:
+        self.link_calls.append((list(article_ids), threshold, limit))
+        return 0
 
     def recent_runs(self, days: int) -> list[dict]:
         return list(self.runs_history)

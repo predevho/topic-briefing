@@ -11,7 +11,8 @@ type Props = {
 
 export default function Card({ article, number, onOpen }: Props) {
   return (
-    <article className="flex flex-col gap-2.5">
+    // id: 관련 글 링크(/날짜#a123)가 이 카드로 바로 내려오게 한다.
+    <article id={`a${article.id}`} className="flex scroll-mt-6 flex-col gap-2.5">
       <a
         href={article.url}
         target="_blank"
@@ -56,6 +57,28 @@ export default function Card({ article, number, onOpen }: Props) {
       <p className="m-0 border-l-2 border-quote pl-[11px] text-[13.5px] leading-[1.6] text-muted">
         {article.why_it_matters}
       </p>
+
+      {/*
+        이전에 다룬 비슷한 글(2026-11-23, 유사도 0.52 이상·최대 3건). 하루 단위가
+        아니라 며칠·몇 주에 걸친 흐름을 따라가게 한다. 없으면 아무것도 그리지 않는다.
+      */}
+      {article.related.length > 0 && (
+        <div className="flex flex-col gap-1 font-meta text-[12px] text-muted">
+          <span>이전에 다룬 관련 글</span>
+          <ul className="m-0 flex list-none flex-col gap-1 p-0">
+            {article.related.map((link) => (
+              <li key={link.id}>
+                <a
+                  href={`${import.meta.env.BASE_URL}${link.date}#a${link.id}`}
+                  className="text-ink-2 underline decoration-rule underline-offset-2"
+                >
+                  {link.date.slice(5).replace('-', '/')} · {link.headline}
+                </a>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       <div className="mt-0.5 flex items-center gap-2.5 font-meta text-[11.5px] text-muted">
         <span>{article.source}</span>

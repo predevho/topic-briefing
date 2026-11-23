@@ -813,3 +813,81 @@ def test_notify가_오늘_수집_오류를_가드에_넘긴다():
     warned = _notify_warned()
 
     assert any(w.startswith("새 소스 실패: 깨진소스") for w in warned)
+
+
+# --- 관련 글 연결 (2026-11-23) ---
+
+from pipeline.lib.related import EMBED_DIM, EMBED_MODEL, LINK_LIMIT, LINK_THRESHOLD
+
+
+def _fake_embed(calls: list):
+    def embed(texts):
+        calls.append(texts)
+        return [[0.1] * EMBED_DIM for _ in texts]
+    return embed
+
+
+def _notify_with_embed(*, remote=None, embed=None, briefing=None):
+    warned: list[str] = []
+    remote = remote or FakeRemoteStore()
+    notify(
+        briefing=briefing or _briefing([_summary(0), _summary(1)]),
+        ranked=_ranked(), raw=_raw(), remote=remote,
+        briefing_date="2026-11-10", senders=[FakeSender()], now=SENT_AT,
+        warn=warned.append, sources=[], embed=embed,
+    )
+    return remote, warned
+
+
+def test_기사를_저장한_뒤_임베딩하고_관련_글을_잇는다():
+    calls: list = []
+    remote, warned = _notify_with_embed(embed=_fake_embed(calls))
+
+    [texts] = calls
+    assert len(texts) == 2 and texts[0].startswith("헤드라인 0")
+    ids = remote.saved_ids[-1]
+    assert [row[0] for row in remote.embeddings] == ids
+    assert all(row[1] == EMBED_MODEL for row in remote.embeddings)
+    assert remote.link_calls == [(ids, LINK_THRESHOLD, LINK_LIMIT)]
+    assert not any("관련 글" in w for w in warned)
+
+
+def test_임베딩이_실패해도_브리핑은_나가고_알린다():
+    def broken(texts):
+        raise Transient("Voyage embeddings HTTP 429")
+
+    sender = FakeSender()
+    remote = FakeRemoteStore()
+    warned: list[str] = []
+    notify(
+        briefing=_briefing([_summary(0)]), ranked=_ranked(), raw=_raw(), remote=remote,
+        briefing_date="2026-11-10", senders=[sender], now=SENT_AT,
+        warn=warned.append, sources=[], embed=broken,
+    )
+
+    assert sender.calls == 1
+    assert remote.runs[-1]["status"] == "sent"
+    assert any(w.startswith("관련 글 연결 실패") and "429" in w for w in warned)
+    assert remote.link_calls == []
+
+
+def test_요약이_없으면_임베딩하지_않는다():
+    calls: list = []
+    _notify_with_embed(embed=_fake_embed(calls), briefing=_briefing([]))
+
+    assert calls == []
+
+
+def test_기사_저장이_실패하면_임베딩하지_않는다():
+    """저장된 id가 없으면 이을 글이 없다. 저장 실패는 따로 경고된다."""
+    calls: list = []
+    _notify_with_embed(remote=FakeRemoteStore(save_error=RuntimeError("timeout")),
+                       embed=_fake_embed(calls))
+
+    assert calls == []
+
+
+def test_임베딩이_없으면_건너뛴다():
+    remote, warned = _notify_with_embed(embed=None)
+
+    assert remote.embeddings == [] and remote.link_calls == []

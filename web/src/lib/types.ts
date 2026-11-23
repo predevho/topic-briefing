@@ -19,6 +19,16 @@ export type Article = {
   // 그날 브리핑 안의 순번(1부터). 카톡 번호와 같다. 2026-11-17 이전 행은
   // 마이그레이션이 채웠지만, 타입은 DB대로 null을 허용한다.
   position: number | null
+  // 이전에 다룬 비슷한 글(2026-11-23). 유사도 높은 순, 최대 3건. 없으면 빈 목록.
+  related: RelatedLink[]
+}
+
+// article_links → articles(related_id). 공개 컬럼만 읽는다.
+export type RelatedLink = {
+  id: number
+  date: string
+  headline: string
+  similarity: number
 }
 
 export type Day = {

@@ -248,7 +248,7 @@ def _json_response(status: int, **kwargs) -> httpx.Response:
 
 
 def test_JSON_POST가_본문_텍스트를_돌려준다():
-    def fake(url, payload, timeout):
+    def fake(url, payload, timeout, headers):
         assert url == SECRET_URL
         assert payload == {"text": "hi"}
         return _json_response(200, text="ok")
@@ -281,3 +281,16 @@ def test_JSON_POST_시간_초과도_label로_알린다():
         post_json(SECRET_URL, payload={}, label="Slack webhook", send=slow)
 
     assert "secret" not in str(caught.value)
+
+
+def test_JSON_POST가_헤더를_실어_보낸다():
+    """임베딩 API는 키를 Authorization 헤더로 받는다(2026-11-23)."""
+    seen = {}
+
+    def fake(url, payload, timeout, headers):
+        seen.update(headers or {})
+        return _json_response(200, text="{}")
+
+    post_json(SECRET_URL, payload={}, headers={"Authorization": "Bearer K"}, send=fake)
+
+    assert seen == {"Authorization": "Bearer K"}

@@ -115,3 +115,11 @@ def test_실패_훈련은_손으로_켤_때만_수집_전에_돈다():
     assert drill["if"] == "inputs.drill_failure"
     assert ids.index("drill") < ids.index("collect")
     assert _triggers(wf)["workflow_dispatch"]["inputs"]["drill_failure"]["default"] is False
+
+
+def test_관련_글_연결_키가_워크플로에_있다():
+    """VOYAGE_API_KEY는 optional()로 읽는다 — 위의 require 점검이 잡지 못한다.
+    빠지면 실행은 돌지만 관련 글 연결이 매일 조용히 건너뛰어진다(슬랙 경고만)."""
+    env = _workflow()["jobs"]["briefing"]["env"]
+
+    assert env.get("VOYAGE_API_KEY") == "${{ secrets.VOYAGE_API_KEY }}"

@@ -1,3 +1,4 @@
+import { useEffect } from 'react'
 import type { Article, Day } from '../lib/types'
 import { recordClick } from '../lib/likes'
 import Card from './Card'
@@ -14,6 +15,13 @@ function korean(date: string): string {
 
 export default function Today({ day }: { day: Day }) {
   const count = day.articles.length
+
+  // 관련 글 링크(/날짜#a123)로 들어오면 그 카드로 내려간다. 글은 비동기로 그려지므로
+  // 브라우저의 기본 앵커 이동이 일어나지 않는다 — 그린 뒤에 직접 옮긴다.
+  useEffect(() => {
+    const target = window.location.hash.slice(1)
+    if (target) document.getElementById(target)?.scrollIntoView()
+  }, [day])
 
   function onOpen(article: Article) {
     recordClick(article.id)

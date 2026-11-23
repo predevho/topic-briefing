@@ -213,14 +213,17 @@ def post_form(
 # 슬랙 웹훅용이다. 본문은 JSON이고, 응답은 JSON이 아니라 **텍스트**("ok")다.
 # 그래서 post_form과 반환형이 다르다. 전송과 분류는 _classified를 공유한다.
 
-def _httpx_post_json(url: str, payload: dict, timeout: float) -> httpx.Response:
-    return httpx.post(url, json=payload, timeout=timeout)
+def _httpx_post_json(
+    url: str, payload: dict, timeout: float, headers: dict[str, str] | None
+) -> httpx.Response:
+    return httpx.post(url, json=payload, timeout=timeout, headers=headers)
 
 
 def post_json(
     url: str,
     *,
     payload: dict,
+    headers: dict[str, str] | None = None,
     timeout: float = DEFAULT_TIMEOUT,
     label: str | None = None,
     send: PostFn = _httpx_post_json,
@@ -228,7 +231,8 @@ def post_json(
     """JSON을 POST하고 응답 본문을 문자열로 돌려준다. 실패는 분류해 던진다.
 
     `label`을 넘기면 실패 메시지에 URL 대신 그 이름을 쓴다. URL이 비밀일 때
-    (슬랙 웹훅) 쓴다.
+    (슬랙 웹훅) 쓴다. `headers`는 키를 실을 때 쓴다(임베딩 API, 2026-11-23) —
+    헤더는 실패 메시지에 들어가지 않는다.
     """
-    response = _classified(lambda: send(url, payload, timeout), label=label or url)
+    response = _classified(lambda: send(url, payload, timeout, headers), label=label or url)
     return response.text

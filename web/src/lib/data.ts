@@ -1,5 +1,5 @@
 import { supabase } from './supabase'
-import type { Archive, ArchiveEntry, Article, Day } from './types'
+import type { Archive, ArchiveEntry, Article, Day, RelatedLink } from './types'
 
 // pipeline/summarize.py의 SCORE_THRESHOLD와 같은 값이다. **두 곳에 있다** —
 // 파이프라인에서 바꾸면 여기도 바꾼다. 화면의 "기준 60점" 표시에만 쓰이므로
@@ -69,7 +69,8 @@ export async function fetchDay(date: string): Promise<Day> {
   if (runs.error) fail(`${date}의 실행 기록을 읽지 못했다`, runs.error)
 
   const run = runs.data?.[0] ?? null
-  const rows = (articles.data ?? []) as unknown as Article[]
+  const rows = (articles.data ?? []) as unknown as Omit<Article, 'related'>[]
+  const related = await fetchRelated(rows.map((row) => row.id))
 
   // **이 줄이 "0건인 날"과 "없는 날짜"를 구별한다.**
   // 실행 기록이 있으면 파이프라인이 돌았고 기준을 넘긴 글이 없었던 것이다.
@@ -78,13 +79,53 @@ export async function fetchDay(date: string): Promise<Day> {
 
   return {
     date,
-    articles: rows,
+    articles: rows.map((row) => ({ ...row, related: related.get(row.id) ?? [] })),
     collected: run?.collected_count ?? null,
     considered: run?.considered_count ?? null,
     max_score: run?.max_score ?? null,
     threshold: THRESHOLD,
     source_counts: run?.source_counts ?? {},
   }
+}
+
+/**
+ * 글마다 이전에 다룬 비슷한 글(2026-11-23). article_links에서 관련 글의 날짜와
+ * 헤드라인을 FK로 함께 읽는다.
+ *
+ * **실패해도 페이지를 깨지 않는다.** 관련 글은 부가 정보다 — 조회가 실패하면
+ * (테이블이 아직 없거나 권한 문제) 관련 글만 빠지고 브리핑은 보인다.
+ */
+async function fetchRelated(ids: number[]): Promise<Map<number, RelatedLink[]>> {
+  const byArticle = new Map<number, RelatedLink[]>()
+  if (ids.length === 0) return byArticle
+
+  const { data, error } = await supabase
+    .from('article_links')
+    .select('article_id, similarity, related:articles!article_links_related_id_fkey(id, briefing_date, headline)')
+    .in('article_id', ids)
+    .order('similarity', { ascending: false })
+
+  if (error) {
+    console.warn('관련 글을 읽지 못했다(브리핑은 그대로 보인다):', error.message)
+    return byArticle
+  }
+
+  for (const row of (data ?? []) as unknown as {
+    article_id: number
+    similarity: number
+    related: { id: number; briefing_date: string; headline: string } | null
+  }[]) {
+    if (!row.related) continue
+    const list = byArticle.get(row.article_id) ?? []
+    list.push({
+      id: row.related.id,
+      date: row.related.briefing_date,
+      headline: row.related.headline,
+      similarity: row.similarity,
+    })
+    byArticle.set(row.article_id, list)
+  }
+  return byArticle
 }
 
 export async function fetchArchive(): Promise<Archive> {

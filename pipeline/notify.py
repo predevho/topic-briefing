@@ -30,6 +30,13 @@ from pipeline.lib.guard import (
 from pipeline.lib.config import Source, load_sources
 from pipeline.lib.kakao import KakaoTokens, access_token, rotated_expiry, should_store
 from pipeline.lib.llm import MODEL
+from pipeline.lib.related import (
+    EMBED_MODEL,
+    LINK_LIMIT,
+    LINK_THRESHOLD,
+    embed as voyage_embed,
+    embedding_text,
+)
 from pipeline.lib.retry import Permanent, Transient
 from pipeline.lib.secrets import optional, require
 from pipeline.lib.sender import ConsoleSender, KakaoSender, Sender
@@ -70,6 +77,7 @@ def notify(
     warn: Warn | None = None,
     sources: list[Source] | None = None,
     budget_usd: float | None = None,
+    embed: Callable[[list[str]], list[list[float]]] | None = None,
 ) -> None:
     """센더로 내보내고 이력을 남긴다. 0건도 내보내고, 실패해도 기록한다.
 
@@ -189,12 +197,13 @@ def notify(
             f"원인을 고친 뒤 그대로 재실행하면 된다. {detail}"
         )
 
+    saved_ids: list[int] = []
     if briefing.summaries:
         # 전송은 이미 됐다. 여기서 예외를 올리면 실행 기록이 남지 않고,
         # 재실행이 **이미 보낸 브리핑을 다시 보낸다.** 사용자에게 두 번
         # 가는 것이 페이지가 비는 것보다 나쁘다. 실패를 기록에 남기고 계속한다.
         try:
-            remote.save_articles(
+            saved_ids = remote.save_articles(
                 briefing_date=briefing_date,
                 summaries=briefing.summaries,
             )
@@ -208,6 +217,31 @@ def notify(
                 f"페이지 저장 실패 — 오늘 브리핑이 카톡에는 갔지만 페이지에 없다: "
                 f"{type(error).__name__}: {error}"
             )
+
+    # --- 관련 글 연결 (2026-11-23) ---
+    # 그날 글을 임베딩하고 더 이전 날짜의 비슷한 글을 잇는다. 브리핑은 이미
+    # 나갔다 — 실패해도 경고만 남긴다. 저장된 id가 없으면 이을 글이 없다.
+    if embed is not None and saved_ids:
+        try:
+            vectors = embed([
+                embedding_text(
+                    headline=summary.headline, overview=summary.overview,
+                    bullets=summary.bullets, why=summary.why_it_matters,
+                )
+                for summary in briefing.summaries
+            ])
+            remote.save_embeddings([
+                (article_id, EMBED_MODEL, vector)
+                for article_id, vector in zip(saved_ids, vectors)
+            ])
+            remote.link_related(saved_ids, LINK_THRESHOLD, LINK_LIMIT)
+        except Exception as error:  # noqa: BLE001 — 브리핑은 이미 나갔다
+            failures.append({
+                "source": "related",
+                "kind": "transient",
+                "message": f"{type(error).__name__}: {error}",
+            })
+            alert(f"관련 글 연결 실패 — 브리핑은 나갔다: {type(error).__name__}: {error}")
 
     # 0건이어도 반드시 남긴다. 남기지 않으면 다음 윈도우가 계속 늘어나
     # 같은 항목을 반복 평가하게 된다.
@@ -351,6 +385,18 @@ def build_kakao_sender(
     return KakaoSender(access_token=tokens.access_token, page_url=page_url)
 
 
+def _embedder(warn: Warn) -> Callable[[list[str]], list[list[float]]] | None:
+    """VOYAGE_API_KEY가 있으면 임베딩 함수를, 없으면 None을 돌려주고 알린다.
+
+    없다고 실행을 멈추지 않는다 — 관련 글 연결은 브리핑의 부가 기능이다.
+    """
+    key = optional("VOYAGE_API_KEY")
+    if not key:
+        warn("VOYAGE_API_KEY가 없다 — 관련 글 연결을 건너뛰었다(.env / Actions Secrets)")
+        return None
+    return lambda texts: voyage_embed(texts, api_key=key)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="브리핑 전송")
     parser.add_argument("--force", action="store_true",
@@ -392,6 +438,7 @@ def main() -> None:
             warn=collected.append,
             sources=load_sources(),
             budget_usd=read_budget(optional("MONTHLY_BUDGET_USD"), collected.append),
+            embed=_embedder(collected.append),
         )
     finally:
         # notify가 실패해도(모든 센더 실패 등) 그때까지 모은 경고는 보낸다.
