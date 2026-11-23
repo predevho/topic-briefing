@@ -61,3 +61,13 @@ Atlas에서 발급할 뿐이다. 벡터는 우리 Supabase에 저장된다.
 - 연결 함수 `link_related`: Postgres는 새 함수에 EXECUTE를 PUBLIC으로 준다 — anon·authenticated·
   PUBLIC에서 회수하고 service_role만 부른다.
 - 원문 본문(`article_bodies`)은 임베딩에 쓰지 않는다 — 공개 요약만 쓴다.
+- `article_links` 쓰기 권한: Supabase 기본 권한이 anon·authenticated에 insert·update·delete를 준다.
+  select 정책만 있어 RLS가 막지만, 권한 자체를 회수했다(정책 실수 하나로 열리지 않게).
+  `scripts/verify_anon_access.sh` 7번 항목이 링크 읽기·벡터 차단·링크 삽입 차단·함수 호출 차단을 점검한다.
+
+## 적용 결과 (2026-11-23)
+
+- 마이그레이션 적용, pgvector 0.8.2(`extensions` 스키마), anon 권한 점검 전부 통과.
+- 기존 35건 채우기: 8건씩 25초 간격으로 429 없이 완료, 링크 13개 — 실험과 같은 쌍이다.
+- 배포 페이지에서 "이전에 다룬 관련 글"이 보이고, 링크를 누르면 그날 페이지의 해당 카드로 이동한다.
+- 다음 확인: 내일(11/24) 실행에서 새 글 임베딩과 링크가 자동으로 생기는지.

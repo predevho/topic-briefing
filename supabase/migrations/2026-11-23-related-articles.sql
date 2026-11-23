@@ -27,6 +27,10 @@ create table if not exists public.article_links (
   constraint article_links_not_self check (article_id <> related_id)
 );
 alter table public.article_links enable row level security;
+-- Supabase 기본 권한이 anon에게 insert·update·delete까지 준다. RLS가 막지만
+-- 정책 하나 잘못 넣으면 바로 열리므로 권한 자체를 걷는다.
+revoke insert, update, delete, truncate, references, trigger
+  on public.article_links from anon, authenticated;
 grant select on public.article_links to anon, authenticated;
 drop policy if exists article_links_public_read on public.article_links;
 create policy article_links_public_read on public.article_links

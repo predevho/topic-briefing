@@ -153,6 +153,32 @@ case "$K" in
   *)     bad "예상 못 한 응답 (HTTP $C, code=$K)" ;;
 esac
 
+# --- 7. 관련 글 연결 (2026-11-23) ---
+# 링크(번호와 유사도)는 공개, 벡터는 비공개. 벡터는 요약에서 만든 것이라
+# 민감하진 않지만 페이지가 쓰지 않으므로 열 이유가 없다.
+echo
+echo "7. 관련 글 — 링크는 읽히고, 벡터·쓰기·함수 호출은 막혀야 한다"
+C=$(get article_links "article_id,similarity,related:articles!article_links_related_id_fkey(id,briefing_date,headline)")
+if [ "$C" = "200" ]; then note "✓ article_links (페이지가 쓰는 조인 그대로)"
+else bad "article_links가 안 읽힌다 (HTTP $C, $(code_of)) — 관련 글이 안 보인다"; fi
+
+C=$(get article_embeddings '*')
+if [ "$C" = "200" ]; then bad "article_embeddings가 읽힌다 (HTTP 200)"
+else note "✓ article_embeddings 차단 (HTTP $C, $(code_of))"; fi
+
+C=$(post article_links "{\"article_id\":$GHOST,\"related_id\":$((GHOST-1)),\"similarity\":1}")
+K=$(code_of)
+case "$K" in
+  42501) note "✓ article_links 삽입 차단 ($K)" ;;
+  23503) bad "article_links 쓰기가 열려 있다 ($K) — 아무나 링크를 심는다" ;;
+  *)     bad "article_links: 예상 못 한 응답 (HTTP $C, code=$K)" ;;
+esac
+
+# 빈 배열로 부른다. 통과하더라도 지우거나 만드는 행이 없다.
+C=$(post rpc/link_related '{"p_article_ids":[],"p_threshold":0.52,"p_limit":3}')
+if [ "$C" = "200" ] || [ "$C" = "204" ]; then bad "anon이 link_related를 부른다 (HTTP $C) — 링크를 지울 수 있다"
+else note "✓ link_related 호출 차단 (HTTP $C, $(code_of))"; fi
+
 echo
 if [ "$FAIL" = "0" ]; then
   echo "전부 통과. anon 권한이 설계대로다."
