@@ -48,6 +48,18 @@ BODY_MIN_CHARS = 200
 # (실측: 네이버 D2가 상위 10건에 3건) 10건이면 13.5초라 비용이 작다.
 REQUEST_DELAY = 1.5
 
+# --- 발췌 상한 (2026-11-23) ---
+#
+# GeekNews는 글 페이지가 우리 봇에 403이라 늘 300자대 발췌로만 요약된다.
+# 11/19~11/23 세 번 실행에서 최종 7건 중 3~5건이 그랬다 — 요약을 보강해도
+# 하루의 절반은 혜택을 못 받는다. 사용자 결정: 발췌 기반 후보는 하루 2건까지.
+
+# 요약 단계에 넘기는 후보 수. 요약은 이 중 최대 7건을 고른다.
+SUMMARY_CANDIDATES = 10
+
+# 후보 중 발췌 기반은 이만큼만. 점수가 높은 것부터 남긴다.
+MAX_EXCERPTS = 2
+
 # 글당 시도 횟수 (일시 실패에만 적용된다. 영구 실패는 1회로 끝난다.)
 ARTICLE_ATTEMPTS = 2
 
@@ -117,11 +129,29 @@ def enrich(
     fetch: FetchFn = http_fetch,
     sleep: SleepFn = time.sleep,
 ) -> ArticlesBundle:
-    """선별된 글의 본문을 확보한다. 실패는 발췌로 폴백한다."""
-    articles: list[Article] = []
-    total = len(ranked.selected)
+    """선별된 글의 본문을 확보한다. 실패는 발췌로 폴백한다.
 
-    for position, item in enumerate(ranked.selected):
+    점수 순서대로 가져오되 **발췌 기반 후보는 MAX_EXCERPTS건까지만** 받고,
+    후보가 SUMMARY_CANDIDATES건 차면 멈춘다. rank가 예비 후보까지 넘기므로
+    (TOP_N 14) 발췌를 뺀 자리를 다음 순위의 본문 있는 글이 채운다.
+
+    빼기만 하면 11/20처럼 후보 10건 중 6건이 발췌인 날은 후보가 6건으로 줄어
+    7건을 못 채운다. 발췌가 적은 평소에는 예비를 요청하지 않는다 — 요청 수가
+    전과 같다. 예비까지 다 써도 모자라면 있는 만큼만 넘긴다(지어서 채우지 않는다).
+    """
+    articles: list[Article] = []
+    excerpts = 0
+    requested = 0
+
+    for item in ranked.selected:
+        if len(articles) >= SUMMARY_CANDIDATES:
+            break
+
+        # 요청 사이에 쉰다. 첫 요청 앞과 마지막 요청 뒤에는 쉬지 않는다.
+        if requested:
+            sleep(REQUEST_DELAY)
+        requested += 1
+
         body, reason = _fetch_body(item.item.url, fetch=fetch, sleep=sleep)
 
         if body is not None:
@@ -137,16 +167,18 @@ def enrich(
             # 본문도 발췌도 없으면 요약할 재료가 없다. 이 건만 제외한다.
             continue
 
+        if body_source == "rss_excerpt":
+            if excerpts >= MAX_EXCERPTS:
+                # 발췌 상한. 다음 순위의 본문 있는 글이 이 자리를 채운다.
+                continue
+            excerpts += 1
+
         articles.append(Article(
             ranked=item,
             body=body[:BODY_MAX_CHARS],
             body_source=body_source,   # type: ignore[arg-type]
             fallback_reason=fallback_reason,
         ))
-
-        # 마지막 요청 뒤에는 쉬지 않는다.
-        if position < total - 1:
-            sleep(REQUEST_DELAY)
 
     return ArticlesBundle(
         window_start=ranked.window_start,

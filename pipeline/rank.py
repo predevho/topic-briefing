@@ -28,8 +28,10 @@ from pipeline.models import (
 # 어긋나면 normalize_topic이 멀쩡한 값을 other로 보낸다.
 TOPICS = frozenset(typing.get_args(Topic))
 
-# 본문을 가져올 건수. 03_enrich가 이 개수만 크롤링한다.
-TOP_N = 10
+# 본문을 가져올 후보 수. 요약 후보 10건(enrich.SUMMARY_CANDIDATES) + 예비 4건.
+# 예비는 발췌 기반 후보가 하루 2건(enrich.MAX_EXCERPTS)을 넘을 때 그 자리를
+# 채운다(2026-11-23). 발췌가 적은 날 enrich는 예비를 요청하지 않는다.
+TOP_N = 14
 
 # 같은 사건 중복 판정에 참고할 과거 범위.
 DEDUP_LOOKBACK_DAYS = 14

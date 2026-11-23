@@ -300,3 +300,88 @@ def test_분류되지_않은_예외는_삼키지_않는다():
 
 def test_요청_간격이_1초_이상이다():
     assert REQUEST_DELAY >= 1.0
+
+
+# --- 발췌 상한 (2026-11-23) ---
+#
+# GeekNews는 글 페이지가 우리 봇에 403이라 늘 300자대 발췌로만 요약된다.
+# 11/19~11/23 세 번 실행에서 최종 7건 중 3~5건이 그랬다 — 요약을 보강해도
+# 하루의 절반은 혜택을 못 받는다. 사용자 결정: 발췌 기반 후보는 하루 2건까지.
+#
+# 후보에서 빼기만 하면 11/20처럼 후보 10건 중 6건이 발췌인 날은 후보가 6건으로
+# 줄어 7건을 못 채운다. 그래서 rank가 예비 후보까지 넘기고(TOP_N 14), 여기서
+# 발췌가 2건을 넘으면 다음 순위의 본문 있는 글로 채워 후보 10건을 유지한다.
+
+from pipeline.enrich import MAX_EXCERPTS, SUMMARY_CANDIDATES
+
+
+def _fetch_failing_for(failing: set[int]):
+    """index가 failing에 있으면 403(→ 발췌 폴백), 아니면 본문을 준다."""
+    ok = _ok_fetch()
+    calls: list[str] = []
+
+    def fetch(url: str) -> FetchResult:
+        calls.append(url)
+        if int(url.rsplit("/", 1)[-1]) in failing:
+            raise Permanent(f"{url} HTTP 403")
+        return ok(url)
+
+    return fetch, calls
+
+
+def test_발췌_후보는_하루_2건까지다():
+    assert MAX_EXCERPTS == 2
+    assert SUMMARY_CANDIDATES == 10
+
+
+def test_rank가_예비_후보를_넘긴다():
+    """예비가 없으면 발췌를 뺀 자리를 채울 수 없다."""
+    from pipeline.rank import TOP_N
+
+    assert TOP_N >= SUMMARY_CANDIDATES + 4
+
+
+def test_발췌가_상한을_넘으면_다음_순위의_본문_있는_글로_채운다():
+    """11/20 실측 모양: 앞쪽 후보에 발췌가 몰려 있다."""
+    items = [_ranked(i) for i in range(14)]
+    fetch, _ = _fetch_failing_for({0, 1, 2, 3})       # 상위 4건이 발췌
+
+    bundle, _ = _enrich(items, fetch=fetch)
+
+    sources = [a.body_source for a in bundle.articles]
+    assert len(bundle.articles) == SUMMARY_CANDIDATES
+    assert sources.count("rss_excerpt") == MAX_EXCERPTS
+    # 점수가 높은 발췌 2건(0, 1)이 남고 2, 3은 빠진다. 빈자리는 10, 11이 채운다.
+    kept = [int(a.ranked.item.url.rsplit("/", 1)[-1]) for a in bundle.articles]
+    assert kept == [0, 1, 4, 5, 6, 7, 8, 9, 10, 11]
+
+
+def test_후보가_차면_예비는_요청하지_않는다():
+    """발췌가 적은 평소에는 요청이 전과 같다(10건)."""
+    items = [_ranked(i) for i in range(14)]
+    fetch, calls = _fetch_failing_for(set())
+
+    bundle, _ = _enrich(items, fetch=fetch)
+
+    assert len(bundle.articles) == SUMMARY_CANDIDATES
+    assert len(calls) == SUMMARY_CANDIDATES
+
+
+def test_발췌가_상한_이하면_그대로_둔다():
+    items = [_ranked(i) for i in range(14)]
+    fetch, _ = _fetch_failing_for({2, 7})
+
+    bundle, _ = _enrich(items, fetch=fetch)
+
+    assert [a.body_source for a in bundle.articles].count("rss_excerpt") == 2
+    assert len(bundle.articles) == SUMMARY_CANDIDATES
+
+
+def test_예비까지_다_써도_모자라면_있는_만큼만_넘긴다():
+    """지어서 채우지 않는다 — 후보가 9건이면 9건이다."""
+    items = [_ranked(i) for i in range(12)]
+    fetch, _ = _fetch_failing_for({0, 1, 2, 3, 4})     # 12건 중 5건 발췌
+
+    bundle, _ = _enrich(items, fetch=fetch)
+
+    assert len(bundle.articles) == 12 - 5 + MAX_EXCERPTS   # 9
